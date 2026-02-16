@@ -1,0 +1,17 @@
+# Normalize line endings to LF on checkout
+* text=auto eol=lf
+
+# Explicitly declare text files
+*.tex text eol=lf
+*.md  text eol=lf
+*.txt text eol=lf
+*.bib text eol=lf
+
+# Explicitly declare binary files (no line-ending conversion)
+*.pdf  binary
+*.png  binary
+*.jpg  binary
+*.ttf  binary
+*.otf  binary
+*.zip  binary
+*.docx binary
