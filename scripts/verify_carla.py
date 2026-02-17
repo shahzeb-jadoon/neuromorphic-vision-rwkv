@@ -4,16 +4,43 @@ Prerequisites:
     1. CARLA 0.9.16 server running on Windows host.
     2. conda activate rwkv
     3. pip install carla==0.9.16
+
+Note:
+    WSL2 runs in a lightweight VM — 'localhost' refers to WSL2 itself,
+    not the Windows host. The Windows host IP is the default gateway
+    of the WSL2 virtual network, obtained via `ip route`.
+    This IP can change on every WSL restart.
 """
+import subprocess
 import sys
+
 import carla
 
 
+def get_windows_host_ip():
+    """Get the Windows host IP from WSL2's default gateway."""
+    try:
+        result = subprocess.run(
+            ["ip", "route", "show", "default"],
+            capture_output=True, text=True, check=True,
+        )
+        # Output: "default via 172.20.0.1 dev eth0"
+        return result.stdout.strip().split()[2]
+    except (subprocess.CalledProcessError, IndexError):
+        return None
+
+
 def main():
-    host = "localhost"
+    host = get_windows_host_ip()
+    if host is None:
+        print("ERROR: Could not detect Windows host IP from WSL2 gateway.")
+        print("       Falling back to localhost (may not work in WSL2).")
+        host = "localhost"
+
     port = 2000
     timeout = 10.0
 
+    print(f"Windows host:   {host}")
     print(f"Connecting to CARLA server at {host}:{port} ...")
 
     try:
@@ -39,7 +66,9 @@ def main():
         print("Troubleshooting:")
         print("  1. Is CARLA server running on Windows? (CarlaUE4.exe)")
         print("  2. Is it listening on port 2000?")
-        print("  3. Can WSL2 reach Windows localhost? (try: curl localhost:2000)")
+        print(f"  3. Can WSL2 reach Windows host? (try: curl {host}:2000)")
+        print(f"  4. Detected host IP: {host}")
+        print("  5. If IP is wrong, check: ip route show default")
         sys.exit(1)
 
 
