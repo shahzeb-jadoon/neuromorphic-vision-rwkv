@@ -23,6 +23,28 @@
 *-blx.bib
 
 # =============================================================================
+# Python Artifacts
+# =============================================================================
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+
+# =============================================================================
+# ML Artifacts (large, machine-specific — never commit)
+# =============================================================================
+*.pt
+*.pth
+*.ckpt
+*.h5
+*.hdf5
+wandb/
+runs/
+checkpoints/
+datasets/
+
+# =============================================================================
 # Reference Papers (kept locally, not tracked — copyright compliance)
 # =============================================================================
 references/
@@ -46,6 +68,7 @@ Desktop.ini
 
 # VS Code
 .vscode/
+.venv/
 
 # JetBrains
 .idea/
@@ -62,3 +85,4 @@ Desktop.ini
 # Local-only Reference Files
 # =============================================================================
 docs/HARDWARE_INVENTORY.md
+docs/SETUP_LOG.md

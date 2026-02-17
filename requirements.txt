@@ -1,0 +1,37 @@
+# requirements.txt — Direct dependencies only (pinned versions)
+# Generated: 2026-02-16 | Python 3.11.14 | CUDA 12.4
+#
+# Install with:
+#   pip install -r requirements.txt --extra-index-url https://download.pytorch.org/whl/cu124
+#
+# For the full transitive lockfile, see requirements-lock.txt
+
+# --- PyTorch (CUDA 12.4) ---
+torch==2.6.0+cu124
+torchvision==0.21.0+cu124
+torchaudio==2.6.0+cu124
+
+# --- Data & Storage ---
+h5py==3.15.1
+numpy==2.3.5
+pillow==12.0.0
+scipy==1.17.0
+
+# --- ML Utilities ---
+einops==0.8.2
+scikit-learn==1.8.0
+
+# --- Logging & Visualization ---
+tensorboard==2.20.0
+wandb==0.25.0
+matplotlib==3.10.8
+tqdm==4.67.3
+
+# --- Config ---
+pyyaml==6.0.3
+
+# --- Simulator ---
+carla==0.9.16
+
+# --- RWKV ---
+rwkv==0.8.32
