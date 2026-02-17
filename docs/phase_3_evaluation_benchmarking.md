@@ -94,7 +94,7 @@ This phase shifts from building to measuring. You will:
 
 ### 3.5 — Neuromorphic Alignment Analysis (Week 10)
 
-**Objective:** Compute the Accumulate-and-Fire Efficiency (η_AF) metric and analyze state sparsity.
+**Objective:** Compute the Accumulate-and-Fire Efficiency (η_AF) metric and analyze state sparsity — with cross-architecture baselines for context.
 
 **Tasks:**
 - [ ] Implement η_AF computation:
@@ -102,11 +102,19 @@ This phase shifts from building to measuring. You will:
   η_AF = (1 / (T × L × C)) × Σ_{t,l,c} 𝟙(|K·V·σ(g)| < ε)
   ```
   where ε = 10⁻⁴, T = timesteps, L = layers, C = channels
-- [ ] Run η_AF on evaluation episodes, report mean ± std
-- [ ] Target: η_AF > 60% (from the plan)
+- [ ] **Compute η_AF for ALL models** (not just RWKV):
+  - RWKV-7/6: Apply formula directly to WKV state updates
+  - LSTM baseline: Track gate activations near 0 or 1 (saturated ≈ silent) as analogous metric
+  - Transformer baseline: Track attention weights below threshold (sparse attention ≈ low activity)
+  - CNN baseline: Track activation sparsity in final feature maps
+- [ ] Run η_AF on evaluation episodes, report mean ± std for each architecture
+- [ ] Target: η_AF > 60% for RWKV (from the plan)
+- [ ] Expected baselines: Transformer ~10-15%, LSTM ~30-40%, CNN ~20-30% — RWKV should significantly exceed all
 - [ ] Generate state activation heatmaps: layer × time visualizations showing which state channels are "silent" (below threshold)
 - [ ] Analyze per-layer sparsity: do deeper layers have higher or lower η_AF?
 - [ ] Discuss implications for neuromorphic conversion: high η_AF means many state updates can be skipped on spiking hardware
+- [ ] **Context**: Biological neurons are silent 90-99% of the time. RWKV's target of 60%+ is meaningful but not near biological efficiency — this positions the work as a step toward neuromorphic deployment rather than an endpoint
+- [ ] **Research question**: Does higher η_AF correlate with lower energy consumption on neuromorphic hardware (Akida)? If Phase IV Akida deployment succeeds, this can be empirically tested
 
 **Key code artifact:** `src/evaluation/neuromorphic_analysis.py`
 

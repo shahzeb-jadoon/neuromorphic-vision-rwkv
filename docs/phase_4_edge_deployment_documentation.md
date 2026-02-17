@@ -23,6 +23,18 @@ This is the final phase. You will:
 
 **Objective:** Reduce model size and precision for Jetson deployment.
 
+#### Jetson Memory Budget
+
+```
+Jetson Orin Nano: 8 GB unified memory
+├── OS + drivers:                    ~1.5 GB
+├── Model weights (FP16, ~170M params): ~0.34 GB
+├── RWKV state (12 layers, FP16):    ~0.014 GB (14 MB)
+├── Input buffers (3 frames):        ~0.05 GB
+├── Output/workspace:                ~0.5 GB
+└── Available headroom:              ~5.6 GB  ✓
+```
+
 **Tasks:**
 - [ ] **FP16 conversion:** Convert trained FP32 model to FP16
   - Most straightforward — typically ~2× memory reduction with minimal accuracy loss
@@ -74,6 +86,7 @@ This is the final phase. You will:
 | laptop GPU | FP16 | ? | ? | — | ? |
 | Jetson Orin Nano | FP16 | ? | ? | ? | ? |
 | Jetson Orin Nano | INT8 | ? | ? | ? | ? |
+| Akida PCIe (sim) | INT8/SNN | ? | ? | ? | ? |
 
 **Key code artifact:** `src/evaluation/jetson_profiler.py`
 
@@ -92,7 +105,28 @@ This is the final phase. You will:
   - Power consumption
 - [ ] This becomes the demo video
 
-### 4.5 — Technical Report (Week 12)
+### 4.5 — BrainChip Akida Deployment (Alternative Neuromorphic Target)
+
+**Objective:** Evaluate the trained RWKV model on BrainChip Akida neuromorphic hardware as a complementary deployment target.
+
+**Background:** BrainChip's MetaTF SDK and CNN2SNN conversion tool are actively maintained (Python 3.12, Akida 2.0 natively supports ViT architectures). The Akida platform is purpose-built for spiking neural networks, making it a natural fit for RWKV given the LIF ↔ RWKV correspondence established in the literature review.
+
+**Tasks:**
+- [ ] Install MetaTF SDK and CNN2SNN tools
+- [ ] Run MetaTF compatibility check on trained RWKV model — get compatibility score
+- [ ] If compatible (score > 70%): use CNN2SNN to convert dense RWKV to spiking version
+  - Leverage the LIF correspondence: RWKV state decay maps to SNN leak time constants
+  - Replace sigmoid activations with spike generators
+  - Quantize to INT8 (required for Akida hardware)
+- [ ] Profile on Akida hardware simulator: latency, power, throughput
+- [ ] If actual Akida hardware is available: deploy and measure real performance
+- [ ] Compare Akida vs. Jetson across all metrics
+
+**Key code artifact:** `src/deployment/akida_conversion.py`
+
+**Strategy:** Pursue **both** Jetson and Akida, report whichever works better. If both succeed, the comparative analysis (GPU vs. neuromorphic) is an additional research contribution. If Akida conversion fails (compatibility too low), document the failure mode and incompatible layers — this is still a useful finding.
+
+### 4.6 — Technical Report (Week 12)
 
 **Objective:** Complete the final project report.
 
@@ -111,7 +145,7 @@ This is the final phase. You will:
 - [ ] Bibliography complete and accurate
 - [ ] Proofread for grammar, clarity, consistency
 
-### 4.6 — Demo Video (Week 12)
+### 4.7 — Demo Video (Week 12)
 
 **Objective:** 3-5 minute video showcasing the project.
 
@@ -125,7 +159,7 @@ This is the final phase. You will:
 7. Jetson deployment — live demo or profiling results (30 seconds)
 8. Key results summary (15 seconds)
 
-### 4.7 — Open-Source Release (Week 12)
+### 4.8 — Open-Source Release (Week 12)
 
 **Objective:** Prepare repository for public release.
 
