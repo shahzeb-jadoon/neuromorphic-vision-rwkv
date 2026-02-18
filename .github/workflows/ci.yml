@@ -27,15 +27,34 @@ jobs:
           pip install -e ".[dev]"
 
       - name: Lint with flake8
-        run: flake8 src/ --max-line-length=100 --extend-ignore=E203,W503
+        run: |
+          if [ -d src ]; then
+            flake8 src/ --max-line-length=100 --extend-ignore=E203,W503
+          else
+            echo "src/ not found — skipping lint (expected until Phase 1)"
+          fi
 
       - name: Format check with black
-        run: black --check --line-length 100 src/
+        run: |
+          if [ -d src ]; then
+            black --check --line-length 100 src/
+          else
+            echo "src/ not found — skipping format check (expected until Phase 1)"
+          fi
 
       - name: Type check with mypy
-        run: mypy src/ --config-file pyproject.toml
+        run: |
+          if [ -d src ]; then
+            mypy src/ --config-file pyproject.toml
+          else
+            echo "src/ not found — skipping type check (expected until Phase 1)"
+          fi
         continue-on-error: true  # Don't block CI during initial development
 
       - name: Run unit tests
-        run: pytest tests/ -v --cov=src/ --cov-report=term-missing
-        if: hashFiles('tests/') != ''
+        run: |
+          if [ -d tests ]; then
+            pytest tests/ -v --cov=src/ --cov-report=term-missing
+          else
+            echo "tests/ not found — skipping tests (expected until Phase 1)"
+          fi
