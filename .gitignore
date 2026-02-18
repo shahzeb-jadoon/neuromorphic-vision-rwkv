@@ -43,6 +43,7 @@ wandb/
 runs/
 checkpoints/
 datasets/
+/data/
 
 # =============================================================================
 # Reference Papers (kept locally, not tracked — copyright compliance)
@@ -86,4 +87,5 @@ Desktop.ini
 # =============================================================================
 docs/HARDWARE_INVENTORY.md
 docs/SETUP_LOG.md
+docs/FUTURE_CONSIDERATIONS.md
 docs/archive/

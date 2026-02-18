@@ -49,7 +49,7 @@ jobs:
           else
             echo "src/ not found — skipping type check (expected until Phase 1)"
           fi
-        continue-on-error: true  # Don't block CI during initial development
+
 
       - name: Run unit tests
         run: |
