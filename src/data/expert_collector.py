@@ -591,7 +591,7 @@ class ExpertDataCollector:
                 "images",
                 data=images,
                 compression="gzip",
-                compression_opts=4,
+                compression_opts=1,  # Level 1 = fastest decompression, ~same ratio
                 chunks=(1, config.camera_height, config.camera_width, 3),
             )
             f.create_dataset("steering", data=steering)
