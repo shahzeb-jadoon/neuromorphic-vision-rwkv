@@ -1,0 +1,68 @@
+# Collection configuration — defaults for data collection campaign
+# Override via CLI flags or by specifying a different config file
+
+carla:
+  host: auto           # "auto" = detect Windows host IP from WSL2 gateway
+  port: 2000
+  timeout: 30.0
+  fps: 20              # Fixed timestep = 0.05s
+  synchronous: true
+
+camera:
+  width: 224
+  height: 224
+  fov: 100
+
+# Towns for data collection (Town02 reserved for evaluation)
+towns:
+  - Town01
+  - Town03
+  - Town04
+  - Town05
+
+# Weather presets to cycle through
+weathers:
+  - ClearNoon
+  - CloudyNoon
+  - WetNoon
+  - SoftRainNoon
+  - HardRainNoon
+  - ClearSunset
+  - CloudySunset
+  - WetSunset
+  - MidRainyNoon
+  - SoftRainSunset
+
+# Traffic density settings
+traffic:
+  vehicles: [20, 50, 100]     # Sparse, medium, dense
+  walkers: [10, 30, 50]
+
+# Route generation
+routes:
+  strategy: balanced           # "random" or "balanced"
+  target_distribution:
+    lane_follow: 0.60
+    left: 0.15
+    right: 0.15
+    straight: 0.10
+  min_route_length: 100        # Minimum waypoints
+  max_route_length: 500        # Maximum waypoints
+
+# Episode settings
+episode:
+  max_frames: 2000             # ~100 seconds at 20 FPS
+  timeout_speed: 0.1           # m/s — below this for timeout_duration → discard
+  timeout_duration: 180        # seconds stuck before timeout
+  crash_retries: 3             # CARLA reconnection attempts
+  crash_wait: 30               # seconds to wait between retries
+
+# Output
+output:
+  directory: data/collected
+  compression: gzip
+  compression_level: 4
+  manifest: collection_manifest.json
+
+# Reproducibility
+seed: 42

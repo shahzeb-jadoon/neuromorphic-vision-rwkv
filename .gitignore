@@ -43,6 +43,7 @@ wandb/
 runs/
 checkpoints/
 datasets/
+/data/
 
 # =============================================================================
 # Reference Papers (kept locally, not tracked — copyright compliance)
