@@ -58,6 +58,7 @@ class EpisodeConfig:
     camera_width: int = 224
     camera_height: int = 224
     camera_fov: int = 100
+    steering_noise_std: float = 0.0  # σ for Gaussian noise injection (0 = disabled)
 
 
 @dataclass
@@ -190,9 +191,9 @@ class ExpertDataCollector:
 
         Compares the vehicle's forward vector with the direction to a
         lookahead waypoint. The angle between them determines the nav command:
-            - |angle| < 15°  → LaneFollow (0)
-            - angle < -15°   → Left (1)
-            - angle > 15°    → Right (2)
+            - |angle| < 10°  → LaneFollow (0)
+            - angle < -10°   → Left (1)
+            - angle > 10°    → Right (2)
             - Near junction with small angle → Straight (3)
 
         Args:
@@ -238,7 +239,7 @@ class ExpertDataCollector:
         at_junction = waypoint.is_junction
 
         # Classify
-        threshold = 15.0
+        threshold = 10.0
         if abs(angle_deg) < threshold:
             if at_junction:
                 return 3  # Straight (through junction)
@@ -260,8 +261,10 @@ class ExpertDataCollector:
 
         Args:
             config: Episode configuration.
-            route_waypoints: Optional pre-computed route (currently unused
-                with autopilot; reserved for future BehaviorAgent support).
+            route_waypoints: Optional pre-computed route. When provided,
+                the TrafficManager autopilot follows this path instead
+                of its default pathfinding, ensuring balanced turn
+                distributions from the BalancedRouteGenerator.
 
         Returns:
             EpisodeResult with status and metadata.
@@ -333,6 +336,16 @@ class ExpertDataCollector:
             # Enable autopilot via TrafficManager
             vehicle.set_autopilot(True, traffic_manager.get_port())
 
+            # If a balanced route was provided, instruct the TrafficManager
+            # to follow it instead of choosing its own path
+            if route_waypoints:
+                path = [transform.location for transform, _ in route_waypoints]
+                traffic_manager.set_path(vehicle, path)
+                logger.info(
+                    "Set custom route with %d waypoints for autopilot",
+                    len(path),
+                )
+
             # Configure ego driving behavior
             traffic_manager.auto_lane_change(vehicle, True)
             traffic_manager.ignore_lights_percentage(vehicle, 0.0)  # Obey traffic lights
@@ -375,7 +388,7 @@ class ExpertDataCollector:
             actors.append(collision_sensor)
             collision_detected = [False]  # Mutable for closure
 
-            def on_collision(event):
+            def on_collision(event: Any) -> None:
                 collision_detected[0] = True
 
             collision_sensor.listen(on_collision)
@@ -417,7 +430,17 @@ class ExpertDataCollector:
 
                 # Get controls applied by autopilot
                 control = vehicle.get_control()
-                steering_buf.append(float(control.steer))
+                steering_val = float(control.steer)
+
+                # Noise injection for implicit recovery demonstrations.
+                # When enabled, we perturb the *recorded* steering so the
+                # model observes slightly off-policy states while the expert
+                # (autopilot) naturally corrects on the next frame.
+                if config.steering_noise_std > 0:
+                    noise = np.random.normal(0, config.steering_noise_std)
+                    steering_val = float(np.clip(steering_val + noise, -1.0, 1.0))
+
+                steering_buf.append(steering_val)
                 throttle_buf.append(float(control.throttle))
                 brake_buf.append(float(control.brake))
 
@@ -657,7 +680,8 @@ class CollectionManifest:
         """Load existing manifest or create empty."""
         if self.path.exists():
             with open(self.path) as f:
-                return json.load(f)
+                data: dict[str, Any] = json.load(f)
+                return data
         return {
             "created": datetime.now(timezone.utc).isoformat(),
             "total_episodes": 0,

@@ -161,9 +161,9 @@ class TestInferNavCommand:
         assert result == 0
 
     def test_boundary_angle_just_below_threshold(self) -> None:
-        """Angle just below 15° threshold → LaneFollow (0)."""
-        # target at 14° (below 15° threshold)
-        angle = 14.0
+        """Angle just below 10° threshold → LaneFollow (0)."""
+        # target at 9° (below 10° threshold)
+        angle = 9.0
         rad = math.radians(angle)
         veh_tf, wp, cmap = _make_scenario(
             veh_x=0,
@@ -174,11 +174,11 @@ class TestInferNavCommand:
             target_y=10 * math.sin(rad),
         )
         result = ExpertDataCollector._infer_nav_command(veh_tf, wp, cmap)
-        assert result == 0, f"14° should be LaneFollow (0), got {result}"
+        assert result == 0, f"9° should be LaneFollow (0), got {result}"
 
     def test_boundary_angle_just_above_threshold(self) -> None:
-        """Angle just above 15° threshold → Right (2)."""
-        angle = 16.0
+        """Angle just above 10° threshold → Right (2)."""
+        angle = 11.0
         rad = math.radians(angle)
         veh_tf, wp, cmap = _make_scenario(
             veh_x=0,
@@ -189,7 +189,7 @@ class TestInferNavCommand:
             target_y=10 * math.sin(rad),
         )
         result = ExpertDataCollector._infer_nav_command(veh_tf, wp, cmap)
-        assert result == 2, f"16° should be Right (2), got {result}"
+        assert result == 2, f"11° should be Right (2), got {result}"
 
     def test_moderate_left_angle(self) -> None:
         """Angle of -45° (moderate left) → Left (1)."""
