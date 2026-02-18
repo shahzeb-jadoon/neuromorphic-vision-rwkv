@@ -61,7 +61,7 @@ episode:
 output:
   directory: data/collected
   compression: gzip
-  compression_level: 4
+  compression_level: 1
   manifest: collection_manifest.json
 
 # Reproducibility
