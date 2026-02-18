@@ -140,6 +140,33 @@ This phase shifts from building to measuring. You will:
 | K=0 (no burn-in) | ? | ? | ? |
 | 6 layers | ? | ? | ? |
 
+### 3.7 — DAgger Recovery Training (After Closed-Loop Evaluation)
+
+**Objective:** Mitigate distribution drift via iterative data aggregation, now that the closed-loop evaluation pipeline (Step 3.1) is available.
+
+**Prerequisite:** Step 3.1 (closed-loop evaluation) must be functional — DAgger requires running the trained agent in CARLA and detecting deviation states.
+
+**Why this is in Phase III, not Phase II:** DAgger's core loop requires:
+1. A trained model (from Phase II)
+2. Running that model in CARLA closed-loop (Step 3.1's evaluation pipeline)
+3. Measuring where the model deviates from the expert (deviation detection)
+4. Collecting expert corrections at those deviation points
+
+Steps 2-3 depend on the closed-loop evaluation infrastructure built in this phase. Phase II uses steering noise injection as a simpler, dependency-free alternative that provides implicit recovery demonstrations.
+
+**Tasks:**
+- [ ] After initial closed-loop evaluation identifies failure patterns, run the trained agent in CARLA
+- [ ] Record states where the agent deviates from expert (steering difference > 0.3 rad)
+- [ ] Collect recovery demonstrations: re-run expert from those deviated states (or use expert correction overlay)
+- [ ] Mix recovery data (10-20% of total dataset) back into training set
+- [ ] Retrain for 10 additional epochs on augmented dataset
+- [ ] Repeat DAgger loop 1-3 times, measuring route completion improvement each round
+- [ ] Compare pre-DAgger vs. post-DAgger performance in the same evaluation protocol
+
+**Key code artifact:** `src/training/dagger.py`
+
+**Expected impact:** DAgger typically improves route completion by 5-15% by exposing the model to recovery scenarios that pure imitation learning never encounters.
+
 ---
 
 ## Completion Criteria
@@ -153,3 +180,4 @@ All of the following must be true before starting Phase IV:
 5. At least 3 ablation studies completed
 6. All comparison tables and key figures generated
 7. Results are reproducible (evaluation scripts committed with fixed seeds)
+8. At least 1 round of DAgger recovery training completed and compared

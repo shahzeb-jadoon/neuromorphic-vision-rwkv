@@ -13,7 +13,7 @@ This is the core ML engineering phase. You will:
 - **Vision encoder** — Implement patch tokenization with Q-Shift (3 stages: frozen pretrained → fine-tuned → from-scratch)
 - **RWKV encoder** — Build the RWKV-7 encoder with data-dependent decay (attempt-first-then-pivot to RWKV-6)
 - **Full pipeline** — Assemble tokenizer → encoder → LICA fusion → policy head
-- **Training** — Implement TBPTT with burn-in, DAgger recovery training, crash-safe checkpointing
+- **Training** — Implement TBPTT with burn-in, steering noise injection for implicit recovery, crash-safe checkpointing
 - **Baselines** — Train CNN, Transformer, and LSTM baselines with identical protocol
 
 ### Branching Strategy for Concurrent Experiments
@@ -118,10 +118,11 @@ class RWKVEncoder(nn.Module):
 - [ ] Implement `LICA` (Linear Cross-Attention): fuses visual features with nav command embedding
   - Nav command → learned embedding (dim 64)
   - Linear cross-attention: visual features attend to nav embedding without quadratic cost
-- [ ] Implement `PolicyHead`: MLP that outputs [steer, throttle]
+- [ ] Implement `PolicyHead`: MLP that outputs [steer, acceleration]
   - Architecture: Linear(D, 256) → ReLU → Linear(256, 64) → ReLU → Linear(64, 2)
   - Steering: tanh activation (range [-1, 1])
-  - Throttle: sigmoid activation (range [0, 1])
+  - Acceleration: tanh activation (range [-1, 1]), where positive = throttle, negative = brake
+  - This merged axis avoids the throttle-brake conflict in expert data and follows standard practice in imitation learning literature
 - [ ] Optional: velocity prediction auxiliary head for improved representation learning
 
 **Key code artifacts:** `src/models/fusion.py`, `src/models/policy_head.py`
@@ -132,7 +133,7 @@ class RWKVEncoder(nn.Module):
 
 **Tasks:**
 - [ ] Implement `VisionRWKVDriver` that composes: PatchEmbedding → QShift → RWKVEncoder → LICA → PolicyHead
-- [ ] Verify forward pass end-to-end: input (B, T, 3, 224, 224) → output (B, T, 2)
+- [ ] Verify forward pass end-to-end: input (B, T, 3, 224, 224) → output (B, T, 2) where output is [steer, acceleration]
 - [ ] Implement model config via YAML (see `configs/`)
 - [ ] Config flag: `use_pretrained_vision` controls Stage 1/2 vs Stage 3 tokenizer
 
@@ -172,7 +173,7 @@ class VisionRWKVDriver(nn.Module):
 **Tasks:**
 - [ ] Implement `Trainer` class with TBPTT
 - [ ] Burn-in: first K=20 frames of each clip run forward-only (no gradient) to warm up state
-- [ ] Loss: MSE on steering + throttle predictions (after burn-in frames only)
+- [ ] Loss: MSE on steering + acceleration predictions (after burn-in frames only)\n  - Training target: `acceleration = expert_throttle - expert_brake`
 - [ ] Optimizer: AdamW, lr=1e-4, weight_decay=0.01
 - [ ] LR schedule: linear warmup (1000 steps) + cosine decay
 - [ ] Gradient clipping: max_norm=1.0
@@ -203,24 +204,27 @@ Training runs may be interrupted by OOM, hardware issues, or power loss. The che
 
 - Project: `neuromorphic-vision-rwkv`, entity: your personal W&B username
 - Run naming convention: `{model_name}_{timestamp}` (e.g., `vrwkv_base_20260301_143022`)
-- Log: loss components (steer MSE + throttle MSE), gradient norms, learning rate, epoch, val predictions vs. ground truth
+- Log: loss components (steer MSE + acceleration MSE), gradient norms, learning rate, epoch, val predictions vs. ground truth
 - Tags: `[rwkv-7, carla, imitation-learning]` (update tag to `rwkv-6` if pivoting)
 
-### 2.5b — DAgger Recovery Training (After Initial Convergence)
+### 2.5b — Steering Noise Injection (During Data Collection)
 
-**Objective:** Mitigate distribution drift via DAgger-like iterative data augmentation.
+**Objective:** Mitigate distribution drift without requiring a closed-loop evaluation pipeline (which is built in Phase III).
+
+**Rationale:** Full DAgger requires running the trained agent in CARLA and measuring deviations — this depends on the closed-loop evaluation pipeline (Phase III, Step 3.1). Instead, we use a simpler Phase 2 alternative: inject Gaussian noise into expert steering during data collection. This creates "slightly wrong" states that the expert then corrects from naturally, giving the model implicit recovery demonstrations without needing a running agent.
 
 **Tasks:**
-- [ ] After initial imitation learning converges, run the trained agent in CARLA closed-loop
-- [ ] Record states where the agent deviates from expert (steering difference > 0.3 rad)
-- [ ] Collect recovery demonstrations: re-run expert from those deviated states (or use expert correction overlay)
-- [ ] Mix recovery data (10-20% of total dataset) back into training set
-- [ ] Retrain for 10 additional epochs on augmented dataset
-- [ ] Also during initial data collection: add Gaussian noise (σ=0.05) to expert steering for implicit recovery demonstrations
+- [ ] Add `steering_noise_std` parameter to `EpisodeConfig` (default σ=0.05)
+- [ ] During data collection, apply noise to the recorded steering signal: `steering_noisy = steering + N(0, σ)`, clamped to [-1, 1]
+- [ ] Store the *noisy* steering as the "observation" and the *clean* expert steering as the "label" — the model learns to correct back toward the expert action
+- [ ] Collect ~20% of episodes with noise enabled, 80% clean
+- [ ] Validate that noise magnitude doesn't cause unsafe driving (σ=0.05 ≈ 3° perturbation)
 
-**Key code artifact:** `src/training/dagger.py`
+**Key code artifact:** `src/data/expert_collector.py` (noise injection in `collect_episode`)
 
-**Why DAgger matters:** Pure imitation learning trains on expert-quality data, but at inference time the agent makes small errors that compound over time (distribution drift). DAgger exposes the model to recovery scenarios during training.
+**Why this works:** Noise injection is a well-established technique in imitation learning (Ross & Bagnell, 2010). It exposes the model to off-policy states without the engineering overhead of DAgger's iterative data collection loop. Full DAgger can be applied in Phase III once closed-loop evaluation exists.
+
+> **Note:** Full DAgger recovery training is deferred to Phase III (Step 3.7) where the closed-loop evaluation pipeline provides the required deviation detection.
 
 ### 2.6 — Training Run (Week 6–7)
 
@@ -230,7 +234,7 @@ Training runs may be interrupted by OOM, hardware issues, or power loss. The che
 - [ ] Run initial training on laptop (small batch, 1-2 epochs) to verify pipeline correctness
 - [ ] Transfer to the 24 GB workstation for full training
 - [ ] Train for 50+ epochs with early stopping (patience=10 on val loss)
-- [ ] Monitor: loss curves, steering/throttle prediction distributions, gradient norms
+- [ ] Monitor: loss curves, steering/acceleration prediction distributions, gradient norms
 - [ ] Batch size: 16-32 sequences (each 32 frames) — adjust based on memory profiling results (Step 2.4b)
 - [ ] Expected training time: ~30-50 GPU-hours on workstation GPU (24 GB)
 
@@ -348,8 +352,8 @@ All of the following must be true before starting Phase III:
 3. Val loss shows improvement and early stopping hasn't triggered too early
 4. All 3 baselines trained with same protocol
 5. Checkpointing implemented and tested for model resumption
-6. DAgger recovery training completed (at least 1 round)
+6. Steering noise injection implemented and validated (σ=0.05, ~20% of episodes)
 7. Memory profiling completed — batch size validated for target GPU
 8. Training curves logged in W&B and visually inspected
-9. Forward pass verified: (B, T, 3, 224, 224) → (B, T, 2) with correct ranges
+9. Forward pass verified: (B, T, 3, 224, 224) → (B, T, 2) where output = [steer, acceleration ∈ [-1, 1]]
 10. At least 2 vision tokenization stages compared (pretrained vs from-scratch)
