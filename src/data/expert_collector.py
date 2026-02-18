@@ -1,7 +1,12 @@
 """Expert data collector for CARLA autonomous driving episodes.
 
-Uses CARLA's BehaviorAgent to drive expert routes while recording
-per-frame observations (camera, controls, navigation) to HDF5 files.
+Uses CARLA's built-in autopilot (TrafficManager) to drive expert routes
+while recording per-frame observations (camera, controls, navigation)
+to HDF5 files.
+
+NOTE: We use set_autopilot(True) + TrafficManager rather than
+BehaviorAgent because the `agents` Python module ships only with the
+CARLA server distribution, not the pip package (`carla==0.9.16`).
 
 Handles three failure modes:
     - CARLA crash recovery (reconnect with retries)
@@ -14,6 +19,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import math
 import queue
 import time
 import traceback
@@ -27,7 +33,6 @@ import numpy as np
 
 try:
     import carla
-    from agents.navigation.behavior_agent import BehaviorAgent  # type: ignore[import-untyped]
 
     CARLA_AVAILABLE = True
 except ImportError:
@@ -70,7 +75,11 @@ class EpisodeResult:
 
 
 class ExpertDataCollector:
-    """Collects expert driving data from CARLA using BehaviorAgent.
+    """Collects expert driving data from CARLA using TrafficManager autopilot.
+
+    Uses vehicle.set_autopilot(True) which delegates driving to CARLA's
+    built-in TrafficManager. Navigation commands are inferred by comparing
+    the vehicle's forward vector with the direction to the next waypoint.
 
     Usage:
         collector = ExpertDataCollector(
@@ -78,6 +87,7 @@ class ExpertDataCollector:
             port=2000,
             output_dir="data/collected",
         )
+        collector.connect()
         result = collector.collect_episode(config)
 
     Args:
@@ -88,16 +98,12 @@ class ExpertDataCollector:
         crash_wait: Seconds to wait between reconnection attempts.
     """
 
-    # Navigation command mapping (CARLA RoadOption → int)
+    # Navigation command mapping
     NAV_MAP = {
-        "Void": -1,
         "LaneFollow": 0,
         "Left": 1,
         "Right": 2,
         "Straight": 3,
-        "ChangeLeft": 4,
-        "ChangeRight": 5,
-        "RoadEnd": 6,
     }
 
     def __init__(
@@ -171,6 +177,75 @@ class ExpertDataCollector:
                 logger.error("Reconnection failed: %s", e)
         return False
 
+    @staticmethod
+    def _infer_nav_command(
+        vehicle_transform: Any,
+        waypoint: Any,
+        carla_map: Any,
+        lookahead: float = 10.0,
+    ) -> int:
+        """Infer navigation command from vehicle heading vs waypoint direction.
+
+        Compares the vehicle's forward vector with the direction to a
+        lookahead waypoint. The angle between them determines the nav command:
+            - |angle| < 15°  → LaneFollow (0)
+            - angle < -15°   → Left (1)
+            - angle > 15°    → Right (2)
+            - Near junction with small angle → Straight (3)
+
+        Args:
+            vehicle_transform: Current vehicle transform.
+            waypoint: Current waypoint the vehicle is on.
+            carla_map: CARLA map instance.
+            lookahead: Distance in meters to look ahead.
+
+        Returns:
+            Navigation command ID (0-3).
+        """
+        # Get next waypoints along the road
+        next_wps = waypoint.next(lookahead)
+        if not next_wps:
+            return 0  # LaneFollow
+
+        target_wp = next_wps[0]
+
+        # Vehicle forward vector (2D)
+        fwd = vehicle_transform.get_forward_vector()
+        fwd_2d = np.array([fwd.x, fwd.y])
+
+        # Direction to target
+        veh_loc = vehicle_transform.location
+        tgt_loc = target_wp.transform.location
+        dir_2d = np.array([tgt_loc.x - veh_loc.x, tgt_loc.y - veh_loc.y])
+
+        # Compute signed angle
+        fwd_norm = np.linalg.norm(fwd_2d)
+        dir_norm = np.linalg.norm(dir_2d)
+        if fwd_norm < 1e-6 or dir_norm < 1e-6:
+            return 0
+
+        fwd_2d = fwd_2d / fwd_norm
+        dir_2d = dir_2d / dir_norm
+
+        # Cross product gives signed angle
+        cross = fwd_2d[0] * dir_2d[1] - fwd_2d[1] * dir_2d[0]
+        dot = np.dot(fwd_2d, dir_2d)
+        angle_deg = math.degrees(math.atan2(cross, dot))
+
+        # Check if at junction
+        at_junction = waypoint.is_junction
+
+        # Classify
+        threshold = 15.0
+        if abs(angle_deg) < threshold:
+            if at_junction:
+                return 3  # Straight (through junction)
+            return 0  # LaneFollow
+        elif angle_deg < -threshold:
+            return 1  # Left
+        else:
+            return 2  # Right
+
     def collect_episode(
         self,
         config: EpisodeConfig,
@@ -178,10 +253,13 @@ class ExpertDataCollector:
     ) -> EpisodeResult:
         """Collect a single episode of expert driving data.
 
+        Uses CARLA's TrafficManager autopilot for expert driving.
+        Navigation commands are inferred from heading-vs-waypoint angle.
+
         Args:
             config: Episode configuration.
-            route_waypoints: Optional pre-computed route waypoints.
-                If None, a random destination will be chosen.
+            route_waypoints: Optional pre-computed route (currently unused
+                with autopilot; reserved for future BehaviorAgent support).
 
         Returns:
             EpisodeResult with status and metadata.
@@ -191,6 +269,7 @@ class ExpertDataCollector:
 
         start_time = time.time()
         actors: list = []
+        npc_vehicles: list = []
         original_settings = None
         image_queue: queue.Queue = queue.Queue()
 
@@ -214,6 +293,7 @@ class ExpertDataCollector:
                 self.world = self.client.get_world()
                 time.sleep(2.0)  # Wait for map load
 
+            carla_map = self.world.get_map()
             original_settings = self.world.get_settings()
 
             # Enable synchronous mode
@@ -227,10 +307,15 @@ class ExpertDataCollector:
             if weather_preset is not None:
                 self.world.set_weather(weather_preset)
 
+            # --- Setup TrafficManager ---
+            traffic_manager = self.client.get_trafficmanager(8000)
+            traffic_manager.set_synchronous_mode(True)
+            traffic_manager.set_global_distance_to_leading_vehicle(2.5)
+
             # --- Spawn ego vehicle ---
             bp_lib = self.world.get_blueprint_library()
             vehicle_bp = bp_lib.filter("vehicle.tesla.model3")[0]
-            spawn_points = self.world.get_map().get_spawn_points()
+            spawn_points = carla_map.get_spawn_points()
             spawn_idx = np.random.randint(len(spawn_points))
             vehicle = self.world.try_spawn_actor(vehicle_bp, spawn_points[spawn_idx])
 
@@ -242,6 +327,30 @@ class ExpertDataCollector:
                 )
 
             actors.append(vehicle)
+
+            # Enable autopilot via TrafficManager
+            vehicle.set_autopilot(True, traffic_manager.get_port())
+
+            # Configure ego driving behavior
+            traffic_manager.auto_lane_change(vehicle, True)
+            traffic_manager.ignore_lights_percentage(vehicle, 0.0)  # Obey traffic lights
+            traffic_manager.vehicle_percentage_speed_difference(vehicle, -20.0)  # 20% below limit
+
+            # --- Spawn NPC traffic ---
+            if config.n_vehicles > 0:
+                npc_bps = bp_lib.filter("vehicle.*")
+                npc_bps = [bp for bp in npc_bps if int(bp.get_attribute("number_of_wheels")) == 4]
+                available_spawns = [sp for i, sp in enumerate(spawn_points) if i != spawn_idx]
+                n_to_spawn = min(config.n_vehicles, len(available_spawns))
+
+                for i in range(n_to_spawn):
+                    npc_bp = np.random.choice(npc_bps)
+                    npc = self.world.try_spawn_actor(npc_bp, available_spawns[i])
+                    if npc is not None:
+                        npc.set_autopilot(True, traffic_manager.get_port())
+                        npc_vehicles.append(npc)
+
+                logger.info("Spawned %d NPC vehicles (requested %d)", len(npc_vehicles), config.n_vehicles)
 
             # --- Attach camera ---
             camera_bp = bp_lib.find("sensor.camera.rgb")
@@ -267,26 +376,24 @@ class ExpertDataCollector:
 
             collision_sensor.listen(on_collision)
 
-            # --- Setup agent with route ---
-            agent = BehaviorAgent(vehicle, behavior="normal")
+            # Let world settle (a few warm-up ticks)
+            for _ in range(10):
+                self.world.tick()
 
-            if route_waypoints is not None:
-                agent.set_global_plan(route_waypoints)
-            else:
-                # Random destination
-                dest = spawn_points[np.random.randint(len(spawn_points))]
-                agent.set_destination(dest.location)
+            # Drain any queued warm-up images
+            while not image_queue.empty():
+                try:
+                    image_queue.get_nowait()
+                except queue.Empty:
+                    break
 
             # --- Tick loop ---
             stuck_start: float | None = None
+            distance_traveled = 0.0
+            prev_location = vehicle.get_transform().location
 
             for frame_idx in range(config.max_frames):
                 self.world.tick()
-
-                # Check agent done
-                if agent.done():
-                    logger.info("Agent reached destination at frame %d", frame_idx)
-                    break
 
                 # Get camera image
                 try:
@@ -304,10 +411,8 @@ class ExpertDataCollector:
                         )
                     )
 
-                # Get controls from agent
-                control = agent.run_step()
-                vehicle.apply_control(control)
-
+                # Get controls applied by autopilot
+                control = vehicle.get_control()
                 steering_buf.append(float(control.steer))
                 throttle_buf.append(float(control.throttle))
                 brake_buf.append(float(control.brake))
@@ -316,14 +421,18 @@ class ExpertDataCollector:
                 vel = vehicle.get_velocity()
                 velocity_buf.append(np.array([vel.x, vel.y, vel.z], dtype=np.float32))
 
-                # Navigation command
-                # BehaviorAgent provides road option as part of its plan
-                try:
-                    road_option = agent._local_planner._target_road_option
-                    nav_id = self.NAV_MAP.get(road_option.name, 0)
-                except (AttributeError, KeyError):
-                    nav_id = 0  # Default to LaneFollow
+                # Navigation command (inferred from heading vs waypoint direction)
+                veh_transform = vehicle.get_transform()
+                current_wp = carla_map.get_waypoint(veh_transform.location)
+                nav_id = self._infer_nav_command(veh_transform, current_wp, carla_map)
                 nav_cmd_buf.append(nav_id)
+
+                # Track distance
+                cur_loc = veh_transform.location
+                dx = cur_loc.x - prev_location.x
+                dy = cur_loc.y - prev_location.y
+                distance_traveled += (dx**2 + dy**2) ** 0.5
+                prev_location = cur_loc
 
                 # Check collision
                 if collision_detected[0] and collision_frame is None:
@@ -337,18 +446,27 @@ class ExpertDataCollector:
                         stuck_start = time.time()
                     elif time.time() - stuck_start > config.timeout_duration:
                         logger.warning("Timeout: vehicle stuck for >%ds", config.timeout_duration)
-                        return EpisodeResult(
-                            status="timeout",
-                            n_frames=len(images_buf),
-                            town=config.town,
-                            weather=config.weather,
-                            duration_seconds=time.time() - start_time,
-                        )
+                        # Still save the data collected
+                        break
                 else:
                     stuck_start = None
 
+                # Progress logging every 500 frames
+                if (frame_idx + 1) % 500 == 0:
+                    logger.info(
+                        "  Frame %d/%d — speed=%.1f m/s, distance=%.0fm, steer=%.3f",
+                        frame_idx + 1,
+                        config.max_frames,
+                        speed,
+                        distance_traveled,
+                        control.steer,
+                    )
+
             # --- Determine status ---
-            if collision_frame is not None:
+            timed_out = stuck_start is not None and (time.time() - stuck_start > config.timeout_duration)
+            if timed_out:
+                status = "timeout"
+            elif collision_frame is not None:
                 status = "collision"
             else:
                 status = "completed"
@@ -408,22 +526,38 @@ class ExpertDataCollector:
             )
 
         finally:
-            # Cleanup actors
+            # Disable autopilot before cleanup to avoid TM race conditions
             try:
-                if camera in actors:
-                    camera.stop()
+                if 'vehicle' in dir() and vehicle is not None and vehicle.is_alive:
+                    vehicle.set_autopilot(False)
             except Exception:
                 pass
-            try:
-                if collision_sensor in actors:
-                    collision_sensor.stop()
-            except Exception:
-                pass
-            for actor in reversed(actors):
+
+            # Stop sensors first
+            for actor in actors:
                 try:
-                    actor.destroy()
+                    if actor.is_alive and hasattr(actor, "stop"):
+                        actor.stop()
                 except Exception:
                     pass
+
+            # Destroy NPC vehicles (before ego, to avoid TM issues)
+            for npc in npc_vehicles:
+                try:
+                    if npc.is_alive:
+                        npc.set_autopilot(False)
+                        npc.destroy()
+                except Exception:
+                    pass
+
+            # Destroy ego actors (sensors, collision, vehicle)
+            for actor in reversed(actors):
+                try:
+                    if actor.is_alive:
+                        actor.destroy()
+                except Exception:
+                    pass
+
             # Restore settings
             if original_settings is not None:
                 try:
@@ -445,8 +579,9 @@ class ExpertDataCollector:
         collision_frame: int | None,
     ) -> EpisodeResult:
         """Save collected episode data to HDF5."""
-        # Hash-based filename
-        hash_input = images[:4].tobytes()
+        # Hash-based filename (include timestamp for uniqueness)
+        timestamp_bytes = int(time.time() * 1000).to_bytes(8, "big")
+        hash_input = timestamp_bytes + images[:4].tobytes()[:4096]
         episode_hash = hashlib.sha256(hash_input).hexdigest()[:8]
         filename = f"episode_{episode_hash}.h5"
         filepath = self.output_dir / filename
