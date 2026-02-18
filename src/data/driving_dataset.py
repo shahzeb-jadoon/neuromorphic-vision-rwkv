@@ -161,7 +161,8 @@ class DrivingSequenceDataset(Dataset):
         Returns:
             Dictionary with:
                 images: (seq_len, 3, 224, 224) float32, ImageNet-normalized
-                controls: (seq_len, 2) float32 [steering, throttle]
+                controls: (seq_len, 2) float32 [steering, acceleration]
+                    acceleration = throttle - brake  ∈ [-1, 1]
                 nav_command: (seq_len,) int64
                 velocity: (seq_len, 3) float32
         """
@@ -174,6 +175,7 @@ class DrivingSequenceDataset(Dataset):
             images = f[S.IMAGES][start:end]  # (T, H, W, 3) uint8
             steering = f[S.STEERING][start:end]  # (T,) float32
             throttle = f[S.THROTTLE][start:end]  # (T,) float32
+            brake = f[S.BRAKE][start:end]  # (T,) float32
             nav_cmd = f[S.NAV_COMMAND][start:end]  # (T,) int32
             velocity = f[S.VELOCITY][start:end]  # (T, 3) float32
 
@@ -183,7 +185,11 @@ class DrivingSequenceDataset(Dataset):
 
         steering = torch.from_numpy(steering.copy())
         throttle = torch.from_numpy(throttle.copy())
-        controls = torch.stack([steering, throttle], dim=-1)  # (T, 2)
+        brake = torch.from_numpy(brake.copy())
+        # Merge throttle/brake into single acceleration axis:
+        # positive = throttle, negative = brake
+        acceleration = throttle - brake  # ∈ [-1, 1]
+        controls = torch.stack([steering, acceleration], dim=-1)  # (T, 2)
 
         nav_cmd = torch.from_numpy(nav_cmd.copy()).long()
         velocity = torch.from_numpy(velocity.copy())
@@ -215,7 +221,7 @@ class DrivingSequenceDataset(Dataset):
 
         Args:
             images: (T, 3, H, W) normalized float32
-            controls: (T, 2) [steering, throttle]
+            controls: (T, 2) [steering, acceleration]
 
         Returns:
             Augmented (images, controls) tuple.
