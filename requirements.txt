@@ -35,3 +35,7 @@ carla==0.9.16
 
 # --- RWKV ---
 rwkv==0.8.32
+
+# --- Dev / Testing ---
+pytest==9.0.2
+pytest-cov==7.0.0
