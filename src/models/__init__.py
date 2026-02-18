@@ -12,7 +12,7 @@ from src.models.config import (
     RWKVEncoderConfig,
     TokenizerConfig,
 )
-from src.models.fusion import LICA
+from src.models.fusion import NavigationFusion
 from src.models.policy_head import PolicyHead
 from src.models.rwkv_encoder import RWKVBlock, RWKVEncoder, RWKVState
 from src.models.tokenizer import PatchEmbedding, QShift, VisionTokenizer
@@ -28,7 +28,7 @@ __all__ = [
     "RWKVEncoder",
     "RWKVBlock",
     "RWKVState",
-    "LICA",
+    "NavigationFusion",
     "PolicyHead",
     # Configs
     "ModelConfig",

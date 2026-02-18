@@ -1,7 +1,7 @@
 """Vision-RWKV driver model: full pipeline from images to control signals.
 
 Composes:
-    VisionTokenizer → RWKVEncoder → LICA → PolicyHead
+    VisionTokenizer → RWKVEncoder → NavigationFusion → PolicyHead
 
 Input:
     images:      (B, T, 3, H, W)  — RGB camera frames
@@ -25,20 +25,20 @@ import torch
 import torch.nn as nn
 
 from src.models.config import ModelConfig
-from src.models.fusion import LICA
+from src.models.fusion import NavigationFusion
 from src.models.policy_head import PolicyHead
 from src.models.rwkv_encoder import RWKVEncoder, RWKVState
 from src.models.tokenizer import VisionTokenizer
 
 
 class VisionRWKVDriver(nn.Module):
-    """End-to-end driving model: Vision-RWKV with LICA fusion.
+    """End-to-end driving model: Vision-RWKV with navigation fusion.
 
     This is the top-level model that chains:
-    1. VisionTokenizer: images → patch tokens
-    2. RWKVEncoder:     patch tokens → temporal features
-    3. LICA:            temporal features + nav → fused features
-    4. PolicyHead:      fused features → control predictions
+    1. VisionTokenizer:  images → patch tokens
+    2. RWKVEncoder:      patch tokens → temporal features
+    3. NavigationFusion: temporal features + nav → fused features
+    4. PolicyHead:       fused features → control predictions
 
     Args:
         config: Full model configuration.
@@ -50,7 +50,7 @@ class VisionRWKVDriver(nn.Module):
 
         self.tokenizer = VisionTokenizer(config.tokenizer)
         self.encoder = RWKVEncoder(config.encoder)
-        self.fusion = LICA(config.fusion)
+        self.fusion = NavigationFusion(config.fusion)
         self.policy_head = PolicyHead(config.policy_head)
 
     def forward(

@@ -20,7 +20,7 @@ from src.models.config import (
     RWKVEncoderConfig,
     TokenizerConfig,
 )
-from src.models.fusion import LICA
+from src.models.fusion import NavigationFusion
 from src.models.policy_head import PolicyHead
 from src.models.rwkv_encoder import RWKVBlock, RWKVEncoder
 from src.models.tokenizer import PatchEmbedding, QShift, VisionTokenizer
@@ -158,25 +158,25 @@ class TestRWKVEncoder:
 # ── Fusion tests ──────────────────────────────────────────────────────
 
 
-class TestLICA:
-    """Tests for LICA fusion module."""
+class TestNavigationFusion:
+    """Tests for NavigationFusion module."""
 
-    def test_lica_instantiates(self) -> None:
+    def test_fusion_instantiates(self) -> None:
         config = FusionConfig()
-        module = LICA(config)
+        module = NavigationFusion(config)
         assert isinstance(module, torch.nn.Module)
 
-    def test_lica_forward_raises(self) -> None:
+    def test_fusion_forward_raises(self) -> None:
         config = FusionConfig()
-        module = LICA(config)
+        module = NavigationFusion(config)
         visual = torch.randn(1, 4, 384)
         nav = torch.zeros(1, 4, dtype=torch.long)
-        with pytest.raises(NotImplementedError, match="LICA"):
+        with pytest.raises(NotImplementedError, match="NavigationFusion"):
             module(visual, nav)
 
-    def test_lica_nav_embedding_size(self) -> None:
+    def test_fusion_nav_embedding_size(self) -> None:
         config = FusionConfig(n_nav_commands=4, nav_embed_dim=64)
-        module = LICA(config)
+        module = NavigationFusion(config)
         assert module.nav_embedding.num_embeddings == 4
         assert module.nav_embedding.embedding_dim == 64
 
@@ -202,10 +202,12 @@ class TestPolicyHead:
     def test_policy_head_output_size(self) -> None:
         config = PolicyHeadConfig(input_dim=64, hidden_dim=32, n_outputs=2)
         module = PolicyHead(config)
-        # Check final linear output dimension
-        final_layer = module.mlp[-1]
-        assert isinstance(final_layer, torch.nn.Linear)
-        assert final_layer.out_features == 2
+        # Check final layer before tanh is the Linear layer
+        final_linear = module.mlp[-2]
+        assert isinstance(final_linear, torch.nn.Linear)
+        assert final_linear.out_features == 2
+        # Check tanh activation is present
+        assert isinstance(module.mlp[-1], torch.nn.Tanh)
 
 
 # ── Top-level model tests ────────────────────────────────────────────

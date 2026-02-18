@@ -1,10 +1,11 @@
-"""LICA (Linear Cross-Attention) fusion module.
+"""Navigation fusion module (gated linear fusion).
 
 Fuses visual features from the RWKV encoder with navigation
 command embeddings to produce context-aware driving features.
 
-The fusion is lightweight and linear to maintain the O(1)
-inference cost guarantee of the RWKV pipeline.
+Mechanism: concatenate visual + nav embeddings, project through
+a linear layer, and apply a learned sigmoid gate. This is a gated
+linear fusion — lightweight and O(1) per token.
 
 Input:  visual_features (B, T, visual_dim)
         nav_command     (B, T) int64
@@ -19,11 +20,12 @@ import torch.nn as nn
 from src.models.config import FusionConfig
 
 
-class LICA(nn.Module):
-    """Linear Cross-Attention fusion for visual + navigation features.
+class NavigationFusion(nn.Module):
+    """Gated linear fusion for visual + navigation features.
 
     Embeds the discrete navigation command into a continuous vector,
-    then fuses with visual features via gated linear projection.
+    concatenates with visual features, and applies a gated linear
+    projection to produce fused driving features.
 
     Args:
         config: Fusion configuration.
@@ -60,4 +62,4 @@ class LICA(nn.Module):
         Returns:
             (B, T, fused_dim) fused feature tensor.
         """
-        raise NotImplementedError("LICA.forward — implement in Phase 2")
+        raise NotImplementedError("NavigationFusion.forward — implement in Phase 2")

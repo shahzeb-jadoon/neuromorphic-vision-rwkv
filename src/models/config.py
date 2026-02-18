@@ -43,9 +43,10 @@ class RWKVEncoderConfig:
 
 @dataclass
 class FusionConfig:
-    """Configuration for the LICA (Linear Cross-Attention) fusion module.
+    """Configuration for the navigation fusion module (gated linear fusion).
 
-    Fuses visual features with navigation command embeddings.
+    Fuses visual features with navigation command embeddings via
+    concatenation, linear projection, and learned sigmoid gating.
     """
 
     visual_dim: int = 384
