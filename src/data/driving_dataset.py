@@ -88,6 +88,14 @@ class DrivingSequenceDataset(Dataset):
                 n_frames = f["images"].shape[0]
                 nav_cmds = f["nav_command"][:]
 
+                # Truncate at collision frame to exclude post-collision
+                # garbage data (vehicle stuck/spinning)
+                if "metadata" in f and "collision_frame" in f["metadata"].attrs:
+                    collision_frame = int(f["metadata"].attrs["collision_frame"])
+                    if collision_frame > 0:
+                        n_frames = min(n_frames, collision_frame)
+                        nav_cmds = nav_cmds[:n_frames]
+
             # Count nav commands for balanced sampling
             nav_counts = {}
             for cmd in range(4):
