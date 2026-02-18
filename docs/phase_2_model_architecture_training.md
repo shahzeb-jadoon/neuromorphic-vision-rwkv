@@ -12,7 +12,7 @@ This is the core ML engineering phase. You will:
 
 - **Vision encoder** — Implement patch tokenization with Q-Shift (3 stages: frozen pretrained → fine-tuned → from-scratch)
 - **RWKV encoder** — Build the RWKV-7 encoder with data-dependent decay (attempt-first-then-pivot to RWKV-6)
-- **Full pipeline** — Assemble tokenizer → encoder → LICA fusion → policy head
+- **Full pipeline** — Assemble tokenizer → encoder → NavigationFusion → policy head
 - **Training** — Implement TBPTT with burn-in, steering noise injection for implicit recovery, crash-safe checkpointing
 - **Baselines** — Train CNN, Transformer, and LSTM baselines with identical protocol
 
@@ -110,14 +110,14 @@ class RWKVEncoder(nn.Module):
         """
 ```
 
-### 2.3 — Sensor Fusion (LICA) & Policy Head (Week 5–6)
+### 2.3 — Sensor Fusion (NavigationFusion) & Policy Head (Week 5–6)
 
 **Objective:** Fuse visual features with navigation commands, output driving controls.
 
 **Tasks:**
-- [ ] Implement `LICA` (Linear Cross-Attention): fuses visual features with nav command embedding
+- [ ] Implement `NavigationFusion` (gated linear fusion): fuses visual features with nav command embedding
   - Nav command → learned embedding (dim 64)
-  - Linear cross-attention: visual features attend to nav embedding without quadratic cost
+  - Gated linear fusion: concatenate visual + nav embeddings, linear projection with learned sigmoid gate
 - [ ] Implement `PolicyHead`: MLP that outputs [steer, acceleration]
   - Architecture: Linear(D, 256) → ReLU → Linear(256, 64) → ReLU → Linear(64, 2)
   - Steering: tanh activation (range [-1, 1])
@@ -132,7 +132,7 @@ class RWKVEncoder(nn.Module):
 **Objective:** Wire all components into a single end-to-end model.
 
 **Tasks:**
-- [ ] Implement `VisionRWKVDriver` that composes: PatchEmbedding → QShift → RWKVEncoder → LICA → PolicyHead
+- [ ] Implement `VisionRWKVDriver` that composes: PatchEmbedding → QShift → RWKVEncoder → NavigationFusion → PolicyHead
 - [ ] Verify forward pass end-to-end: input (B, T, 3, 224, 224) → output (B, T, 2) where output is [steer, acceleration]
 - [ ] Implement model config via YAML (see `configs/`)
 - [ ] Config flag: `use_pretrained_vision` controls Stage 1/2 vs Stage 3 tokenizer
@@ -169,6 +169,16 @@ class VisionRWKVDriver(nn.Module):
 ### 2.5 — Training Loop with TBPTT (Week 6)
 
 **Objective:** Implement training with Truncated Backpropagation Through Time, burn-in, and crash-safe checkpointing.
+
+**Important data notes for training:**
+- **Collision episodes:** `DrivingSequenceDataset` already truncates at `collision_frame` metadata
+  to exclude post-collision garbage frames. Verify this works correctly before training.
+- **Town05 speed range:** Town05 has highway-like roads where the autopilot reaches 29 m/s (104 km/h).
+  This is valid data; the model should learn to handle highway-speed driving.
+  Consider normalizing velocity inputs if the distribution is very wide.
+- **Aggressive traffic (deferred):** A future collection campaign could spawn erratic NPC vehicles
+  (varying `ignore_lights_percentage`, `ignore_signs_percentage` in TrafficManager) to expose
+  the model to adversarial driving conditions. Not required for initial training.
 
 **Tasks:**
 - [ ] Implement `Trainer` class with TBPTT
@@ -282,7 +292,7 @@ Create these YAML configs in `configs/`:
 # configs/vrwkv_base.yaml
 model:
   name: "VisionRWKVDriver"
-  d_model: 768
+  d_model: 768           # Explicit: code default is 384 (lightweight for dev/test)
   n_layers: 12
   patch_size: 16
   img_size: 224
