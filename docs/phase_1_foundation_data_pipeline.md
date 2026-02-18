@@ -289,4 +289,3 @@ Status of each criterion for starting Phase II:
 | 9 | All code committed and documented | ✅ | `phase-1/data-pipeline` branch |
 
 > **Assessment:** Items 4, 5, and 7 are partially met but acceptable for Phase II start. The TurnBalancedSampler and natural RWKV forward time mitigate items 5 and 7. Item 4 can be supplemented with a second overnight run if training reveals insufficient data.
-

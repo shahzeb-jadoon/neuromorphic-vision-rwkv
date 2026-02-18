@@ -23,12 +23,12 @@ import yaml
 # Add project root to path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from src.data.expert_collector import (
+from src.data.expert_collector import (  # noqa: E402
     CollectionManifest,
     EpisodeConfig,
     ExpertDataCollector,
 )
-from src.data.route_generator import BalancedRouteGenerator, RouteConfig
+from src.data.route_generator import BalancedRouteGenerator, RouteConfig  # noqa: E402
 
 logging.basicConfig(
     level=logging.INFO,
@@ -41,7 +41,7 @@ logger = logging.getLogger(__name__)
 def load_config(config_path: str) -> dict:
     """Load YAML collection config."""
     with open(config_path) as f:
-        return yaml.safe_load(f)
+        return yaml.safe_load(f)  # type: ignore[no-any-return]
 
 
 def build_campaign(

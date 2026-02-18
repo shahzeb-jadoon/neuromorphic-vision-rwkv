@@ -18,8 +18,8 @@ import numpy as np
 def main() -> None:
     print("HDF5 Compression Benchmark")
     print("=" * 65)
-    print(f"Reading pattern: 100 random 32-frame clips from 500 frames")
-    print(f"Image size: 224×224×3 (uint8)")
+    print("Reading pattern: 100 random 32-frame clips from 500 frames")
+    print("Image size: 224\u00d7224\u00d73 (uint8)")
     print()
 
     rng = np.random.default_rng(42)
@@ -60,9 +60,9 @@ def main() -> None:
         read_time = time.time() - t0
         read_mb_per_sec = (100 * 32 * 224 * 224 * 3 / 1e6) / read_time
 
-        print(
-            f"{name:<20} {file_size:>10.1f} {write_time:>10.2f} {read_time:>10.2f} {read_mb_per_sec:>10.1f}"
-        )
+        row = f"{name:<20} {file_size:>10.1f} {write_time:>10.2f}"
+        row += f" {read_time:>10.2f} {read_mb_per_sec:>10.1f}"
+        print(row)
 
         if best_read is None or read_time < best_read:
             best_read = read_time

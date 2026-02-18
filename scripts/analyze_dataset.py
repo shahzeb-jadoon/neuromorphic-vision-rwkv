@@ -36,10 +36,10 @@ def analyze_dataset(data_dir: Path, save_samples: int = 0) -> None:
     # Aggregate stats
     total_frames = 0
     total_size_bytes = 0
-    nav_counts = defaultdict(int)
-    town_counts = defaultdict(int)
-    weather_counts = defaultdict(int)
-    status_counts = defaultdict(int)
+    nav_counts: defaultdict[int, int] = defaultdict(int)
+    town_counts: defaultdict[str, int] = defaultdict(int)
+    weather_counts: defaultdict[str, int] = defaultdict(int)
+    status_counts: defaultdict[str, int] = defaultdict(int)
     steering_all = []
     throttle_all = []
     episode_lengths = []

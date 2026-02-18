@@ -15,7 +15,6 @@ import argparse
 import queue
 import subprocess
 import sys
-import time
 from pathlib import Path
 
 import numpy as np
@@ -29,7 +28,7 @@ except ImportError:
 try:
     from PIL import Image
 except ImportError:
-    Image = None  # type: ignore[assignment, misc]
+    Image = None  # type: ignore[assignment]
 
 
 def get_windows_host_ip() -> str | None:

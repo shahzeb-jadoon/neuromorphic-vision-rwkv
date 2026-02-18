@@ -18,7 +18,7 @@ import sys
 import carla
 
 
-def get_windows_host_ip():
+def get_windows_host_ip() -> str | None:
     """Get the Windows host IP from WSL2's default gateway."""
     try:
         result = subprocess.run(
@@ -33,7 +33,7 @@ def get_windows_host_ip():
         return None
 
 
-def main():
+def main() -> None:
     host = get_windows_host_ip()
     if host is None:
         print("ERROR: Could not detect Windows host IP from WSL2 gateway.")
