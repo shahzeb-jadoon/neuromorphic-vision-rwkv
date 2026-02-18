@@ -1,15 +1,11 @@
 """Tests for DrivingSequenceDataset.
 
-These tests use the toy dataset generator to create synthetic data,
+These tests use the session-scoped toy dataset fixture from conftest.py,
 then verify the DataLoader produces correctly shaped and normalized outputs.
 
 Run with: pytest tests/test_driving_dataset.py -v
 """
 
-import shutil
-import subprocess
-import sys
-from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
@@ -17,45 +13,12 @@ import torch
 
 from src.data.driving_dataset import DrivingSequenceDataset
 
-# Generate toy dataset in a temp directory before running tests
-TOY_DIR = Path("data/test_toy")
-
-
-@pytest.fixture(scope="module", autouse=True)
-def create_toy_data() -> Iterator[None]:
-    """Generate toy dataset once for all tests in this module."""
-    TOY_DIR.mkdir(parents=True, exist_ok=True)
-
-    # Generate a small dataset: 6 episodes × 50 frames
-    subprocess.run(
-        [
-            sys.executable,
-            "scripts/create_toy_dataset.py",
-            "--output",
-            str(TOY_DIR),
-            "--episodes",
-            "6",
-            "--frames",
-            "50",
-            "--seed",
-            "42",
-        ],
-        check=True,
-        capture_output=True,
-    )
-
-    yield
-
-    # Cleanup after all tests
-    if TOY_DIR.exists():
-        shutil.rmtree(TOY_DIR)
-
 
 @pytest.fixture
-def train_dataset() -> DrivingSequenceDataset:
+def train_dataset(toy_data_dir: Path) -> DrivingSequenceDataset:
     """Create a train split dataset."""
     return DrivingSequenceDataset(
-        data_dir=TOY_DIR,
+        data_dir=toy_data_dir,
         seq_len=16,
         stride=8,
         split="train",
@@ -66,10 +29,10 @@ def train_dataset() -> DrivingSequenceDataset:
 
 
 @pytest.fixture
-def val_dataset() -> DrivingSequenceDataset:
+def val_dataset(toy_data_dir: Path) -> DrivingSequenceDataset:
     """Create a val split dataset."""
     return DrivingSequenceDataset(
-        data_dir=TOY_DIR,
+        data_dir=toy_data_dir,
         seq_len=16,
         stride=8,
         split="val",
@@ -123,12 +86,12 @@ class TestNormalization:
         assert steering.min() >= -1.0
         assert steering.max() <= 1.0
 
-    def test_throttle_range(self, train_dataset: DrivingSequenceDataset) -> None:
-        """Throttle should be in [0, 1]."""
+    def test_acceleration_range(self, train_dataset: DrivingSequenceDataset) -> None:
+        """Acceleration (throttle - brake) should be in [-1, 1]."""
         item = train_dataset[0]
-        throttle = item["controls"][:, 1]
-        assert throttle.min() >= 0.0
-        assert throttle.max() <= 1.0
+        acceleration = item["controls"][:, 1]
+        assert acceleration.min() >= -1.0
+        assert acceleration.max() <= 1.0
 
 
 class TestSplit:
@@ -143,31 +106,40 @@ class TestSplit:
         assert train_files.isdisjoint(val_files), "Train and val share episodes!"
 
     def test_all_episodes_covered(
-        self, train_dataset: DrivingSequenceDataset, val_dataset: DrivingSequenceDataset
+        self,
+        train_dataset: DrivingSequenceDataset,
+        val_dataset: DrivingSequenceDataset,
+        toy_data_dir: Path,
     ) -> None:
         """Train + val should cover all episodes."""
-        all_files = set(f.name for f in TOY_DIR.glob("episode_*.h5"))
+        all_files = set(f.name for f in toy_data_dir.glob("episode_*.h5"))
         split_files = set(p.name for p in train_dataset.episode_files) | set(
             p.name for p in val_dataset.episode_files
         )
         assert all_files == split_files, "Not all episodes assigned to a split"
 
-    def test_deterministic_split(self) -> None:
+    def test_deterministic_split(self, toy_data_dir: Path) -> None:
         """Same seed should produce same split."""
-        ds1 = DrivingSequenceDataset(TOY_DIR, seq_len=16, split="train", seed=42, augment=False)
-        ds2 = DrivingSequenceDataset(TOY_DIR, seq_len=16, split="train", seed=42, augment=False)
+        ds1 = DrivingSequenceDataset(
+            toy_data_dir, seq_len=16, split="train", seed=42, augment=False
+        )
+        ds2 = DrivingSequenceDataset(
+            toy_data_dir, seq_len=16, split="train", seed=42, augment=False
+        )
         assert [p.name for p in ds1.episode_files] == [p.name for p in ds2.episode_files]
 
 
 class TestAugmentation:
     """Verify augmentation behavior."""
 
-    def test_hflip_flips_steering(self) -> None:
+    def test_hflip_flips_steering(self, toy_data_dir: Path) -> None:
         """Horizontal flip should negate steering sign."""
         ds_no_aug = DrivingSequenceDataset(
-            TOY_DIR, seq_len=16, split="train", seed=42, augment=False
+            toy_data_dir, seq_len=16, split="train", seed=42, augment=False
         )
-        ds_aug = DrivingSequenceDataset(TOY_DIR, seq_len=16, split="train", seed=42, augment=True)
+        ds_aug = DrivingSequenceDataset(
+            toy_data_dir, seq_len=16, split="train", seed=42, augment=True
+        )
 
         # Get same clip from both — augmented may differ due to randomness
         item_no_aug = ds_no_aug[0]
@@ -175,9 +147,9 @@ class TestAugmentation:
         item_aug = ds_aug[0]
         assert item_aug["images"].shape == item_no_aug["images"].shape
 
-    def test_val_no_augmentation(self) -> None:
+    def test_val_no_augmentation(self, toy_data_dir: Path) -> None:
         """Validation split should not augment by default."""
-        ds = DrivingSequenceDataset(TOY_DIR, seq_len=16, split="val", seed=42)
+        ds = DrivingSequenceDataset(toy_data_dir, seq_len=16, split="val", seed=42)
         assert not ds.augment
 
 
