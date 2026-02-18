@@ -137,6 +137,12 @@ class RWKVEncoder(nn.Module):
 - [ ] Implement model config via YAML (see `configs/`)
 - [ ] Config flag: `use_pretrained_vision` controls Stage 1/2 vs Stage 3 tokenizer
 
+**Testing note:** The existing `tests/test_model_interfaces.py` currently only verifies that `forward()` raises `NotImplementedError` (stub assertions). As each module is implemented, **rewrite these tests** to verify:
+- Output shapes match expected `(B, T, D)` or `(B, T, 2)` dimensions
+- Gradient flow (`.backward()` succeeds, `.grad` is not None on parameters)
+- State propagation (RWKV hidden state shapes, persistence across calls)
+- Numerical behavior (outputs bounded by `tanh`, no NaN/Inf)
+
 **Key code artifact:** `src/models/vision_rwkv_driver.py`
 
 ```python
