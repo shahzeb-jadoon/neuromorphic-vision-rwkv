@@ -245,7 +245,7 @@ class BalancedRouteGenerator:
         Returns list of (transform, road_option_name) tuples.
         """
         try:
-            from agents.navigation.global_route_planner import (  # type: ignore[import-not-found]
+            from agents.navigation.global_route_planner import (
                 GlobalRoutePlanner,
             )
 
