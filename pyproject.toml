@@ -1,0 +1,78 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.backends._legacy:_Backend"
+
+[project]
+name = "neuromorphic-vision-rwkv"
+version = "0.1.0"
+description = "Vision-RWKV based autonomous driving agent with neuromorphic alignment"
+readme = "README.md"
+license = {text = "MIT"}
+requires-python = ">=3.11"
+authors = [
+    {name = "Shahzeb Jadoon"},
+]
+keywords = ["RWKV", "autonomous-driving", "neuromorphic", "CARLA", "vision"]
+
+dependencies = [
+    "torch>=2.6.0",
+    "torchvision>=0.21.0",
+    "numpy>=2.2.0",
+    "h5py>=3.13.0",
+    "pyyaml>=6.0.2",
+    "wandb>=0.19.0",
+    "pillow>=12.0.0",
+    "tqdm>=4.67.0",
+    "matplotlib>=3.10.0",
+    "tensorboard>=2.19.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-cov>=4.0",
+    "black>=24.0",
+    "flake8>=7.0",
+    "mypy>=1.8",
+    "pre-commit>=3.6",
+    "types-PyYAML",
+    "types-tqdm",
+]
+
+[tool.mypy]
+python_version = "3.11"
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = true
+disallow_incomplete_defs = true
+check_untyped_defs = true
+no_implicit_optional = true
+warn_redundant_casts = true
+warn_unused_ignores = true
+show_error_codes = true
+
+[[tool.mypy.overrides]]
+module = [
+    "carla.*",
+    "rwkv.*",
+    "wandb.*",
+    "h5py.*",
+    "cv2.*",
+    "torchvision.*",
+]
+ignore_missing_imports = true
+
+[tool.black]
+line-length = 100
+target-version = ["py311"]
+
+[tool.flake8]
+max-line-length = 100
+extend-ignore = ["E203", "W503"]
+exclude = [".git", "__pycache__", "build", "dist"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_functions = ["test_*"]
+addopts = "--strict-markers -v"
