@@ -13,7 +13,7 @@ test:  ## Run tests with coverage
 	pytest tests/ -v --cov=src/ --cov-report=term-missing --cov-fail-under=80
 
 lint:  ## Run linting (flake8)
-	flake8 src/ scripts/ tests/ --max-line-length=100 --extend-ignore=E203,W503
+	flake8 src/ scripts/ tests/
 
 format:  ## Check formatting (black)
 	black --check --line-length 100 src/ scripts/ tests/
