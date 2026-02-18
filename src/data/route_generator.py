@@ -147,7 +147,7 @@ class BalancedRouteGenerator:
         current_wp = self.map.get_waypoint(self.spawn_points[int(start_idx)].location)
 
         route_segments: list[tuple[Any, str]] = []
-        turn_counts = defaultdict(int)
+        turn_counts: dict[str, int] = defaultdict(int)
         total_waypoints = 0
 
         max_segments = 20  # Safety limit
@@ -212,13 +212,13 @@ class BalancedRouteGenerator:
             return None
 
         # Calculate distances to all junctions
-        distances = []
+        dist_list: list[float] = []
         for junc in self._junctions:
             loc = junc["location"]
             dist = ((current_location.x - loc.x) ** 2 + (current_location.y - loc.y) ** 2) ** 0.5
-            distances.append(dist)
+            dist_list.append(dist)
 
-        distances = np.array(distances)
+        distances = np.array(dist_list)
 
         # Filter to reachable junctions (not too close, not too far)
         mask = (distances > 20.0) & (distances < 500.0)
@@ -245,7 +245,7 @@ class BalancedRouteGenerator:
         Returns list of (transform, road_option_name) tuples.
         """
         try:
-            from agents.navigation.global_route_planner import (  # type: ignore[import-untyped]
+            from agents.navigation.global_route_planner import (  # type: ignore[import-not-found]
                 GlobalRoutePlanner,
             )
 
@@ -285,7 +285,7 @@ class BalancedRouteGenerator:
         route: list[tuple[Any, str]],
     ) -> dict[str, float]:
         """Compute turn distribution for a generated route."""
-        counts = defaultdict(int)
+        counts: dict[str, int] = defaultdict(int)
         for _, road_option in route:
             counts[road_option] += 1
 

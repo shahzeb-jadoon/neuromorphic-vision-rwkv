@@ -147,7 +147,7 @@ class DrivingSequenceDataset(Dataset):
             loader = DataLoader(dataset, sampler=sampler, ...)
         """
         return WeightedRandomSampler(
-            weights=self._clip_weights,
+            weights=self._clip_weights.tolist(),
             num_samples=len(self),
             replacement=True,
         )

@@ -11,13 +11,17 @@ Usage:
 import argparse
 import hashlib
 import json
-import os
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
 import h5py
 import numpy as np
 
+# Ensure src package is importable when running as a script
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from src.data import hdf5_schema as S  # noqa: E402
 
 # Navigation commands matching CARLA RoadOption enum
 NAV_COMMANDS = {
@@ -143,15 +147,16 @@ def save_episode_hdf5(
 
     with h5py.File(filepath, "w") as f:
         # Data arrays
-        f.create_dataset("images", data=episode_data["images"], compression="gzip", chunks=True)
-        f.create_dataset("steering", data=episode_data["steering"])
-        f.create_dataset("throttle", data=episode_data["throttle"])
-        f.create_dataset("brake", data=episode_data["brake"])
-        f.create_dataset("velocity", data=episode_data["velocity"])
-        f.create_dataset("nav_command", data=episode_data["nav_command"])
+        f.create_dataset(S.IMAGES, data=episode_data["images"], compression="gzip", chunks=True)
+        f.create_dataset(S.STEERING, data=episode_data["steering"])
+        f.create_dataset(S.THROTTLE, data=episode_data["throttle"])
+        f.create_dataset(S.BRAKE, data=episode_data["brake"])
+        f.create_dataset(S.VELOCITY, data=episode_data["velocity"])
+        f.create_dataset(S.NAV_COMMAND, data=episode_data["nav_command"])
 
         # Metadata as attributes on a group
-        meta = f.create_group("metadata")
+        meta = f.create_group(S.METADATA_GROUP)
+        meta.attrs[S.META_SCHEMA_VERSION] = S.SCHEMA_VERSION
         for key, value in episode_data["metadata"].items():
             meta.attrs[key] = value
 
@@ -224,7 +229,8 @@ def main() -> None:
         }
         episodes_info.append(episode_info)
 
-        print(f"  [{i + 1}/{args.episodes}] {filename} — {args.frames} frames, {episode_data['metadata']['town']}")
+        town = episode_data["metadata"]["town"]
+        print(f"  [{i + 1}/{args.episodes}] {filename} — {args.frames} frames, {town}")
 
     # Create manifest
     create_manifest(episodes_info, output_dir)

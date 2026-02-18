@@ -9,17 +9,20 @@ Run with: pytest tests/test_driving_dataset.py -v
 import shutil
 import subprocess
 import sys
+from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
 import torch
+
+from src.data.driving_dataset import DrivingSequenceDataset
 
 # Generate toy dataset in a temp directory before running tests
 TOY_DIR = Path("data/test_toy")
 
 
 @pytest.fixture(scope="module", autouse=True)
-def create_toy_data():
+def create_toy_data() -> Iterator[None]:
     """Generate toy dataset once for all tests in this module."""
     TOY_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -49,10 +52,8 @@ def create_toy_data():
 
 
 @pytest.fixture
-def train_dataset():
+def train_dataset() -> DrivingSequenceDataset:
     """Create a train split dataset."""
-    from src.data.driving_dataset import DrivingSequenceDataset
-
     return DrivingSequenceDataset(
         data_dir=TOY_DIR,
         seq_len=16,
@@ -65,10 +66,8 @@ def train_dataset():
 
 
 @pytest.fixture
-def val_dataset():
+def val_dataset() -> DrivingSequenceDataset:
     """Create a val split dataset."""
-    from src.data.driving_dataset import DrivingSequenceDataset
-
     return DrivingSequenceDataset(
         data_dir=TOY_DIR,
         seq_len=16,
@@ -83,23 +82,23 @@ def val_dataset():
 class TestDatasetShapes:
     """Verify output tensor shapes are correct."""
 
-    def test_images_shape(self, train_dataset):
+    def test_images_shape(self, train_dataset: DrivingSequenceDataset) -> None:
         item = train_dataset[0]
         assert item["images"].shape == (16, 3, 224, 224)
 
-    def test_controls_shape(self, train_dataset):
+    def test_controls_shape(self, train_dataset: DrivingSequenceDataset) -> None:
         item = train_dataset[0]
         assert item["controls"].shape == (16, 2)
 
-    def test_nav_command_shape(self, train_dataset):
+    def test_nav_command_shape(self, train_dataset: DrivingSequenceDataset) -> None:
         item = train_dataset[0]
         assert item["nav_command"].shape == (16,)
 
-    def test_velocity_shape(self, train_dataset):
+    def test_velocity_shape(self, train_dataset: DrivingSequenceDataset) -> None:
         item = train_dataset[0]
         assert item["velocity"].shape == (16, 3)
 
-    def test_dtypes(self, train_dataset):
+    def test_dtypes(self, train_dataset: DrivingSequenceDataset) -> None:
         item = train_dataset[0]
         assert item["images"].dtype == torch.float32
         assert item["controls"].dtype == torch.float32
@@ -110,21 +109,21 @@ class TestDatasetShapes:
 class TestNormalization:
     """Verify ImageNet normalization is applied."""
 
-    def test_images_not_in_0_1_range(self, train_dataset):
+    def test_images_not_in_0_1_range(self, train_dataset: DrivingSequenceDataset) -> None:
         """After ImageNet normalization, values should NOT be in [0, 1]."""
         item = train_dataset[0]
         images = item["images"]
         # ImageNet-normalized images typically have values in [-2.1, 2.6]
         assert images.min() < 0.0, "Normalized images should have negative values"
 
-    def test_steering_range(self, train_dataset):
+    def test_steering_range(self, train_dataset: DrivingSequenceDataset) -> None:
         """Steering should be in [-1, 1]."""
         item = train_dataset[0]
         steering = item["controls"][:, 0]
         assert steering.min() >= -1.0
         assert steering.max() <= 1.0
 
-    def test_throttle_range(self, train_dataset):
+    def test_throttle_range(self, train_dataset: DrivingSequenceDataset) -> None:
         """Throttle should be in [0, 1]."""
         item = train_dataset[0]
         throttle = item["controls"][:, 1]
@@ -135,13 +134,17 @@ class TestNormalization:
 class TestSplit:
     """Verify train/val split properties."""
 
-    def test_no_episode_overlap(self, train_dataset, val_dataset):
+    def test_no_episode_overlap(
+        self, train_dataset: DrivingSequenceDataset, val_dataset: DrivingSequenceDataset
+    ) -> None:
         """Train and val should have no shared episodes."""
         train_files = set(p.name for p in train_dataset.episode_files)
         val_files = set(p.name for p in val_dataset.episode_files)
         assert train_files.isdisjoint(val_files), "Train and val share episodes!"
 
-    def test_all_episodes_covered(self, train_dataset, val_dataset):
+    def test_all_episodes_covered(
+        self, train_dataset: DrivingSequenceDataset, val_dataset: DrivingSequenceDataset
+    ) -> None:
         """Train + val should cover all episodes."""
         all_files = set(f.name for f in TOY_DIR.glob("episode_*.h5"))
         split_files = set(p.name for p in train_dataset.episode_files) | set(
@@ -149,10 +152,8 @@ class TestSplit:
         )
         assert all_files == split_files, "Not all episodes assigned to a split"
 
-    def test_deterministic_split(self):
+    def test_deterministic_split(self) -> None:
         """Same seed should produce same split."""
-        from src.data.driving_dataset import DrivingSequenceDataset
-
         ds1 = DrivingSequenceDataset(TOY_DIR, seq_len=16, split="train", seed=42, augment=False)
         ds2 = DrivingSequenceDataset(TOY_DIR, seq_len=16, split="train", seed=42, augment=False)
         assert [p.name for p in ds1.episode_files] == [p.name for p in ds2.episode_files]
@@ -161,10 +162,8 @@ class TestSplit:
 class TestAugmentation:
     """Verify augmentation behavior."""
 
-    def test_hflip_flips_steering(self):
+    def test_hflip_flips_steering(self) -> None:
         """Horizontal flip should negate steering sign."""
-        from src.data.driving_dataset import DrivingSequenceDataset
-
         ds_no_aug = DrivingSequenceDataset(
             TOY_DIR, seq_len=16, split="train", seed=42, augment=False
         )
@@ -176,10 +175,8 @@ class TestAugmentation:
         item_aug = ds_aug[0]
         assert item_aug["images"].shape == item_no_aug["images"].shape
 
-    def test_val_no_augmentation(self):
+    def test_val_no_augmentation(self) -> None:
         """Validation split should not augment by default."""
-        from src.data.driving_dataset import DrivingSequenceDataset
-
         ds = DrivingSequenceDataset(TOY_DIR, seq_len=16, split="val", seed=42)
         assert not ds.augment
 
@@ -187,11 +184,11 @@ class TestAugmentation:
 class TestSampler:
     """Verify weighted sampler works."""
 
-    def test_sampler_creates(self, train_dataset):
+    def test_sampler_creates(self, train_dataset: DrivingSequenceDataset) -> None:
         sampler = train_dataset.get_sampler()
         assert len(sampler) == len(train_dataset)
 
-    def test_sampler_iterates(self, train_dataset):
+    def test_sampler_iterates(self, train_dataset: DrivingSequenceDataset) -> None:
         sampler = train_dataset.get_sampler()
         indices = list(iter(sampler))
         assert len(indices) == len(train_dataset)
@@ -201,7 +198,7 @@ class TestSampler:
 class TestDataLoader:
     """Verify DataLoader integration."""
 
-    def test_batch_loading(self, train_dataset):
+    def test_batch_loading(self, train_dataset: DrivingSequenceDataset) -> None:
         loader = torch.utils.data.DataLoader(
             train_dataset, batch_size=2, shuffle=True, num_workers=0
         )

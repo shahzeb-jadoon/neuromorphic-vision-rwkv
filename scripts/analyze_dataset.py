@@ -75,7 +75,9 @@ def analyze_dataset(data_dir: Path, save_samples: int = 0) -> None:
     print(f"Episodes:     {len(episodes)}")
     print(f"Total frames: {total_frames:,} ({total_hours:.1f} hours at {fps} FPS)")
     print(f"Storage:      {size_gb:.2f} GB")
-    print(f"Avg episode:  {np.mean(episode_lengths):.0f} frames ({np.mean(episode_lengths)/fps:.1f}s)")
+    print(
+        f"Avg episode:  {np.mean(episode_lengths):.0f} frames ({np.mean(episode_lengths)/fps:.1f}s)"
+    )
     print()
 
     # Status breakdown
@@ -119,10 +121,14 @@ def analyze_dataset(data_dir: Path, save_samples: int = 0) -> None:
     all_throttle = np.concatenate(throttle_all)
 
     print("Control statistics:")
-    print(f"  Steering:  mean={all_steering.mean():+.4f}, std={all_steering.std():.4f}, "
-          f"min={all_steering.min():+.4f}, max={all_steering.max():+.4f}")
-    print(f"  Throttle:  mean={all_throttle.mean():.4f}, std={all_throttle.std():.4f}, "
-          f"min={all_throttle.min():.4f}, max={all_throttle.max():.4f}")
+    print(
+        f"  Steering:  mean={all_steering.mean():+.4f}, std={all_steering.std():.4f}, "
+        f"min={all_steering.min():+.4f}, max={all_steering.max():+.4f}"
+    )
+    print(
+        f"  Throttle:  mean={all_throttle.mean():.4f}, std={all_throttle.std():.4f}, "
+        f"min={all_throttle.min():.4f}, max={all_throttle.max():.4f}"
+    )
     print()
 
     # Save random sample frames

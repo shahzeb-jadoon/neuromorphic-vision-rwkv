@@ -90,7 +90,9 @@ def main() -> None:
     parser.add_argument("--port", type=int, default=2000, help="CARLA port")
     parser.add_argument("--seed", type=int, default=42, help="Random seed")
     parser.add_argument(
-        "--route-strategy", type=str, default="balanced",
+        "--route-strategy",
+        type=str,
+        default="balanced",
         choices=["random", "balanced"],
     )
     parser.add_argument("--target-left", type=float, default=0.15)
@@ -118,7 +120,9 @@ def main() -> None:
     n_episodes = args.episodes or 1  # Episodes per config
 
     total_episodes = len(campaign) * n_episodes
-    logger.info("Campaign: %d configs × %d episodes = %d total", len(campaign), n_episodes, total_episodes)
+    logger.info(
+        "Campaign: %d configs × %d episodes = %d total", len(campaign), n_episodes, total_episodes
+    )
 
     if args.resume:
         logger.info("Resuming from manifest:\n%s", manifest.summary())

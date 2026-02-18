@@ -60,7 +60,9 @@ def main() -> None:
         read_time = time.time() - t0
         read_mb_per_sec = (100 * 32 * 224 * 224 * 3 / 1e6) / read_time
 
-        print(f"{name:<20} {file_size:>10.1f} {write_time:>10.2f} {read_time:>10.2f} {read_mb_per_sec:>10.1f}")
+        print(
+            f"{name:<20} {file_size:>10.1f} {write_time:>10.2f} {read_time:>10.2f} {read_mb_per_sec:>10.1f}"
+        )
 
         if best_read is None or read_time < best_read:
             best_read = read_time
@@ -95,7 +97,9 @@ def main() -> None:
                 _ = f["images"][start : start + 32]
             read_time = time.time() - t0
             rate = n_clips / read_time
-            print(f"  Random clip reads: {n_clips} clips in {read_time:.2f}s = {rate:.1f} clips/sec")
+            print(
+                f"  Random clip reads: {n_clips} clips in {read_time:.2f}s = {rate:.1f} clips/sec"
+            )
     else:
         print("No real CARLA data found in data/campaign_test/")
 

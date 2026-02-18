@@ -11,6 +11,7 @@ Note:
     of the WSL2 virtual network, obtained via `ip route`.
     This IP can change on every WSL restart.
 """
+
 import subprocess
 import sys
 
@@ -22,7 +23,9 @@ def get_windows_host_ip():
     try:
         result = subprocess.run(
             ["ip", "route", "show", "default"],
-            capture_output=True, text=True, check=True,
+            capture_output=True,
+            text=True,
+            check=True,
         )
         # Output: "default via 172.20.0.1 dev eth0"
         return result.stdout.strip().split()[2]

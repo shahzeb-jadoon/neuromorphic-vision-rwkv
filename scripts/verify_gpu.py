@@ -1,4 +1,5 @@
 """Verify GPU access and PyTorch CUDA functionality."""
+
 import sys
 import torch
 
