@@ -11,17 +11,13 @@ Usage:
 import argparse
 import hashlib
 import json
-import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
 import h5py
 import numpy as np
 
-# Ensure src package is importable when running as a script
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-
-from src.data import hdf5_schema as S  # noqa: E402
+from src.data import hdf5_schema as S
 
 # Navigation commands matching CARLA RoadOption enum
 NAV_COMMANDS = {

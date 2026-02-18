@@ -9,6 +9,7 @@ Run with: pytest tests/test_scripts.py -v
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -22,6 +23,16 @@ from src.data import hdf5_schema as S
 
 # Directory for test outputs
 TEST_OUTPUT_DIR = Path("/tmp/test_scripts_output")
+
+# Project root — needed so subprocess can find `src` package
+_PROJECT_ROOT = str(Path(__file__).resolve().parent.parent)
+
+
+def _script_env() -> dict[str, str]:
+    """Return an env dict with PYTHONPATH set to project root."""
+    env = os.environ.copy()
+    env["PYTHONPATH"] = _PROJECT_ROOT + os.pathsep + env.get("PYTHONPATH", "")
+    return env
 
 
 @pytest.fixture(scope="module", autouse=True)
@@ -57,7 +68,8 @@ class TestCreateToyDataset:
             ],
             capture_output=True,
             text=True,
-            cwd=str(Path(__file__).parent.parent),
+            cwd=_PROJECT_ROOT,
+            env=_script_env(),
         )
         assert result.returncode == 0, f"Script failed:\n{result.stderr}"
 
@@ -130,7 +142,8 @@ class TestAnalyzeDataset:
                 ],
                 capture_output=True,
                 text=True,
-                cwd=str(Path(__file__).parent.parent),
+                cwd=_PROJECT_ROOT,
+                env=_script_env(),
             )
             assert result.returncode == 0, f"Toy data generation failed:\n{result.stderr}"
         return toy_dir
@@ -145,7 +158,8 @@ class TestAnalyzeDataset:
             ],
             capture_output=True,
             text=True,
-            cwd=str(Path(__file__).parent.parent),
+            cwd=_PROJECT_ROOT,
+            env=_script_env(),
         )
         assert result.returncode == 0, f"Analysis failed:\n{result.stderr}"
 
@@ -159,7 +173,8 @@ class TestAnalyzeDataset:
             ],
             capture_output=True,
             text=True,
-            cwd=str(Path(__file__).parent.parent),
+            cwd=_PROJECT_ROOT,
+            env=_script_env(),
         )
         output = result.stdout.lower()
         # Should mention episodes, frames, or similar stats

@@ -20,15 +20,12 @@ from pathlib import Path
 import numpy as np
 import yaml
 
-# Add project root to path
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-
-from src.data.expert_collector import (  # noqa: E402
+from src.data.expert_collector import (
     CollectionManifest,
     EpisodeConfig,
     ExpertDataCollector,
 )
-from src.data.route_generator import BalancedRouteGenerator, RouteConfig  # noqa: E402
+from src.data.route_generator import BalancedRouteGenerator, RouteConfig
 
 logging.basicConfig(
     level=logging.INFO,
