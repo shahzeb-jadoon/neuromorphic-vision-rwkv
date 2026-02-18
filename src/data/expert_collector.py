@@ -16,6 +16,8 @@ Handles three failure modes:
 
 from __future__ import annotations
 
+from src.data import hdf5_schema as S
+
 import hashlib
 import json
 import logging
@@ -350,7 +352,9 @@ class ExpertDataCollector:
                         npc.set_autopilot(True, traffic_manager.get_port())
                         npc_vehicles.append(npc)
 
-                logger.info("Spawned %d NPC vehicles (requested %d)", len(npc_vehicles), config.n_vehicles)
+                logger.info(
+                    "Spawned %d NPC vehicles (requested %d)", len(npc_vehicles), config.n_vehicles
+                )
 
             # --- Attach camera ---
             camera_bp = bp_lib.find("sensor.camera.rgb")
@@ -463,7 +467,9 @@ class ExpertDataCollector:
                     )
 
             # --- Determine status ---
-            timed_out = stuck_start is not None and (time.time() - stuck_start > config.timeout_duration)
+            timed_out = stuck_start is not None and (
+                time.time() - stuck_start > config.timeout_duration
+            )
             if timed_out:
                 status = "timeout"
             elif collision_frame is not None:
@@ -528,7 +534,7 @@ class ExpertDataCollector:
         finally:
             # Disable autopilot before cleanup to avoid TM race conditions
             try:
-                if 'vehicle' in dir() and vehicle is not None and vehicle.is_alive:
+                if "vehicle" in dir() and vehicle is not None and vehicle.is_alive:
                     vehicle.set_autopilot(False)
             except Exception:
                 pass
@@ -588,26 +594,27 @@ class ExpertDataCollector:
 
         with h5py.File(filepath, "w") as f:
             f.create_dataset(
-                "images",
+                S.IMAGES,
                 data=images,
                 compression="gzip",
                 compression_opts=1,  # Level 1 = fastest decompression, ~same ratio
                 chunks=(1, config.camera_height, config.camera_width, 3),
             )
-            f.create_dataset("steering", data=steering)
-            f.create_dataset("throttle", data=throttle)
-            f.create_dataset("brake", data=brake)
-            f.create_dataset("velocity", data=velocity)
-            f.create_dataset("nav_command", data=nav_command)
+            f.create_dataset(S.STEERING, data=steering)
+            f.create_dataset(S.THROTTLE, data=throttle)
+            f.create_dataset(S.BRAKE, data=brake)
+            f.create_dataset(S.VELOCITY, data=velocity)
+            f.create_dataset(S.NAV_COMMAND, data=nav_command)
 
-            meta = f.create_group("metadata")
-            meta.attrs["town"] = config.town
-            meta.attrs["weather"] = config.weather
-            meta.attrs["fps"] = config.fps
-            meta.attrs["n_frames"] = len(images)
-            meta.attrs["status"] = status
+            meta = f.create_group(S.METADATA_GROUP)
+            meta.attrs[S.META_SCHEMA_VERSION] = S.SCHEMA_VERSION
+            meta.attrs[S.META_TOWN] = config.town
+            meta.attrs[S.META_WEATHER] = config.weather
+            meta.attrs[S.META_FPS] = config.fps
+            meta.attrs[S.META_N_FRAMES] = len(images)
+            meta.attrs[S.META_STATUS] = status
             if collision_frame is not None:
-                meta.attrs["collision_frame"] = collision_frame
+                meta.attrs[S.META_COLLISION_FRAME] = collision_frame
 
         # Nav distribution
         nav_names = {0: "LaneFollow", 1: "Left", 2: "Right", 3: "Straight"}
@@ -677,9 +684,7 @@ class CollectionManifest:
 
         self.data["episodes"].append(entry)
         self.data["total_episodes"] = len(self.data["episodes"])
-        self.data["total_frames"] = sum(
-            e["n_frames"] for e in self.data["episodes"]
-        )
+        self.data["total_frames"] = sum(e["n_frames"] for e in self.data["episodes"])
         self.data["last_updated"] = datetime.now(timezone.utc).isoformat()
 
     def save(self) -> None:
@@ -693,9 +698,7 @@ class CollectionManifest:
         Only counts episodes with status='completed'.
         """
         return {
-            (e["town"], e["weather"])
-            for e in self.data["episodes"]
-            if e["status"] == "completed"
+            (e["town"], e["weather"]) for e in self.data["episodes"] if e["status"] == "completed"
         }
 
     def summary(self) -> str:

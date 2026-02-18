@@ -11,7 +11,6 @@ import subprocess
 import sys
 from pathlib import Path
 
-import numpy as np
 import pytest
 import torch
 
@@ -29,10 +28,14 @@ def create_toy_data():
         [
             sys.executable,
             "scripts/create_toy_dataset.py",
-            "--output", str(TOY_DIR),
-            "--episodes", "6",
-            "--frames", "50",
-            "--seed", "42",
+            "--output",
+            str(TOY_DIR),
+            "--episodes",
+            "6",
+            "--frames",
+            "50",
+            "--seed",
+            "42",
         ],
         check=True,
         capture_output=True,
@@ -165,9 +168,7 @@ class TestAugmentation:
         ds_no_aug = DrivingSequenceDataset(
             TOY_DIR, seq_len=16, split="train", seed=42, augment=False
         )
-        ds_aug = DrivingSequenceDataset(
-            TOY_DIR, seq_len=16, split="train", seed=42, augment=True
-        )
+        ds_aug = DrivingSequenceDataset(TOY_DIR, seq_len=16, split="train", seed=42, augment=True)
 
         # Get same clip from both — augmented may differ due to randomness
         item_no_aug = ds_no_aug[0]

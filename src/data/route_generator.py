@@ -15,7 +15,7 @@ from typing import Any
 import numpy as np
 
 try:
-    import carla
+    import carla  # noqa: F401
 
     CARLA_AVAILABLE = True
 except ImportError:
@@ -215,10 +215,7 @@ class BalancedRouteGenerator:
         distances = []
         for junc in self._junctions:
             loc = junc["location"]
-            dist = (
-                (current_location.x - loc.x) ** 2
-                + (current_location.y - loc.y) ** 2
-            ) ** 0.5
+            dist = ((current_location.x - loc.x) ** 2 + (current_location.y - loc.y) ** 2) ** 0.5
             distances.append(dist)
 
         distances = np.array(distances)
@@ -248,7 +245,9 @@ class BalancedRouteGenerator:
         Returns list of (transform, road_option_name) tuples.
         """
         try:
-            from agents.navigation.global_route_planner import GlobalRoutePlanner  # type: ignore[import-untyped]
+            from agents.navigation.global_route_planner import (  # type: ignore[import-untyped]
+                GlobalRoutePlanner,
+            )
 
             grp = GlobalRoutePlanner(self.map, self.config.sampling_resolution)
             route = grp.trace_route(start_wp.transform.location, end_wp.transform.location)
@@ -294,7 +293,4 @@ class BalancedRouteGenerator:
         if total == 0:
             return {}
 
-        return {
-            option: count / total
-            for option, count in sorted(counts.items())
-        }
+        return {option: count / total for option, count in sorted(counts.items())}

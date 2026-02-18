@@ -300,7 +300,7 @@ training:
   seed: 42
 
 data:
-  dataset_dir: "~/datasets/carla_expert"
+  dataset_dir: "./data/collected"  # Or set $DATA_DIR for lab NFS
   train_split: 0.8
   augmentation: true
 
@@ -353,4 +353,3 @@ All of the following must be true before starting Phase III:
 8. Training curves logged in W&B and visually inspected
 9. Forward pass verified: (B, T, 3, 224, 224) → (B, T, 2) with correct ranges
 10. At least 2 vision tokenization stages compared (pretrained vs from-scratch)
-

@@ -9,8 +9,6 @@ suitable for recurrent model training where temporal continuity matters.
 
 from __future__ import annotations
 
-import json
-import math
 from pathlib import Path
 from typing import Any
 
@@ -18,6 +16,8 @@ import h5py
 import numpy as np
 import torch
 from torch.utils.data import Dataset, WeightedRandomSampler
+
+from src.data import hdf5_schema as S
 
 # ImageNet normalization constants
 IMAGENET_MEAN = torch.tensor([0.485, 0.456, 0.406]).view(3, 1, 1)
@@ -85,13 +85,13 @@ class DrivingSequenceDataset(Dataset):
 
         for ep_idx, ep_path in enumerate(self.episode_files):
             with h5py.File(ep_path, "r") as f:
-                n_frames = f["images"].shape[0]
-                nav_cmds = f["nav_command"][:]
+                n_frames = f[S.IMAGES].shape[0]
+                nav_cmds = f[S.NAV_COMMAND][:]
 
                 # Truncate at collision frame to exclude post-collision
                 # garbage data (vehicle stuck/spinning)
-                if "metadata" in f and "collision_frame" in f["metadata"].attrs:
-                    collision_frame = int(f["metadata"].attrs["collision_frame"])
+                if S.METADATA_GROUP in f and S.META_COLLISION_FRAME in f[S.METADATA_GROUP].attrs:
+                    collision_frame = int(f[S.METADATA_GROUP].attrs[S.META_COLLISION_FRAME])
                     if collision_frame > 0:
                         n_frames = min(n_frames, collision_frame)
                         nav_cmds = nav_cmds[:n_frames]
@@ -171,11 +171,11 @@ class DrivingSequenceDataset(Dataset):
         ep_path = self.episode_files[ep_idx]
 
         with h5py.File(ep_path, "r") as f:
-            images = f["images"][start:end]  # (T, H, W, 3) uint8
-            steering = f["steering"][start:end]  # (T,) float32
-            throttle = f["throttle"][start:end]  # (T,) float32
-            nav_cmd = f["nav_command"][start:end]  # (T,) int32
-            velocity = f["velocity"][start:end]  # (T, 3) float32
+            images = f[S.IMAGES][start:end]  # (T, H, W, 3) uint8
+            steering = f[S.STEERING][start:end]  # (T,) float32
+            throttle = f[S.THROTTLE][start:end]  # (T,) float32
+            nav_cmd = f[S.NAV_COMMAND][start:end]  # (T,) int32
+            velocity = f[S.VELOCITY][start:end]  # (T, 3) float32
 
         # Convert images: uint8 HWC → float32 CHW, then normalize
         images = torch.from_numpy(images.copy()).permute(0, 3, 1, 2).float() / 255.0
