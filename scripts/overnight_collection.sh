@@ -7,7 +7,7 @@
 #   conda activate rwkv
 #   bash scripts/overnight_collection.sh
 #
-# Expected runtime: ~4-6 hours
+# Expected runtime: ~6-10 hours
 # Expected output:  ~10+ hours of driving data (720K+ frames)
 # Expected storage: ~50-70 GB (gzip-1 compressed)
 #
@@ -37,78 +37,47 @@ TOWNS=("Town01" "Town03" "Town04" "Town05")
 # Weather conditions
 WEATHERS=("ClearNoon" "CloudyNoon" "WetNoon" "SoftRainNoon" "HardRainNoon" "ClearSunset")
 
-# Episodes per (town, weather) combination = 4×6×5 = 120 episodes
-EPISODES_PER_CONFIG=5
+# Episodes per (town, weather) combination = 4×6×6 = 144 episodes
+EPISODES_PER_CONFIG=6
 
-# Each episode = 4000 frames (200 seconds at 20 FPS)
-MAX_FRAMES=4000
+# Each episode = 5000 frames (250 seconds at 20 FPS)
+MAX_FRAMES=5000
 
 # Traffic
 N_VEHICLES=40
 N_WALKERS=0
 
-# Total expected: 120 episodes × 4000 frames = 480,000 frames (≈6.7 hours)
-# With additional runs or more episodes_per_config, aim for 720K+ frames
+# Route generation strategy: balanced turns
+ROUTE_STRATEGY="balanced"
+TARGET_LEFT=0.15
+TARGET_RIGHT=0.15
+
+# Total expected: 144 episodes × 5000 frames = 720,000 frames (≈10 hours)
 echo ""
 echo "Plan: ${#TOWNS[@]} towns × ${#WEATHERS[@]} weathers × ${EPISODES_PER_CONFIG} episodes"
 echo "Total: $(( ${#TOWNS[@]} * ${#WEATHERS[@]} * ${EPISODES_PER_CONFIG} )) episodes"
 echo "Frames per episode: ${MAX_FRAMES} ($(( MAX_FRAMES / 20 ))s at 20 FPS)"
 echo "Expected total: $(( ${#TOWNS[@]} * ${#WEATHERS[@]} * ${EPISODES_PER_CONFIG} * MAX_FRAMES )) frames"
+echo "Route strategy: ${ROUTE_STRATEGY} (left=${TARGET_LEFT}, right=${TARGET_RIGHT})"
 echo ""
 
-# --- Run Collection ---
+# --- Run Collection via collect_data.py (uses route generator) ---
 for town in "${TOWNS[@]}"; do
-    for weather in "${WEATHERS[@]}"; do
-        echo "[$(date +%H:%M:%S)] Starting: ${town} / ${weather} (${EPISODES_PER_CONFIG} episodes)" | tee -a "${LOG_FILE}"
+    echo "[$(date +%H:%M:%S)] Starting: ${town} (${EPISODES_PER_CONFIG} episodes per weather)" | tee -a "${LOG_FILE}"
 
-        python -c "
-import logging, time, sys
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s [%(levelname)s] %(name)s: %(message)s',
-    datefmt='%H:%M:%S',
-    handlers=[
-        logging.FileHandler('${LOG_FILE}', mode='a'),
-        logging.StreamHandler(sys.stdout),
-    ]
-)
+    python scripts/collect_data.py \
+        --config configs/collection.yaml \
+        --output "${OUTPUT_DIR}" \
+        --town "${town}" \
+        --episodes "${EPISODES_PER_CONFIG}" \
+        --route-strategy "${ROUTE_STRATEGY}" \
+        --target-left "${TARGET_LEFT}" \
+        --target-right "${TARGET_RIGHT}" \
+        --resume \
+        2>&1 | tee -a "${LOG_FILE}"
 
-from src.data.expert_collector import ExpertDataCollector, EpisodeConfig, CollectionManifest
-from pathlib import Path
-
-collector = ExpertDataCollector(host='auto', port=2000, output_dir='${OUTPUT_DIR}')
-collector.connect()
-
-manifest = CollectionManifest(Path('${MANIFEST}'))
-
-# Check if this (town, weather) is already done
-completed = manifest.get_completed_configs()
-if ('${town}', '${weather}') in completed:
-    print('Skipping ${town}/${weather} — already completed')
-else:
-    for ep in range(${EPISODES_PER_CONFIG}):
-        config = EpisodeConfig(
-            town='${town}',
-            weather='${weather}',
-            max_frames=${MAX_FRAMES},
-            n_vehicles=${N_VEHICLES},
-            fps=20,
-        )
-        result = collector.collect_episode(config)
-        manifest.add_episode(result)
-        manifest.save()
-        print(f'  Episode {ep+1}/${EPISODES_PER_CONFIG}: {result.status}, {result.n_frames} frames, nav={result.nav_distribution}')
-
-        # If crashed, try to reconnect
-        if result.status == 'crashed' and result.error_message:
-            print('  Attempting reconnect after crash...')
-            if not collector._reconnect():
-                print('  FATAL: Could not reconnect. Skipping remaining episodes.')
-                break
-"
-        # Small pause between town/weather combos to let CARLA settle
-        sleep 2
-    done
+    # Small pause between towns to let CARLA settle
+    sleep 5
 done
 
 echo ""
