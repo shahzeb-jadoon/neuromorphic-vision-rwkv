@@ -7,7 +7,7 @@ name = "neuromorphic-vision-rwkv"
 version = "0.1.0"
 description = "Vision-RWKV based autonomous driving agent with neuromorphic alignment"
 readme = "README.md"
-license = {text = "MIT"}
+license = {text = "All Rights Reserved"}
 requires-python = ">=3.11"
 authors = [
     {name = "Shahzeb Jadoon"},
@@ -17,6 +17,7 @@ keywords = ["RWKV", "autonomous-driving", "neuromorphic", "CARLA", "vision"]
 dependencies = [
     "torch>=2.6.0",
     "torchvision>=0.21.0",
+    "torchaudio>=2.6.0",
     "numpy>=2.2.0",
     "h5py>=3.13.0",
     "pyyaml>=6.0.2",
@@ -25,9 +26,16 @@ dependencies = [
     "tqdm>=4.67.0",
     "matplotlib>=3.10.0",
     "tensorboard>=2.19.0",
+    "scipy>=1.14.0",
+    "einops>=0.8.0",
+    "scikit-learn>=1.5.0",
 ]
 
 [project.optional-dependencies]
+simulator = [
+    "carla==0.9.16",
+    "rwkv>=0.8.0",
+]
 dev = [
     "pytest>=8.0",
     "pytest-cov>=4.0",
