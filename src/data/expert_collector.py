@@ -284,8 +284,37 @@ class ExpertDataCollector:
         throttle_buf: list[float] = []
         brake_buf: list[float] = []
         velocity_buf: list[np.ndarray] = []
-        nav_cmd_buf: list[int] = []
+        nav_cmd_heuristic_buf: list[int] = []
+        nav_cmd_planner_buf: list[int] = []
         collision_frame: int | None = None
+
+        # Pre-process route waypoints for nearest-neighbour planner label lookup.
+        # route_waypoints is list[(transform, road_option_name_str)].
+        route_positions: np.ndarray | None = None
+        route_road_options: list[int] | None = None
+        if route_waypoints:
+            _positions = []
+            _options = []
+            road_option_name_to_id = {
+                "LaneFollow": 0,
+                "Left": 1,
+                "Right": 2,
+                "Straight": 3,
+                "RoadOption.LANEFOLLOW": 0,
+                "RoadOption.LEFT": 1,
+                "RoadOption.RIGHT": 2,
+                "RoadOption.STRAIGHT": 3,
+                "LANEFOLLOW": 0,
+                "LEFT": 1,
+                "RIGHT": 2,
+                "STRAIGHT": 3,
+            }
+            for transform, road_opt_name in route_waypoints:
+                loc = transform.location
+                _positions.append([loc.x, loc.y])
+                _options.append(road_option_name_to_id.get(str(road_opt_name), 0))
+            route_positions = np.array(_positions, dtype=np.float32)
+            route_road_options = _options
 
         try:
             assert self.world is not None
@@ -448,11 +477,27 @@ class ExpertDataCollector:
                 vel = vehicle.get_velocity()
                 velocity_buf.append(np.array([vel.x, vel.y, vel.z], dtype=np.float32))
 
-                # Navigation command (inferred from heading vs waypoint direction)
+                # Navigation commands — store both planner and heuristic
                 veh_transform = vehicle.get_transform()
                 current_wp = carla_map.get_waypoint(veh_transform.location)
-                nav_id = self._infer_nav_command(veh_transform, current_wp, carla_map)
-                nav_cmd_buf.append(nav_id)
+
+                # Heuristic label (steering angle vs waypoint direction)
+                nav_heuristic = self._infer_nav_command(veh_transform, current_wp, carla_map)
+                nav_cmd_heuristic_buf.append(nav_heuristic)
+
+                # Planner label (nearest route waypoint's RoadOption)
+                if route_positions is not None and route_road_options is not None:
+                    veh_pos = np.array(
+                        [veh_transform.location.x, veh_transform.location.y],
+                        dtype=np.float32,
+                    )
+                    dists = np.sum((route_positions - veh_pos) ** 2, axis=1)
+                    nearest_idx = int(np.argmin(dists))
+                    nav_planner = route_road_options[nearest_idx]
+                else:
+                    # No route provided — fall back to heuristic
+                    nav_planner = nav_heuristic
+                nav_cmd_planner_buf.append(nav_planner)
 
                 # Track distance
                 cur_loc = veh_transform.location
@@ -508,7 +553,8 @@ class ExpertDataCollector:
                     throttle=np.array(throttle_buf, dtype=np.float32),
                     brake=np.array(brake_buf, dtype=np.float32),
                     velocity=np.stack(velocity_buf),
-                    nav_command=np.array(nav_cmd_buf, dtype=np.int32),
+                    nav_command_planner=np.array(nav_cmd_planner_buf, dtype=np.int32),
+                    nav_command_heuristic=np.array(nav_cmd_heuristic_buf, dtype=np.int32),
                     config=config,
                     status=status,
                     collision_frame=collision_frame,
@@ -534,7 +580,8 @@ class ExpertDataCollector:
                         throttle=np.array(throttle_buf, dtype=np.float32),
                         brake=np.array(brake_buf, dtype=np.float32),
                         velocity=np.stack(velocity_buf),
-                        nav_command=np.array(nav_cmd_buf, dtype=np.int32),
+                        nav_command_planner=np.array(nav_cmd_planner_buf, dtype=np.int32),
+                        nav_command_heuristic=np.array(nav_cmd_heuristic_buf, dtype=np.int32),
                         config=config,
                         status="crashed",
                         collision_frame=collision_frame,
@@ -602,7 +649,8 @@ class ExpertDataCollector:
         throttle: np.ndarray,
         brake: np.ndarray,
         velocity: np.ndarray,
-        nav_command: np.ndarray,
+        nav_command_planner: np.ndarray,
+        nav_command_heuristic: np.ndarray,
         config: EpisodeConfig,
         status: str,
         collision_frame: int | None,
@@ -627,7 +675,11 @@ class ExpertDataCollector:
             f.create_dataset(S.THROTTLE, data=throttle)
             f.create_dataset(S.BRAKE, data=brake)
             f.create_dataset(S.VELOCITY, data=velocity)
-            f.create_dataset(S.NAV_COMMAND, data=nav_command)
+            # Schema v2: store both planner and heuristic nav commands
+            f.create_dataset(S.NAV_COMMAND_PLANNER, data=nav_command_planner)
+            f.create_dataset(S.NAV_COMMAND_HEURISTIC, data=nav_command_heuristic)
+            # Backward compat: also write legacy nav_command using planner labels
+            f.create_dataset(S.NAV_COMMAND, data=nav_command_planner)
 
             meta = f.create_group(S.METADATA_GROUP)
             meta.attrs[S.META_SCHEMA_VERSION] = S.SCHEMA_VERSION
@@ -636,14 +688,26 @@ class ExpertDataCollector:
             meta.attrs[S.META_FPS] = config.fps
             meta.attrs[S.META_N_FRAMES] = len(images)
             meta.attrs[S.META_STATUS] = status
+            meta.attrs[S.META_CAMERA_WIDTH] = config.camera_width
+            meta.attrs[S.META_CAMERA_HEIGHT] = config.camera_height
             if collision_frame is not None:
                 meta.attrs[S.META_COLLISION_FRAME] = collision_frame
 
-        # Nav distribution
+        # Nav distribution (use planner labels as primary)
         nav_names = {0: "LaneFollow", 1: "Left", 2: "Right", 3: "Straight"}
         nav_dist = {}
         for cmd_id, cmd_name in nav_names.items():
-            nav_dist[cmd_name] = int(np.sum(nav_command == cmd_id))
+            nav_dist[cmd_name] = int(np.sum(nav_command_planner == cmd_id))
+
+        # Log divergence between planner and heuristic
+        n_diverge = int(np.sum(nav_command_planner != nav_command_heuristic))
+        if n_diverge > 0:
+            logger.info(
+                "Nav label divergence: %d/%d frames (%.1f%%) differ between planner and heuristic",
+                n_diverge,
+                len(nav_command_planner),
+                100.0 * n_diverge / len(nav_command_planner),
+            )
 
         logger.info(
             "Saved %s — %d frames, status=%s, town=%s",
@@ -724,6 +788,18 @@ class CollectionManifest:
         return {
             (e["town"], e["weather"]) for e in self.data["episodes"] if e["status"] == "completed"
         }
+
+    def get_completed_counts(self) -> dict[tuple[str, str], int]:
+        """Return count of completed episodes per (town, weather) combo.
+
+        Only counts episodes with status='completed'.
+        """
+        counts: dict[tuple[str, str], int] = {}
+        for e in self.data["episodes"]:
+            if e["status"] == "completed":
+                key = (e["town"], e["weather"])
+                counts[key] = counts.get(key, 0) + 1
+        return counts
 
     def summary(self) -> str:
         """Return human-readable summary."""

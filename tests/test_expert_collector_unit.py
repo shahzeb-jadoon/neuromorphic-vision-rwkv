@@ -157,7 +157,8 @@ class TestSaveEpisode:
             "throttle": np.random.uniform(0, 1, n).astype(np.float32),
             "brake": np.zeros(n, dtype=np.float32),
             "velocity": np.random.uniform(0, 10, (n, 3)).astype(np.float32),
-            "nav_command": np.zeros(n, dtype=np.int32),
+            "nav_command_planner": np.zeros(n, dtype=np.int32),
+            "nav_command_heuristic": np.zeros(n, dtype=np.int32),
         }
 
     def test_save_creates_h5_file(
@@ -169,7 +170,8 @@ class TestSaveEpisode:
             throttle=sample_data["throttle"],
             brake=sample_data["brake"],
             velocity=sample_data["velocity"],
-            nav_command=sample_data["nav_command"],
+            nav_command_planner=sample_data["nav_command_planner"],
+            nav_command_heuristic=sample_data["nav_command_heuristic"],
             config=EpisodeConfig(),
             status="completed",
             collision_frame=None,
@@ -187,7 +189,8 @@ class TestSaveEpisode:
             throttle=sample_data["throttle"],
             brake=sample_data["brake"],
             velocity=sample_data["velocity"],
-            nav_command=sample_data["nav_command"],
+            nav_command_planner=sample_data["nav_command_planner"],
+            nav_command_heuristic=sample_data["nav_command_heuristic"],
             config=EpisodeConfig(),
             status="completed",
             collision_frame=None,
@@ -199,7 +202,9 @@ class TestSaveEpisode:
             assert S.THROTTLE in f
             assert S.BRAKE in f
             assert S.VELOCITY in f
-            assert S.NAV_COMMAND in f
+            assert S.NAV_COMMAND in f  # legacy compat
+            assert S.NAV_COMMAND_PLANNER in f
+            assert S.NAV_COMMAND_HEURISTIC in f
             assert S.METADATA_GROUP in f
 
     def test_save_metadata_attrs(
@@ -211,7 +216,8 @@ class TestSaveEpisode:
             throttle=sample_data["throttle"],
             brake=sample_data["brake"],
             velocity=sample_data["velocity"],
-            nav_command=sample_data["nav_command"],
+            nav_command_planner=sample_data["nav_command_planner"],
+            nav_command_heuristic=sample_data["nav_command_heuristic"],
             config=EpisodeConfig(town="Town03", weather="WetNoon"),
             status="completed",
             collision_frame=None,
@@ -233,7 +239,8 @@ class TestSaveEpisode:
             throttle=sample_data["throttle"],
             brake=sample_data["brake"],
             velocity=sample_data["velocity"],
-            nav_command=sample_data["nav_command"],
+            nav_command_planner=sample_data["nav_command_planner"],
+            nav_command_heuristic=sample_data["nav_command_heuristic"],
             config=EpisodeConfig(),
             status="collision",
             collision_frame=42,
@@ -248,16 +255,20 @@ class TestSaveEpisode:
         self, collector: ExpertDataCollector, sample_data: dict[str, Any]
     ) -> None:
         # Set mixed nav commands
-        sample_data["nav_command"][:30] = 0  # LaneFollow
-        sample_data["nav_command"][30:40] = 1  # Left
-        sample_data["nav_command"][40:] = 2  # Right
+        sample_data["nav_command_planner"][:30] = 0  # LaneFollow
+        sample_data["nav_command_planner"][30:40] = 1  # Left
+        sample_data["nav_command_planner"][40:] = 2  # Right
+        sample_data["nav_command_heuristic"][:30] = 0
+        sample_data["nav_command_heuristic"][30:40] = 1
+        sample_data["nav_command_heuristic"][40:] = 2
         result = collector._save_episode(
             images=sample_data["images"],
             steering=sample_data["steering"],
             throttle=sample_data["throttle"],
             brake=sample_data["brake"],
             velocity=sample_data["velocity"],
-            nav_command=sample_data["nav_command"],
+            nav_command_planner=sample_data["nav_command_planner"],
+            nav_command_heuristic=sample_data["nav_command_heuristic"],
             config=EpisodeConfig(),
             status="completed",
             collision_frame=None,
@@ -276,7 +287,8 @@ class TestSaveEpisode:
             throttle=sample_data["throttle"],
             brake=sample_data["brake"],
             velocity=sample_data["velocity"],
-            nav_command=sample_data["nav_command"],
+            nav_command_planner=sample_data["nav_command_planner"],
+            nav_command_heuristic=sample_data["nav_command_heuristic"],
             config=EpisodeConfig(),
             status="completed",
             collision_frame=None,
@@ -295,7 +307,8 @@ class TestSaveEpisode:
             throttle=sample_data["throttle"],
             brake=sample_data["brake"],
             velocity=sample_data["velocity"],
-            nav_command=sample_data["nav_command"],
+            nav_command_planner=sample_data["nav_command_planner"],
+            nav_command_heuristic=sample_data["nav_command_heuristic"],
             config=EpisodeConfig(),
             status="completed",
             collision_frame=None,
@@ -312,11 +325,20 @@ class TestSaveEpisode:
 class TestHDF5Schema:
     """Tests that schema constants are consistent."""
 
-    def test_schema_version_positive(self) -> None:
-        assert S.SCHEMA_VERSION >= 1
+    def test_schema_version_is_v2(self) -> None:
+        assert S.SCHEMA_VERSION == 2
 
     def test_required_fields_exist(self) -> None:
-        for field in [S.IMAGES, S.STEERING, S.THROTTLE, S.BRAKE, S.VELOCITY, S.NAV_COMMAND]:
+        for field in [
+            S.IMAGES,
+            S.STEERING,
+            S.THROTTLE,
+            S.BRAKE,
+            S.VELOCITY,
+            S.NAV_COMMAND,
+            S.NAV_COMMAND_PLANNER,
+            S.NAV_COMMAND_HEURISTIC,
+        ]:
             assert isinstance(field, str)
             assert len(field) > 0
 
@@ -329,5 +351,7 @@ class TestHDF5Schema:
             S.META_FPS,
             S.META_N_FRAMES,
             S.META_STATUS,
+            S.META_CAMERA_WIDTH,
+            S.META_CAMERA_HEIGHT,
         ]:
             assert isinstance(field, str)

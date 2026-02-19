@@ -9,8 +9,8 @@ carla:
   synchronous: true
 
 camera:
-  width: 224
-  height: 224
+  width: 512
+  height: 512
   fov: 100
 
 # Towns for data collection (Town02 reserved for evaluation)

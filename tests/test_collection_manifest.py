@@ -201,7 +201,12 @@ class TestGetCompletedConfigs:
             )
         )
         manifest.add_episode(
-            _make_result(status="crashed", town="Town04", weather="SoftRainNoon", filename="ep3.h5")
+            _make_result(
+                status="crashed",
+                town="Town04",
+                weather="SoftRainNoon",
+                filename="ep3.h5",
+            )
         )
 
         completed = manifest.get_completed_configs()
@@ -213,6 +218,64 @@ class TestGetCompletedConfigs:
     def test_empty_manifest_returns_empty_set(self, manifest: CollectionManifest) -> None:
         """Empty manifest has no completed configs."""
         assert manifest.get_completed_configs() == set()
+
+
+class TestGetCompletedCounts:
+    """Test count-based campaign resumption."""
+
+    def test_counts_completed_only(self, manifest: CollectionManifest) -> None:
+        """Only 'completed' episodes are counted."""
+        manifest.add_episode(_make_result(status="completed", town="Town01", weather="ClearNoon"))
+        manifest.add_episode(
+            _make_result(
+                status="completed",
+                town="Town01",
+                weather="ClearNoon",
+                filename="ep2.h5",
+                episode_hash="bbb",
+            )
+        )
+        manifest.add_episode(
+            _make_result(
+                status="collision",
+                town="Town01",
+                weather="ClearNoon",
+                filename="ep3.h5",
+                episode_hash="ccc",
+                collision_frame=100,
+            )
+        )
+        counts = manifest.get_completed_counts()
+        assert counts[("Town01", "ClearNoon")] == 2
+
+    def test_counts_multiple_configs(self, manifest: CollectionManifest) -> None:
+        """Counts are tracked per (town, weather) pair."""
+        manifest.add_episode(_make_result(status="completed", town="Town01", weather="ClearNoon"))
+        manifest.add_episode(
+            _make_result(
+                status="completed",
+                town="Town03",
+                weather="WetNoon",
+                filename="ep2.h5",
+                episode_hash="bbb",
+            )
+        )
+        manifest.add_episode(
+            _make_result(
+                status="completed",
+                town="Town01",
+                weather="ClearNoon",
+                filename="ep3.h5",
+                episode_hash="ccc",
+            )
+        )
+        counts = manifest.get_completed_counts()
+        assert counts[("Town01", "ClearNoon")] == 2
+        assert counts[("Town03", "WetNoon")] == 1
+
+    def test_empty_manifest_returns_empty_dict(self, manifest: CollectionManifest) -> None:
+        """Empty manifest has no completed counts."""
+        assert manifest.get_completed_counts() == {}
 
 
 class TestSummary:

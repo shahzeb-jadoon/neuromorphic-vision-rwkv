@@ -15,6 +15,7 @@ import argparse
 import itertools
 import logging
 import sys
+import time
 from pathlib import Path
 
 import numpy as np
@@ -43,17 +44,35 @@ def load_config(config_path: str) -> dict:
 
 def build_campaign(
     cfg: dict,
-    completed: set[tuple[str, str]],
-) -> list[EpisodeConfig]:
-    """Build list of episode configs, skipping completed (town, weather) combos."""
+    completed_counts: dict[tuple[str, str], int],
+    episodes_per_config: int,
+) -> list[tuple[EpisodeConfig, int]]:
+    """Build list of (episode_config, remaining_count) pairs, accounting for completed.
+
+    Args:
+        cfg: Collection config dict.
+        completed_counts: Map of (town, weather) -> number of completed episodes.
+        episodes_per_config: Total desired episodes per (town, weather) combo.
+
+    Returns:
+        List of (EpisodeConfig, n_remaining) where n_remaining > 0.
+    """
     episodes = []
     towns = cfg.get("towns", ["Town01"])
     weathers = cfg.get("weathers", ["ClearNoon"])
     traffic_configs = cfg.get("traffic", {}).get("vehicles", [50])
 
     for town, weather in itertools.product(towns, weathers):
-        if (town, weather) in completed:
-            logger.info("Skipping %s / %s (already completed)", town, weather)
+        already_done = completed_counts.get((town, weather), 0)
+        remaining = episodes_per_config - already_done
+        if remaining <= 0:
+            logger.info(
+                "Skipping %s / %s (%d/%d already completed)",
+                town,
+                weather,
+                already_done,
+                episodes_per_config,
+            )
             continue
 
         for n_vehicles in traffic_configs:
@@ -66,11 +85,11 @@ def build_campaign(
                 timeout_speed=cfg.get("episode", {}).get("timeout_speed", 0.1),
                 timeout_duration=cfg.get("episode", {}).get("timeout_duration", 180),
                 fps=cfg.get("carla", {}).get("fps", 20),
-                camera_width=cfg.get("camera", {}).get("width", 224),
-                camera_height=cfg.get("camera", {}).get("height", 224),
+                camera_width=cfg.get("camera", {}).get("width", 512),
+                camera_height=cfg.get("camera", {}).get("height", 512),
                 camera_fov=cfg.get("camera", {}).get("fov", 100),
             )
-            episodes.append(ep)
+            episodes.append((ep, remaining))
 
     return episodes
 
@@ -111,14 +130,16 @@ def main() -> None:
 
     # Initialize
     manifest = CollectionManifest(manifest_path)
-    completed = manifest.get_completed_configs() if args.resume else set()
+    completed_counts = manifest.get_completed_counts() if args.resume else {}
 
-    campaign = build_campaign(cfg, completed)
-    n_episodes = args.episodes or 1  # Episodes per config
+    n_episodes = args.episodes or 1  # Episodes per (town, weather, traffic) config
+    campaign = build_campaign(cfg, completed_counts, n_episodes)
 
-    total_episodes = len(campaign) * n_episodes
+    total_episodes = sum(remaining for _, remaining in campaign)
     logger.info(
-        "Campaign: %d configs × %d episodes = %d total", len(campaign), n_episodes, total_episodes
+        "Campaign: %d configs with %d total remaining episodes",
+        len(campaign),
+        total_episodes,
     )
 
     if args.resume:
@@ -142,15 +163,27 @@ def main() -> None:
 
     # Run campaign
     episode_num = 0
-    for config in campaign:
-        # Setup route generator for this town
-        try:
-            route_gen = BalancedRouteGenerator(collector.world, route_cfg)
-        except Exception as e:
-            logger.error("Failed to init route generator for %s: %s", config.town, e)
-            route_gen = None
+    current_town: str | None = None
+    route_gen: BalancedRouteGenerator | None = None
 
-        for ep_idx in range(n_episodes):
+    for config, n_remaining in campaign:
+        # Ensure correct map is loaded BEFORE creating route generator
+        if config.town != current_town:
+            logger.info("Loading map: %s", config.town)
+            assert collector.client is not None
+            collector.client.load_world(config.town)
+            collector.world = collector.client.get_world()
+            time.sleep(2.0)
+            current_town = config.town
+
+            # (Re-)create route generator on the now-correct map
+            try:
+                route_gen = BalancedRouteGenerator(collector.world, route_cfg)
+            except Exception as e:
+                logger.error("Failed to init route generator for %s: %s", config.town, e)
+                route_gen = None
+
+        for ep_idx in range(n_remaining):
             episode_num += 1
             logger.info(
                 "=== Episode %d/%d: %s / %s (traffic=%d) ===",
@@ -192,11 +225,8 @@ def main() -> None:
                 if not collector._reconnect():
                     logger.error("Failed to reconnect after crash. Aborting.")
                     sys.exit(1)
-                # Re-initialize route generator after reconnect
-                try:
-                    route_gen = BalancedRouteGenerator(collector.world, route_cfg)
-                except Exception:
-                    route_gen = None
+                # Force map reload + route_gen re-init on next iteration
+                current_town = None
 
     # Final summary
     logger.info("=" * 60)

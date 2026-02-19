@@ -179,9 +179,8 @@ class DrivingSequenceDataset(Dataset):
             nav_cmd = f[S.NAV_COMMAND][start:end]  # (T,) int32
             velocity = f[S.VELOCITY][start:end]  # (T, 3) float32
 
-        # Convert images: uint8 HWC → float32 CHW, then normalize
+        # Convert images: uint8 HWC → float32 CHW [0, 1]
         images = torch.from_numpy(images.copy()).permute(0, 3, 1, 2).float() / 255.0
-        images = (images - IMAGENET_MEAN) / IMAGENET_STD
 
         steering = torch.from_numpy(steering.copy())
         throttle = torch.from_numpy(throttle.copy())
@@ -194,9 +193,12 @@ class DrivingSequenceDataset(Dataset):
         nav_cmd = torch.from_numpy(nav_cmd.copy()).long()
         velocity = torch.from_numpy(velocity.copy())
 
-        # Data augmentation (train only)
+        # Data augmentation BEFORE normalization (operates on [0, 1] pixel values)
         if self.augment:
             images, controls = self._augment(images, controls)
+
+        # ImageNet normalization (after augmentation so jitter operates on real intensities)
+        images = (images - IMAGENET_MEAN) / IMAGENET_STD
 
         return {
             "images": images,
@@ -219,8 +221,12 @@ class DrivingSequenceDataset(Dataset):
         All augmentations are applied consistently across the entire clip
         to maintain temporal coherence.
 
+        Note: Must be called BEFORE ImageNet normalization so that
+        brightness/contrast adjustments operate on real pixel values
+        in [0, 1], not z-scores.
+
         Args:
-            images: (T, 3, H, W) normalized float32
+            images: (T, 3, H, W) float32 in [0, 1]
             controls: (T, 2) [steering, acceleration]
 
         Returns:
@@ -242,6 +248,9 @@ class DrivingSequenceDataset(Dataset):
         if torch.rand(1).item() < 0.5:
             images = images.flip(dims=[-1])  # Flip W dimension
             controls[:, 0] = -controls[:, 0]  # Flip steering sign
+
+        # Clamp to valid [0, 1] range after brightness/contrast adjustments
+        images = images.clamp(0.0, 1.0)
 
         return images, controls
 
