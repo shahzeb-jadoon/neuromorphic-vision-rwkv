@@ -9,15 +9,24 @@
 #
 # Expected runtime: ~6-10 hours
 # Expected output:  ~10+ hours of driving data (720K+ frames)
-# Expected storage: ~50-70 GB (gzip-1 compressed)
+# Expected storage: ~200-300 GB at 512×512 (gzip-1, ~270 KB/frame)
+#
+# Storage estimates (50 hrs driving):
+#   224×224:  ~34 GB    (measured ~68 KB/frame)
+#   512×512:  ~1.22 TB  (estimated ~270 KB/frame)
+#   1024×1024: ~4.9 TB  (estimated ~1.08 MB/frame)
 #
 # Monitor progress: tail -f data/collected/collection.log
 # Resume after interruption: just re-run the script (manifest-based resume)
+# Move data to NFS and re-run to continue on larger storage.
 # ============================================================================
 
-set -euo pipefail
+set -uo pipefail  # Don't use -e: allow per-town failures without aborting
 
-OUTPUT_DIR="data/collected"
+# --- Storage location ---
+# Default: the dataset directory below
+# Override: OUTPUT_DIR=/path/to/dir bash scripts/overnight_collection.sh
+OUTPUT_DIR="${OUTPUT_DIR:-/mnt/data/carla_data}"
 LOG_FILE="${OUTPUT_DIR}/collection.log"
 MANIFEST="${OUTPUT_DIR}/collection_manifest.json"
 
@@ -40,8 +49,8 @@ WEATHERS=("ClearNoon" "CloudyNoon" "WetNoon" "SoftRainNoon" "HardRainNoon" "Clea
 # Episodes per (town, weather) combination = 4×6×6 = 144 episodes
 EPISODES_PER_CONFIG=6
 
-# Each episode = 5000 frames (250 seconds at 20 FPS)
-MAX_FRAMES=5000
+# Each episode = 4000 frames (200 seconds at 20 FPS)
+MAX_FRAMES=4000
 
 # Traffic
 N_VEHICLES=40
@@ -52,7 +61,8 @@ ROUTE_STRATEGY="balanced"
 TARGET_LEFT=0.15
 TARGET_RIGHT=0.15
 
-# Total expected: 144 episodes × 5000 frames = 720,000 frames (≈10 hours)
+# Total expected: 144 episodes × 4000 frames = 576,000 frames (≈8 hours)
+# At 512×512: ~156 GB (576K × 270 KB/frame)
 echo ""
 echo "Plan: ${#TOWNS[@]} towns × ${#WEATHERS[@]} weathers × ${EPISODES_PER_CONFIG} episodes"
 echo "Total: $(( ${#TOWNS[@]} * ${#WEATHERS[@]} * ${EPISODES_PER_CONFIG} )) episodes"
@@ -62,10 +72,14 @@ echo "Route strategy: ${ROUTE_STRATEGY} (left=${TARGET_LEFT}, right=${TARGET_RIG
 echo ""
 
 # --- Run Collection via collect_data.py (uses route generator) ---
+# Each town runs as its own collect_data.py invocation for isolation.
+# Weathers come from configs/collection.yaml (not overridden here).
+# Resume is automatic: manifest tracks completed episodes.
+FAILED_TOWNS=()
 for town in "${TOWNS[@]}"; do
     echo "[$(date +%H:%M:%S)] Starting: ${town} (${EPISODES_PER_CONFIG} episodes per weather)" | tee -a "${LOG_FILE}"
 
-    python scripts/collect_data.py \
+    if python scripts/collect_data.py \
         --config configs/collection.yaml \
         --output "${OUTPUT_DIR}" \
         --town "${town}" \
@@ -74,15 +88,24 @@ for town in "${TOWNS[@]}"; do
         --target-left "${TARGET_LEFT}" \
         --target-right "${TARGET_RIGHT}" \
         --resume \
-        2>&1 | tee -a "${LOG_FILE}"
+        2>&1 | tee -a "${LOG_FILE}"; then
+        echo "[$(date +%H:%M:%S)] ✓ ${town} complete" | tee -a "${LOG_FILE}"
+    else
+        echo "[$(date +%H:%M:%S)] ✗ ${town} FAILED — continuing with next town" | tee -a "${LOG_FILE}"
+        FAILED_TOWNS+=("${town}")
+    fi
 
-    # Small pause between towns to let CARLA settle
-    sleep 5
+    # Pause between towns to let CARLA settle after map change
+    sleep 10
 done
 
 echo ""
 echo "============================================================"
 echo "Campaign finished: $(date)"
+if [ ${#FAILED_TOWNS[@]} -gt 0 ]; then
+    echo "FAILED TOWNS: ${FAILED_TOWNS[*]}"
+    echo "Re-run this script to retry (resume is automatic)."
+fi
 echo "============================================================"
 
 # Run analysis

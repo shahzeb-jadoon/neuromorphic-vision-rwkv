@@ -8,10 +8,34 @@ carla:
   fps: 20              # Fixed timestep = 0.05s
   synchronous: true
 
-camera:
-  width: 224
-  height: 224
-  fov: 100
+# --- 3-Camera panoramic setup ---
+# Each camera at 60° FOV, yawed left/centre/right for 180° total coverage.
+# Stitched panoramic stored as single (H, W_total, 3) array in HDF5.
+cameras:
+  n_cameras: 3
+  per_camera_width: 640
+  per_camera_height: 320
+  fov: 60
+  # Yaw offsets in degrees (left, centre, right)
+  yaw_offsets: [-60, 0, 60]
+  # Mounting position (vehicle frame, metres)
+  position:
+    x: 1.5              # forward from vehicle centre
+    z: 2.4              # height above ground
+
+# --- Expert agent (PrivilegedExpert) ---
+expert:
+  type: privileged_expert
+  target_speed: 30.0     # km/h
+  max_speed: 50.0
+  # PID tuning
+  speed_pid: [0.8, 0.05, 0.01]
+  steer_pid: [1.2, 0.0, 0.15]
+  # Safety
+  traffic_light_brake_distance: 20.0
+  vehicle_hazard_distance: 20.0
+  pedestrian_hazard_distance: 15.0
+  turn_speed_factor: 0.55
 
 # Towns for data collection (Town02 reserved for evaluation)
 towns:
@@ -60,6 +84,14 @@ episode:
 # Output
 output:
   directory: data/collected
+
+# Future-proofing: extra data to store per frame (negligible cost)
+extras:
+  store_position: true         # Vehicle (x,y,z) world coordinates
+  store_rotation: true         # Vehicle (pitch,yaw,roll)
+  store_traffic_light: true    # Traffic light state per frame
+  store_nearby_vehicles: true  # Up to 10 nearest vehicles (distance, speed, lane)
+  store_nearby_pedestrians: true  # Up to 5 nearest pedestrians
   compression: gzip
   compression_level: 1
   manifest: collection_manifest.json

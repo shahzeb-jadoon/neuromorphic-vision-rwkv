@@ -19,26 +19,27 @@ import numpy as np
 
 from src.data import hdf5_schema as S
 
-# Navigation commands matching CARLA RoadOption enum
+# Navigation commands matching CARLA RoadOption enum (v3 schema)
 NAV_COMMANDS = {
-    0: "LaneFollow",
     1: "Left",
     2: "Right",
     3: "Straight",
+    4: "LaneFollow",
 }
 
-# Target distribution for nav commands
-NAV_WEIGHTS = [0.60, 0.15, 0.15, 0.10]  # LaneFollow, Left, Right, Straight
+# Target distribution for nav commands (Left, Right, Straight, LaneFollow)
+NAV_WEIGHTS = [0.15, 0.15, 0.10, 0.60]
 
 
 def generate_episode(
     episode_idx: int,
     n_frames: int,
-    img_h: int = 224,
-    img_w: int = 224,
+    img_h: int = 320,
+    img_w: int = 1920,
+    n_cameras: int = 3,
     rng: np.random.Generator | None = None,
 ) -> dict:
-    """Generate a single synthetic episode.
+    """Generate a single synthetic episode (schema v3 — panoramic).
 
     Images use gradient patterns (not pure noise) so visual inspection
     is meaningful. Controls follow sinusoidal patterns.
@@ -46,8 +47,9 @@ def generate_episode(
     Args:
         episode_idx: Index for deterministic seed offset.
         n_frames: Number of frames per episode.
-        img_h: Image height.
-        img_w: Image width.
+        img_h: Panoramic image height.
+        img_w: Panoramic image width (n_cameras * per_camera_width).
+        n_cameras: Number of cameras (for metadata only).
         rng: Numpy random generator.
 
     Returns:
@@ -96,8 +98,53 @@ def generate_episode(
         # Forward velocity with slight lateral component from steering
         velocity[t] = [speed, speed * steering[t] * 0.1, 0.0]
 
-    # Navigation commands: weighted random distribution
-    nav_command = rng.choice(4, size=n_frames, p=NAV_WEIGHTS).astype(np.int32)
+    # Navigation commands: weighted random distribution (RoadOption 1–4)
+    nav_command = rng.choice(list(NAV_COMMANDS.keys()), size=n_frames, p=NAV_WEIGHTS).astype(
+        np.int32
+    )
+
+    # Position: simulated trajectory along a road
+    position = np.zeros((n_frames, 3), dtype=np.float32)
+    pos_x, pos_y = 0.0, 0.0
+    for t in range(n_frames):
+        heading = np.cumsum(steering[: t + 1])[-1] * 0.1
+        pos_x += velocity[t, 0] * np.cos(heading) * 0.05
+        pos_y += velocity[t, 0] * np.sin(heading) * 0.05
+        position[t] = [pos_x, pos_y, 0.0]
+
+    # Rotation: yaw from steering integral
+    rotation = np.zeros((n_frames, 3), dtype=np.float32)
+    rotation[:, 2] = np.cumsum(steering) * 5.0  # yaw in degrees
+
+    # Traffic light state: 0=Green, 1=Yellow, 2=Red (mostly green)
+    traffic_light_state = np.zeros(n_frames, dtype=np.int32)
+    red_starts = rng.choice(max(1, n_frames - 20), size=max(1, n_frames // 50), replace=False)
+    for rs in red_starts:
+        traffic_light_state[rs : min(rs + 15, n_frames)] = 2  # Red
+        traffic_light_state[max(0, rs - 3) : rs] = 1  # Yellow before red
+
+    # Target speed: varies with braking/acceleration
+    target_speed = np.full(n_frames, 8.33, dtype=np.float32)  # 30 km/h default
+    target_speed[brake > 0.1] = 0.0
+
+    # Driving mode: 0=FOLLOW_LANE mostly
+    driving_mode = np.zeros(n_frames, dtype=np.int32)
+    driving_mode[traffic_light_state == 2] = 3  # TRAFFIC_LIGHT_STOP
+    driving_mode[np.abs(steering) > 0.2] = 2  # TURNING
+
+    # Nearby vehicles/pedestrians as JSON strings
+    nearby_vehicles = []
+    nearby_pedestrians = []
+    for t in range(n_frames):
+        n_veh = rng.integers(0, 4)
+        vehs = [
+            {"distance": float(rng.uniform(5, 50)), "speed": float(rng.uniform(0, 15))}
+            for _ in range(n_veh)
+        ]
+        nearby_vehicles.append(json.dumps(vehs))
+        n_ped = rng.integers(0, 3)
+        peds = [{"distance": float(rng.uniform(3, 30))} for _ in range(n_ped)]
+        nearby_pedestrians.append(json.dumps(peds))
 
     # Metadata
     towns = ["Town01", "Town03", "Town04", "Town05"]
@@ -112,11 +159,23 @@ def generate_episode(
         "brake": brake,
         "velocity": velocity,
         "nav_command": nav_command,
+        "position": position,
+        "rotation": rotation,
+        "traffic_light_state": traffic_light_state,
+        "target_speed": target_speed,
+        "driving_mode": driving_mode,
+        "nearby_vehicles": nearby_vehicles,
+        "nearby_pedestrians": nearby_pedestrians,
         "metadata": {
             "town": town,
             "weather": weather,
             "fps": 20,
             "n_frames": n_frames,
+            "n_cameras": n_cameras,
+            "camera_fov": 60,
+            "camera_yaws": "[-60, 0, 60]",
+            "expert_type": "privileged_expert",
+            "expert_target_speed": 30.0,
             "status": "completed",
         },
     }
@@ -149,6 +208,21 @@ def save_episode_hdf5(
         f.create_dataset(S.BRAKE, data=episode_data["brake"])
         f.create_dataset(S.VELOCITY, data=episode_data["velocity"])
         f.create_dataset(S.NAV_COMMAND, data=episode_data["nav_command"])
+
+        # Schema v3 fields
+        f.create_dataset(S.POSITION, data=episode_data["position"])
+        f.create_dataset(S.ROTATION, data=episode_data["rotation"])
+        f.create_dataset(S.TRAFFIC_LIGHT_STATE, data=episode_data["traffic_light_state"])
+        f.create_dataset(S.TARGET_SPEED, data=episode_data["target_speed"])
+        f.create_dataset(S.DRIVING_MODE, data=episode_data["driving_mode"])
+
+        # Variable-length string datasets for JSON blobs
+        str_dt = h5py.string_dtype()
+        n = len(episode_data["nearby_vehicles"])
+        ds_veh = f.create_dataset(S.NEARBY_VEHICLES, (n,), dtype=str_dt)
+        ds_veh[:] = episode_data["nearby_vehicles"]
+        ds_ped = f.create_dataset(S.NEARBY_PEDESTRIANS, (n,), dtype=str_dt)
+        ds_ped[:] = episode_data["nearby_pedestrians"]
 
         # Metadata as attributes on a group
         meta = f.create_group(S.METADATA_GROUP)
@@ -197,6 +271,7 @@ def main() -> None:
 
     print(f"Creating toy dataset: {args.episodes} episodes × {args.frames} frames")
     print(f"Output: {output_dir.resolve()}")
+    print("Panoramic images: 320 × 1920 (3 cameras × 640)")
     print()
 
     episodes_info = []

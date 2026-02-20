@@ -3,6 +3,11 @@
 > **Timeline:** Weeks 5–7
 > **Goal:** Vision-RWKV driving agent trained and converging
 > **Depends on:** Phase I (dataset ready)
+>
+> **⚠️ Schema v3 Update:** Input dimensions changed from (B,T,3,224,224) to
+> (B,T,3,320,1920). Patch grid is now 120×20 = 2400 tokens (was 14×14 = 196).
+> Navigation commands use RoadOption enum (5 values: 0-4) not old 4-class mapping.
+> See `src/models/config.py` for current defaults.
 
 ---
 
@@ -36,7 +41,7 @@ With multiple GPUs available, run experiments in parallel on separate branches:
 
 ### 2.1 — Patch Embedding & Q-Shift Tokenizer (Week 5)
 
-**Objective:** Convert 224×224 RGB images into token sequences with spatial awareness.
+**Objective:** Convert 320×1920 panoramic RGB images into token sequences with spatial awareness.
 
 #### Vision Tokenization Strategy (3 Stages)
 
@@ -58,17 +63,17 @@ All three stages are required — they are run sequentially (or concurrently on 
 - **Preparation during Stage 2:** While Stage 2 trains on GPU 1, simultaneously on a separate branch: (1) implement `PatchEmbedding` module, (2) ensure sufficient CARLA data is collected (extend collection if <50 hours), (3) set up augmentation pipeline more aggressively (heavier color jitter, random erasing), (4) write comparison evaluation script
 
 **Tasks:**
-- [ ] Implement `PatchEmbedding`: Conv2d(3, D, kernel=16, stride=16) → (B, 196, D) where D=768
+- [ ] Implement `PatchEmbedding`: Conv2d(3, D, kernel=16, stride=16) → (B, 2400, D) where D=384 (lightweight) or 768 (full)
 - [ ] Implement pretrained encoder wrapper: load CLIP ViT-B/16 or DINOv2, extract patch tokens
 - [ ] Implement `QShift` (Quad-directional Token Shift): shift tokens by 1 position in 4 spatial directions to inject 2D locality
-- [ ] Add positional encoding (learnable 2D positional embeddings for 14×14 grid)
+- [ ] Add positional encoding (learnable 2D positional embeddings for 120×20 grid)
 - [ ] Config flag: `use_pretrained_vision: true/false` to switch between stages
 - [ ] Unit test: verify output shapes, gradient flow for both modes
 - [ ] Reference implementation: [OpenGVLab/Vision-RWKV](https://github.com/OpenGVLab/Vision-RWKV) (ICLR 2025)
 
 **Key code artifact:** `src/models/tokenizer.py`
 
-**Q-Shift explained:** After flattening the 14×14 patch grid into a 196-token sequence, Q-Shift splits the channel dimension into 4 groups. Each group is shifted by 1 position corresponding to up/down/left/right spatial neighbors. This recovers local 2D structure that raster-scan flattening destroys, without adding any parameters.
+**Q-Shift explained:** After flattening the 120×20 patch grid into a 2400-token sequence, Q-Shift splits the channel dimension into 4 groups. Each group is shifted by 1 position corresponding to up/down/left/right spatial neighbors. This recovers local 2D structure that raster-scan flattening destroys, without adding any parameters.
 
 ### 2.2 — RWKV-7 Encoder Block (Week 5)
 
@@ -133,7 +138,7 @@ class RWKVEncoder(nn.Module):
 
 **Tasks:**
 - [ ] Implement `VisionRWKVDriver` that composes: PatchEmbedding → QShift → RWKVEncoder → NavigationFusion → PolicyHead
-- [ ] Verify forward pass end-to-end: input (B, T, 3, 224, 224) → output (B, T, 2) where output is [steer, acceleration]
+- [ ] Verify forward pass end-to-end: input (B, T, 3, 320, 1920) → output (B, T, 2) where output is [steer, acceleration]
 - [ ] Implement model config via YAML (see `configs/`)
 - [ ] Config flag: `use_pretrained_vision` controls Stage 1/2 vs Stage 3 tokenizer
 
@@ -148,7 +153,7 @@ class RWKVEncoder(nn.Module):
 ```python
 class VisionRWKVDriver(nn.Module):
     def __init__(self, config):
-        # config: d_model, n_layers, n_heads, img_size, patch_size, use_pretrained_vision, ...
+        # config: d_model, n_layers, n_heads, img_height, img_width, patch_size, use_pretrained_vision, ...
 
     def forward(self, images, nav_commands, state=None):
         """
@@ -292,6 +297,21 @@ python -m src.training.trainer --config configs/vrwkv_base.yaml
 
 ## Model Configurations
 
+> **Dimension rationale:** Panoramic input is 320×1920 (3 cameras × 640px wide).
+> With 16×16 patches this yields 20×120 = **2400 tokens per frame** — 12× more
+> than a standard 224×224 ViT (196 tokens).  RWKV's O(N) complexity makes this
+> tractable, but VRAM is still dominated by activation storage during
+> backpropagation.
+>
+> | Config | d_model | n_layers | Params (est.) | 2400 tok × 32 seq FP16 VRAM (est.) | Target GPU |
+> |--------|---------|----------|---------------|-----------------------------------|------------|
+> | Debug  | 256     | 6        | ~8 M          | ~4 GB                             | laptop GPU (16 GB) |
+> | Base   | 768     | 12       | ~85 M         | ~18 GB                            | workstation GPU (24 GB) |
+>
+> Start with Debug config on the laptop for rapid iteration, then scale to
+> Base on the 24 GB workstation GPU.  If Base exceeds memory, reduce `batch_size` or
+> `seq_len` before reducing `d_model`.
+
 Create these YAML configs in `configs/`:
 
 ```yaml
@@ -301,7 +321,8 @@ model:
   d_model: 768           # Explicit: code default is 384 (lightweight for dev/test)
   n_layers: 12
   patch_size: 16
-  img_size: 224
+  img_height: 320
+  img_width: 1920
   nav_embed_dim: 64
   use_pretrained_vision: true  # Stage 1/2
   vision_encoder: "openai/clip-vit-base-patch16"
@@ -336,7 +357,8 @@ model:
   d_model: 256
   n_layers: 6
   patch_size: 16
-  img_size: 224
+  img_height: 320
+  img_width: 1920
   nav_embed_dim: 32
   use_pretrained_vision: true
 
@@ -371,5 +393,5 @@ All of the following must be true before starting Phase III:
 6. Steering noise injection implemented and validated (σ=0.05, ~20% of episodes)
 7. Memory profiling completed — batch size validated for target GPU
 8. Training curves logged in W&B and visually inspected
-9. Forward pass verified: (B, T, 3, 224, 224) → (B, T, 2) where output = [steer, acceleration ∈ [-1, 1]]
+9. Forward pass verified: (B, T, 3, 320, 1920) → (B, T, 2) where output = [steer, acceleration ∈ [-1, 1]]
 10. At least 2 vision tokenization stages compared (pretrained vs from-scratch)

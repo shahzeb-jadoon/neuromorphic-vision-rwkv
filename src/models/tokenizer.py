@@ -4,10 +4,12 @@ Converts raw image frames into a sequence of visual tokens for the
 RWKV encoder. Each image is divided into non-overlapping patches,
 linearly projected, and optionally spatially mixed via Q-Shift.
 
-Input:  (B, T, 3, 224, 224) — batch of image sequences
+Input:  (B, T, 3, H, W) — batch of image sequences
+        Default panoramic: H=320, W=1920 (3 cameras × 640).
 Output: (B, T, N_patches, embed_dim) — patch token sequences
 
 where N_patches = (H / patch_size) * (W / patch_size)
+      Default: (320/16) * (1920/16) = 20 × 120 = 2400 patches.
 """
 
 from __future__ import annotations

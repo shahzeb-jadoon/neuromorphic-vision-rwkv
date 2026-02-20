@@ -1,12 +1,17 @@
 """Expert data collector for CARLA autonomous driving episodes.
 
-Uses CARLA's built-in autopilot (TrafficManager) to drive expert routes
-while recording per-frame observations (camera, controls, navigation)
-to HDF5 files.
+Drives a custom **PrivilegedExpert** agent through pre-planned routes
+while recording per-frame observations (3-camera panoramic, controls,
+navigation commands, ego state, nearby-actor metadata) to HDF5 files.
 
-NOTE: We use set_autopilot(True) + TrafficManager rather than
-BehaviorAgent because the `agents` Python module ships only with the
-CARLA server distribution, not the pip package (`carla==0.9.16`).
+Schema version: 3 (see ``src/data/hdf5_schema.py``).
+
+Key differences from the v2 collector:
+    - Uses ``PrivilegedExpert`` (custom PID + privileged perception)
+      instead of CARLA's TrafficManager autopilot.
+    - Spawns 3 RGB cameras (left / centre / right) for panoramic input.
+    - Stores ego position, rotation, traffic light state, and
+      nearby-actor metadata for future-proofing (GPS, LiDAR, etc.).
 
 Handles three failure modes:
     - CARLA crash recovery (reconnect with retries)
@@ -40,6 +45,14 @@ try:
 except ImportError:
     CARLA_AVAILABLE = False
 
+from agents.expert.privileged_expert import (  # noqa: F401
+    ExpertConfig,
+    FrameInfo,
+    PrivilegedExpert,
+)
+from agents.navigation.global_route_planner import GlobalRoutePlanner
+from agents.navigation.local_planner import RoadOption
+
 logger = logging.getLogger(__name__)
 
 
@@ -55,10 +68,24 @@ class EpisodeConfig:
     timeout_speed: float = 0.1  # m/s — below this for timeout_duration → discard
     timeout_duration: float = 180.0  # seconds stuck
     fps: int = 20
-    camera_width: int = 224
-    camera_height: int = 224
-    camera_fov: int = 100
-    steering_noise_std: float = 0.0  # σ for Gaussian noise injection (0 = disabled)
+
+    # 3-camera panoramic setup
+    camera_width: int = 640  # per-camera width
+    camera_height: int = 320  # per-camera height
+    camera_fov: int = 60
+    camera_yaws: tuple[float, ...] = (-60.0, 0.0, 60.0)  # left, centre, right
+
+    # Camera mount (vehicle frame, metres)
+    camera_x: float = 1.5
+    camera_z: float = 2.4
+
+    # Visualization / recording
+    spectator_follow: bool = False  # Attach CARLA spectator camera to ego vehicle
+    spectator_offset: tuple[float, float, float] = (-8.0, 0.0, 5.0)  # (x, y, z) behind/above
+    record_simulation: bool = False  # Use CARLA built-in recorder
+
+    # Expert agent
+    expert_config: ExpertConfig = field(default_factory=ExpertConfig)
 
 
 @dataclass
@@ -75,23 +102,22 @@ class EpisodeResult:
     collision_frame: int | None = None
     error_message: str | None = None
     duration_seconds: float = 0.0
+    recording_path: str | None = None
 
 
 class ExpertDataCollector:
-    """Collects expert driving data from CARLA using TrafficManager autopilot.
+    """Collects expert driving data from CARLA using PrivilegedExpert.
 
-    Uses vehicle.set_autopilot(True) which delegates driving to CARLA's
-    built-in TrafficManager. Navigation commands are inferred by comparing
-    the vehicle's forward vector with the direction to the next waypoint.
+    Drives a fully custom expert agent with PID control and privileged
+    hazard perception.  Records 3-camera panoramic images, expert
+    controls, navigation commands, ego state, and nearby-actor metadata.
 
-    Usage:
-        collector = ExpertDataCollector(
-            host="auto",
-            port=2000,
-            output_dir="data/collected",
-        )
+    Usage::
+
+        collector = ExpertDataCollector(host="auto", port=2000,
+                                        output_dir="data/collected")
         collector.connect()
-        result = collector.collect_episode(config)
+        result = collector.collect_episode(config, route_waypoints)
 
     Args:
         host: CARLA server host ("auto" to detect from WSL2 gateway).
@@ -100,14 +126,6 @@ class ExpertDataCollector:
         crash_retries: Number of reconnection attempts on CARLA crash.
         crash_wait: Seconds to wait between reconnection attempts.
     """
-
-    # Navigation command mapping
-    NAV_MAP = {
-        "LaneFollow": 0,
-        "Left": 1,
-        "Right": 2,
-        "Straight": 3,
-    }
 
     def __init__(
         self,
@@ -135,6 +153,10 @@ class ExpertDataCollector:
         self.client: carla.Client | None = None
         self.world: carla.World | None = None
 
+    # ------------------------------------------------------------------
+    # Connection helpers
+    # ------------------------------------------------------------------
+
     @staticmethod
     def _detect_wsl2_host() -> str | None:
         """Detect Windows host IP from WSL2 default gateway."""
@@ -155,7 +177,7 @@ class ExpertDataCollector:
         """Connect to CARLA server."""
         logger.info("Connecting to CARLA at %s:%d", self.host, self.port)
         self.client = carla.Client(self.host, self.port)
-        self.client.set_timeout(30.0)
+        self.client.set_timeout(60.0)
         self.world = self.client.get_world()
         logger.info(
             "Connected — server=%s, map=%s",
@@ -180,74 +202,110 @@ class ExpertDataCollector:
                 logger.error("Reconnection failed: %s", e)
         return False
 
-    @staticmethod
-    def _infer_nav_command(
-        vehicle_transform: Any,
-        waypoint: Any,
-        carla_map: Any,
-        lookahead: float = 10.0,
-    ) -> int:
-        """Infer navigation command from vehicle heading vs waypoint direction.
+    # ------------------------------------------------------------------
+    # Camera helpers
+    # ------------------------------------------------------------------
 
-        Compares the vehicle's forward vector with the direction to a
-        lookahead waypoint. The angle between them determines the nav command:
-            - |angle| < 10°  → LaneFollow (0)
-            - angle < -10°   → Left (1)
-            - angle > 10°    → Right (2)
-            - Near junction with small angle → Straight (3)
+    @staticmethod
+    def _update_spectator(
+        world: "carla.World",
+        vehicle: "carla.Vehicle",
+        offset: tuple[float, float, float] = (-8.0, 0.0, 5.0),
+    ) -> None:
+        """Move the CARLA spectator camera to follow the ego vehicle.
+
+        The spectator is positioned behind and above the vehicle so
+        you can watch it drive in the CARLA viewport in real-time.
 
         Args:
-            vehicle_transform: Current vehicle transform.
-            waypoint: Current waypoint the vehicle is on.
-            carla_map: CARLA map instance.
-            lookahead: Distance in meters to look ahead.
+            world: CARLA world instance.
+            vehicle: Ego vehicle to follow.
+            offset: (x, y, z) offset in vehicle-local frame.
+                    Default ``(-8, 0, 5)`` gives a chase-cam view.
+        """
+        vt = vehicle.get_transform()
+        # Compute world-space offset using vehicle's forward/right/up
+        fwd = vt.get_forward_vector()
+        right = vt.get_right_vector()
+        up = carla.Location(x=0.0, y=0.0, z=1.0)
+
+        cam_loc = vt.location + carla.Location(
+            x=fwd.x * offset[0] + right.x * offset[1] + up.x * offset[2],
+            y=fwd.y * offset[0] + right.y * offset[1] + up.y * offset[2],
+            z=fwd.z * offset[0] + right.z * offset[1] + up.z * offset[2],
+        )
+        cam_rot = carla.Rotation(
+            pitch=-15.0,
+            yaw=vt.rotation.yaw,
+            roll=0.0,
+        )
+        world.get_spectator().set_transform(carla.Transform(cam_loc, cam_rot))
+
+    @staticmethod
+    def _spawn_cameras(
+        world: "carla.World",
+        vehicle: "carla.Vehicle",
+        config: EpisodeConfig,
+    ) -> list[tuple["carla.Actor", queue.Queue]]:
+        """Spawn 3 RGB cameras and return (actor, image_queue) pairs.
+
+        Cameras are ordered LEFT, CENTRE, RIGHT so that horizontal
+        concatenation produces a seamless panoramic image.
+        """
+        bp_lib = world.get_blueprint_library()
+        camera_bp = bp_lib.find("sensor.camera.rgb")
+        camera_bp.set_attribute("image_size_x", str(config.camera_width))
+        camera_bp.set_attribute("image_size_y", str(config.camera_height))
+        camera_bp.set_attribute("fov", str(config.camera_fov))
+
+        cameras: list[tuple[carla.Actor, queue.Queue]] = []
+
+        for yaw in config.camera_yaws:
+            cam_transform = carla.Transform(
+                carla.Location(x=config.camera_x, z=config.camera_z),
+                carla.Rotation(yaw=yaw),
+            )
+            cam = world.spawn_actor(camera_bp, cam_transform, attach_to=vehicle)
+            img_q: queue.Queue = queue.Queue()
+            cam.listen(lambda img, q=img_q: q.put(img))
+            cameras.append((cam, img_q))
+
+        return cameras
+
+    @staticmethod
+    def _capture_panoramic(
+        cameras: list[tuple["carla.Actor", queue.Queue]],
+        config: EpisodeConfig,
+        timeout: float = 2.0,
+    ) -> np.ndarray:
+        """Capture one frame from all cameras and stitch horizontally.
 
         Returns:
-            Navigation command ID (0-3).
+            (H, W_total, 3) uint8 RGB panoramic image where
+            W_total = n_cameras x per_camera_width.
         """
-        # Get next waypoints along the road
-        next_wps = waypoint.next(lookahead)
-        if not next_wps:
-            return 0  # LaneFollow
+        panels: list[np.ndarray] = []
 
-        target_wp = next_wps[0]
+        for _cam, img_q in cameras:
+            try:
+                carla_image = img_q.get(timeout=timeout)
+                raw = np.frombuffer(carla_image.raw_data, dtype=np.uint8)
+                raw = raw.reshape(config.camera_height, config.camera_width, 4)
+                rgb = raw[:, :, :3][:, :, ::-1].copy()  # BGRA → RGB
+                panels.append(rgb)
+            except queue.Empty:
+                panels.append(
+                    np.zeros(
+                        (config.camera_height, config.camera_width, 3),
+                        dtype=np.uint8,
+                    )
+                )
 
-        # Vehicle forward vector (2D)
-        fwd = vehicle_transform.get_forward_vector()
-        fwd_2d = np.array([fwd.x, fwd.y])
+        return np.concatenate(panels, axis=1)  # (H, W_total, 3)
 
-        # Direction to target
-        veh_loc = vehicle_transform.location
-        tgt_loc = target_wp.transform.location
-        dir_2d = np.array([tgt_loc.x - veh_loc.x, tgt_loc.y - veh_loc.y])
-
-        # Compute signed angle
-        fwd_norm = np.linalg.norm(fwd_2d)
-        dir_norm = np.linalg.norm(dir_2d)
-        if fwd_norm < 1e-6 or dir_norm < 1e-6:
-            return 0
-
-        fwd_2d = fwd_2d / fwd_norm
-        dir_2d = dir_2d / dir_norm
-
-        # Cross product gives signed angle
-        cross = fwd_2d[0] * dir_2d[1] - fwd_2d[1] * dir_2d[0]
-        dot = np.dot(fwd_2d, dir_2d)
-        angle_deg = math.degrees(math.atan2(cross, dot))
-
-        # Check if at junction
-        at_junction = waypoint.is_junction
-
-        # Classify
-        threshold = 10.0
-        if abs(angle_deg) < threshold:
-            if at_junction:
-                return 3  # Straight (through junction)
-            return 0  # LaneFollow
-        elif angle_deg < -threshold:
-            return 1  # Left
-        else:
-            return 2  # Right
+    # ------------------------------------------------------------------
+    # Episode collection
+    # ------------------------------------------------------------------
 
     def collect_episode(
         self,
@@ -256,15 +314,15 @@ class ExpertDataCollector:
     ) -> EpisodeResult:
         """Collect a single episode of expert driving data.
 
-        Uses CARLA's TrafficManager autopilot for expert driving.
-        Navigation commands are inferred from heading-vs-waypoint angle.
+        Uses the custom PrivilegedExpert agent for driving.  Navigation
+        commands come directly from the route planner — no heuristic
+        inference needed.
 
         Args:
-            config: Episode configuration.
-            route_waypoints: Optional pre-computed route. When provided,
-                the TrafficManager autopilot follows this path instead
-                of its default pathfinding, ensuring balanced turn
-                distributions from the BalancedRouteGenerator.
+            config: Episode configuration (cameras, expert, etc.).
+            route_waypoints: Pre-computed route as
+                ``[(carla.Transform, RoadOption_str), ...]``.
+                If ``None``, a random route is generated.
 
         Returns:
             EpisodeResult with status and metadata.
@@ -275,16 +333,26 @@ class ExpertDataCollector:
         start_time = time.time()
         actors: list = []
         npc_vehicles: list = []
+        walkers: list = []
+        walker_controllers: list = []
         original_settings = None
-        image_queue: queue.Queue = queue.Queue()
+        cameras: list[tuple[carla.Actor, queue.Queue]] = []
 
         # Data buffers
         images_buf: list[np.ndarray] = []
         steering_buf: list[float] = []
         throttle_buf: list[float] = []
         brake_buf: list[float] = []
-        velocity_buf: list[np.ndarray] = []
         nav_cmd_buf: list[int] = []
+        # Privileged / future-proofing buffers
+        position_buf: list[np.ndarray] = []
+        rotation_buf: list[np.ndarray] = []
+        velocity_buf: list[np.ndarray] = []
+        traffic_light_buf: list[int] = []
+        target_speed_buf: list[float] = []
+        driving_mode_buf: list[int] = []
+        nearby_vehicles_buf: list[str] = []  # JSON strings
+        nearby_pedestrians_buf: list[str] = []  # JSON strings
         collision_frame: int | None = None
 
         try:
@@ -294,9 +362,11 @@ class ExpertDataCollector:
             # --- Setup world ---
             if self.world.get_map().name.split("/")[-1] != config.town:
                 logger.info("Loading map: %s", config.town)
+                self.client.set_timeout(120.0)
                 self.client.load_world(config.town)
                 self.world = self.client.get_world()
-                time.sleep(2.0)  # Wait for map load
+                self.client.set_timeout(60.0)
+                time.sleep(5.0)
 
             carla_map = self.world.get_map()
             original_settings = self.world.get_settings()
@@ -311,11 +381,6 @@ class ExpertDataCollector:
             weather_preset = getattr(carla.WeatherParameters, config.weather, None)
             if weather_preset is not None:
                 self.world.set_weather(weather_preset)
-
-            # --- Setup TrafficManager ---
-            traffic_manager = self.client.get_trafficmanager(8000)
-            traffic_manager.set_synchronous_mode(True)
-            traffic_manager.set_global_distance_to_leading_vehicle(2.5)
 
             # --- Spawn ego vehicle ---
             bp_lib = self.world.get_blueprint_library()
@@ -333,25 +398,11 @@ class ExpertDataCollector:
 
             actors.append(vehicle)
 
-            # Enable autopilot via TrafficManager
-            vehicle.set_autopilot(True, traffic_manager.get_port())
+            # --- Spawn NPC traffic (driven by TrafficManager) ---
+            traffic_manager = self.client.get_trafficmanager(8000)
+            traffic_manager.set_synchronous_mode(True)
+            traffic_manager.set_global_distance_to_leading_vehicle(2.5)
 
-            # If a balanced route was provided, instruct the TrafficManager
-            # to follow it instead of choosing its own path
-            if route_waypoints:
-                path = [transform.location for transform, _ in route_waypoints]
-                traffic_manager.set_path(vehicle, path)
-                logger.info(
-                    "Set custom route with %d waypoints for autopilot",
-                    len(path),
-                )
-
-            # Configure ego driving behavior
-            traffic_manager.auto_lane_change(vehicle, True)
-            traffic_manager.ignore_lights_percentage(vehicle, 0.0)  # Obey traffic lights
-            traffic_manager.vehicle_percentage_speed_difference(vehicle, -20.0)  # 20% below limit
-
-            # --- Spawn NPC traffic ---
             if config.n_vehicles > 0:
                 npc_bps = bp_lib.filter("vehicle.*")
                 npc_bps = [bp for bp in npc_bps if int(bp.get_attribute("number_of_wheels")) == 4]
@@ -366,19 +417,69 @@ class ExpertDataCollector:
                         npc_vehicles.append(npc)
 
                 logger.info(
-                    "Spawned %d NPC vehicles (requested %d)", len(npc_vehicles), config.n_vehicles
+                    "Spawned %d NPC vehicles (requested %d)",
+                    len(npc_vehicles),
+                    config.n_vehicles,
                 )
 
-            # --- Attach camera ---
-            camera_bp = bp_lib.find("sensor.camera.rgb")
-            camera_bp.set_attribute("image_size_x", str(config.camera_width))
-            camera_bp.set_attribute("image_size_y", str(config.camera_height))
-            camera_bp.set_attribute("fov", str(config.camera_fov))
+            # --- Spawn NPC walkers with AI controllers ---
+            walkers = []
+            walker_controllers = []
+            if config.n_walkers > 0:
+                walker_bps = bp_lib.filter("walker.pedestrian.*")
+                # Gather random spawn points on sidewalks
+                walker_spawn_points: list[Any] = []
+                for _ in range(config.n_walkers * 2):
+                    loc = self.world.get_random_location_from_navigation()
+                    if loc is not None:
+                        wp = carla.Transform(location=loc)
+                        walker_spawn_points.append(wp)
+                    if len(walker_spawn_points) >= config.n_walkers:
+                        break
 
-            cam_transform = carla.Transform(carla.Location(x=1.5, z=2.4))
-            camera = self.world.spawn_actor(camera_bp, cam_transform, attach_to=vehicle)
-            actors.append(camera)
-            camera.listen(lambda img: image_queue.put(img))
+                n_walkers_to_spawn = min(config.n_walkers, len(walker_spawn_points))
+                for i in range(n_walkers_to_spawn):
+                    w_bp = np.random.choice(walker_bps)
+                    # Enable crossing for ~30 % of walkers
+                    if w_bp.has_attribute("is_invincible"):
+                        w_bp.set_attribute("is_invincible", "false")
+                    walker = self.world.try_spawn_actor(w_bp, walker_spawn_points[i])
+                    if walker is not None:
+                        walkers.append(walker)
+
+                # Tick so walkers materialise before attaching controllers
+                self.world.tick()
+
+                # Attach WalkerAIController to each walker
+                controller_bp = bp_lib.find("controller.ai.walker")
+                for walker in walkers:
+                    ctrl = self.world.spawn_actor(
+                        controller_bp, carla.Transform(), attach_to=walker
+                    )
+                    walker_controllers.append(ctrl)
+
+                # Tick again so controllers are ready
+                self.world.tick()
+
+                # Start walking: random destinations + varied speeds
+                for ctrl in walker_controllers:
+                    dest = self.world.get_random_location_from_navigation()
+                    if dest is not None:
+                        ctrl.start()
+                        ctrl.go_to_location(dest)
+                        # Vary speed: 1.0–2.5 m/s (walking to jogging)
+                        ctrl.set_max_speed(1.0 + np.random.random() * 1.5)
+
+                logger.info(
+                    "Spawned %d NPC walkers (requested %d)",
+                    len(walkers),
+                    config.n_walkers,
+                )
+
+            # --- Attach 3 cameras ---
+            cameras = self._spawn_cameras(self.world, vehicle, config)
+            for cam, _ in cameras:
+                actors.append(cam)
 
             # --- Attach collision sensor ---
             collision_bp = bp_lib.find("sensor.other.collision")
@@ -386,107 +487,147 @@ class ExpertDataCollector:
                 collision_bp, carla.Transform(), attach_to=vehicle
             )
             actors.append(collision_sensor)
-            collision_detected = [False]  # Mutable for closure
+            collision_detected = [False]
 
             def on_collision(event: Any) -> None:
                 collision_detected[0] = True
 
             collision_sensor.listen(on_collision)
 
-            # Let world settle (a few warm-up ticks)
+            # --- Setup PrivilegedExpert ---
+            route_planner = GlobalRoutePlanner(carla_map, sampling_resolution=2.0)
+            expert = PrivilegedExpert(vehicle, self.world, route_planner, config.expert_config)
+
+            # Build route
+            if route_waypoints:
+                # route_waypoints = [(transform, road_option_str), ...]
+                route = []
+                for transform, road_opt_name in route_waypoints:
+                    wp = carla_map.get_waypoint(transform.location)
+                    opt = self._parse_road_option(str(road_opt_name))
+                    route.append((wp, opt))
+                expert.set_route(route)
+                logger.info(
+                    "Set custom route with %d waypoints for expert",
+                    len(route),
+                )
+            else:
+                # Random destination
+                dest_idx = np.random.randint(len(spawn_points))
+                while dest_idx == spawn_idx:
+                    dest_idx = np.random.randint(len(spawn_points))
+                expert.set_destination(
+                    spawn_points[spawn_idx].location,
+                    spawn_points[dest_idx].location,
+                )
+                logger.info("Set random route for expert")
+
+            # Warm-up ticks
             for _ in range(10):
                 self.world.tick()
 
-            # Drain any queued warm-up images
-            while not image_queue.empty():
-                try:
-                    image_queue.get_nowait()
-                except queue.Empty:
-                    break
+            # Drain warm-up images from all cameras
+            for _cam, img_q in cameras:
+                while not img_q.empty():
+                    try:
+                        img_q.get_nowait()
+                    except queue.Empty:
+                        break
+
+            # --- Start CARLA recorder if requested ---
+            recording_path: str | None = None
+            if config.record_simulation:
+                rec_name = f"episode_{int(time.time())}.log"
+                recording_path = rec_name
+                self.client.start_recorder(rec_name, True)
+                logger.info("CARLA recorder started: %s", rec_name)
 
             # --- Tick loop ---
             stuck_start: float | None = None
             distance_traveled = 0.0
             prev_location = vehicle.get_transform().location
+            dt = 1.0 / config.fps
 
             for frame_idx in range(config.max_frames):
+                # Check if expert finished route
+                if expert.done():
+                    logger.info("Expert completed route at frame %d", frame_idx)
+                    break
+
                 self.world.tick()
 
-                # Get camera image
-                try:
-                    carla_image = image_queue.get(timeout=2.0)
-                    raw = np.frombuffer(carla_image.raw_data, dtype=np.uint8)
-                    raw = raw.reshape(config.camera_height, config.camera_width, 4)
-                    rgb = raw[:, :, :3][:, :, ::-1].copy()  # BGRA → RGB
-                    images_buf.append(rgb)
-                except queue.Empty:
-                    logger.warning("No camera image at frame %d, using black frame", frame_idx)
-                    images_buf.append(
-                        np.zeros(
-                            (config.camera_height, config.camera_width, 3),
-                            dtype=np.uint8,
-                        )
-                    )
+                # --- Expert step ---
+                control, info = expert.run_step(dt)
+                vehicle.apply_control(control)
 
-                # Get controls applied by autopilot
-                control = vehicle.get_control()
-                steering_val = float(control.steer)
+                # --- Spectator follow (real-time visualization) ---
+                if config.spectator_follow:
+                    self._update_spectator(self.world, vehicle, config.spectator_offset)
 
-                # Noise injection for implicit recovery demonstrations.
-                # When enabled, we perturb the *recorded* steering so the
-                # model observes slightly off-policy states while the expert
-                # (autopilot) naturally corrects on the next frame.
-                if config.steering_noise_std > 0:
-                    noise = np.random.normal(0, config.steering_noise_std)
-                    steering_val = float(np.clip(steering_val + noise, -1.0, 1.0))
+                # --- Capture panoramic image ---
+                panoramic = self._capture_panoramic(cameras, config)
+                images_buf.append(panoramic)
 
-                steering_buf.append(steering_val)
+                # --- Store control signals ---
+                steering_buf.append(float(control.steer))
                 throttle_buf.append(float(control.throttle))
                 brake_buf.append(float(control.brake))
 
-                # Velocity
-                vel = vehicle.get_velocity()
-                velocity_buf.append(np.array([vel.x, vel.y, vel.z], dtype=np.float32))
+                # --- Navigation command (from expert route) ---
+                nav_cmd_buf.append(info.nav_command)
 
-                # Navigation command (inferred from heading vs waypoint direction)
-                veh_transform = vehicle.get_transform()
-                current_wp = carla_map.get_waypoint(veh_transform.location)
-                nav_id = self._infer_nav_command(veh_transform, current_wp, carla_map)
-                nav_cmd_buf.append(nav_id)
+                # --- Ego state ---
+                position_buf.append(np.array(info.position, dtype=np.float32))
+                rotation_buf.append(np.array(info.rotation, dtype=np.float32))
+                velocity_buf.append(np.array(info.velocity, dtype=np.float32))
 
-                # Track distance
-                cur_loc = veh_transform.location
+                # --- Privileged data ---
+                traffic_light_buf.append(info.traffic_light_state)
+                target_speed_buf.append(info.target_speed)
+                driving_mode_buf.append(info.driving_mode)
+                nearby_vehicles_buf.append(json.dumps(info.nearby_vehicles))
+                nearby_pedestrians_buf.append(json.dumps(info.nearby_pedestrians))
+
+                # --- Distance tracking ---
+                cur_loc = vehicle.get_transform().location
                 dx = cur_loc.x - prev_location.x
                 dy = cur_loc.y - prev_location.y
-                distance_traveled += (dx**2 + dy**2) ** 0.5
+                distance_traveled += math.sqrt(dx**2 + dy**2)
                 prev_location = cur_loc
 
-                # Check collision
+                # --- Collision check ---
                 if collision_detected[0] and collision_frame is None:
                     collision_frame = frame_idx
                     logger.warning("Collision detected at frame %d", frame_idx)
 
-                # Check timeout (stuck)
-                speed = (vel.x**2 + vel.y**2 + vel.z**2) ** 0.5
-                if speed < config.timeout_speed:
+                # --- Timeout (stuck) check ---
+                speed_ms = math.sqrt(
+                    info.velocity[0] ** 2 + info.velocity[1] ** 2 + info.velocity[2] ** 2
+                )
+                if speed_ms < config.timeout_speed:
                     if stuck_start is None:
                         stuck_start = time.time()
                     elif time.time() - stuck_start > config.timeout_duration:
-                        logger.warning("Timeout: vehicle stuck for >%ds", config.timeout_duration)
-                        # Still save the data collected
+                        logger.warning(
+                            "Timeout: vehicle stuck for >%ds",
+                            config.timeout_duration,
+                        )
                         break
                 else:
                     stuck_start = None
 
-                # Progress logging every 500 frames
+                # --- Progress logging ---
                 if (frame_idx + 1) % 500 == 0:
                     logger.info(
-                        "  Frame %d/%d — speed=%.1f m/s, distance=%.0fm, steer=%.3f",
+                        "  Frame %d/%d — speed=%.1f km/h, dist=%.0fm, "
+                        "steer=%.3f, mode=%s, route=%.0f%%",
                         frame_idx + 1,
                         config.max_frames,
-                        speed,
+                        info.current_speed,
                         distance_traveled,
                         control.steer,
+                        info.driving_mode,
+                        info.route_completion * 100,
                     )
 
             # --- Determine status ---
@@ -507,13 +648,21 @@ class ExpertDataCollector:
                     steering=np.array(steering_buf, dtype=np.float32),
                     throttle=np.array(throttle_buf, dtype=np.float32),
                     brake=np.array(brake_buf, dtype=np.float32),
-                    velocity=np.stack(velocity_buf),
                     nav_command=np.array(nav_cmd_buf, dtype=np.int32),
+                    position=np.stack(position_buf),
+                    rotation=np.stack(rotation_buf),
+                    velocity=np.stack(velocity_buf),
+                    traffic_light_state=np.array(traffic_light_buf, dtype=np.int32),
+                    target_speed=np.array(target_speed_buf, dtype=np.float32),
+                    driving_mode=np.array(driving_mode_buf, dtype=np.int32),
+                    nearby_vehicles=nearby_vehicles_buf,
+                    nearby_pedestrians=nearby_pedestrians_buf,
                     config=config,
                     status=status,
                     collision_frame=collision_frame,
                 )
                 result.duration_seconds = time.time() - start_time
+                result.recording_path = recording_path
                 return result
             else:
                 return EpisodeResult(
@@ -533,8 +682,15 @@ class ExpertDataCollector:
                         steering=np.array(steering_buf, dtype=np.float32),
                         throttle=np.array(throttle_buf, dtype=np.float32),
                         brake=np.array(brake_buf, dtype=np.float32),
-                        velocity=np.stack(velocity_buf),
                         nav_command=np.array(nav_cmd_buf, dtype=np.int32),
+                        position=np.stack(position_buf),
+                        rotation=np.stack(rotation_buf),
+                        velocity=np.stack(velocity_buf),
+                        traffic_light_state=np.array(traffic_light_buf, dtype=np.int32),
+                        target_speed=np.array(target_speed_buf, dtype=np.float32),
+                        driving_mode=np.array(driving_mode_buf, dtype=np.int32),
+                        nearby_vehicles=nearby_vehicles_buf,
+                        nearby_pedestrians=nearby_pedestrians_buf,
                         config=config,
                         status="crashed",
                         collision_frame=collision_frame,
@@ -555,12 +711,13 @@ class ExpertDataCollector:
             )
 
         finally:
-            # Disable autopilot before cleanup to avoid TM race conditions
-            try:
-                if "vehicle" in dir() and vehicle is not None and vehicle.is_alive:
-                    vehicle.set_autopilot(False)
-            except Exception:
-                pass
+            # Stop CARLA recorder if it was started
+            if config.record_simulation and self.client is not None:
+                try:
+                    self.client.stop_recorder()
+                    logger.info("CARLA recorder stopped")
+                except Exception:
+                    pass
 
             # Stop sensors first
             for actor in actors:
@@ -570,12 +727,27 @@ class ExpertDataCollector:
                 except Exception:
                     pass
 
-            # Destroy NPC vehicles (before ego, to avoid TM issues)
+            # Destroy NPC vehicles
             for npc in npc_vehicles:
                 try:
                     if npc.is_alive:
                         npc.set_autopilot(False)
                         npc.destroy()
+                except Exception:
+                    pass
+
+            # Destroy walker controllers then walkers
+            for ctrl in walker_controllers:
+                try:
+                    if ctrl.is_alive:
+                        ctrl.stop()
+                        ctrl.destroy()
+                except Exception:
+                    pass
+            for w in walkers:
+                try:
+                    if w.is_alive:
+                        w.destroy()
                 except Exception:
                     pass
 
@@ -587,7 +759,7 @@ class ExpertDataCollector:
                 except Exception:
                     pass
 
-            # Restore settings
+            # Restore world settings
             if original_settings is not None:
                 try:
                     assert self.world is not None
@@ -595,40 +767,81 @@ class ExpertDataCollector:
                 except Exception:
                     pass
 
+    # ------------------------------------------------------------------
+    # Save
+    # ------------------------------------------------------------------
+
     def _save_episode(
         self,
         images: np.ndarray,
         steering: np.ndarray,
         throttle: np.ndarray,
         brake: np.ndarray,
-        velocity: np.ndarray,
         nav_command: np.ndarray,
+        position: np.ndarray,
+        rotation: np.ndarray,
+        velocity: np.ndarray,
+        traffic_light_state: np.ndarray,
+        target_speed: np.ndarray,
+        driving_mode: np.ndarray,
+        nearby_vehicles: list[str],
+        nearby_pedestrians: list[str],
         config: EpisodeConfig,
         status: str,
         collision_frame: int | None,
     ) -> EpisodeResult:
-        """Save collected episode data to HDF5."""
-        # Hash-based filename (include timestamp for uniqueness)
+        """Save collected episode data to HDF5 (schema v3)."""
+        # Hash-based filename
         timestamp_bytes = int(time.time() * 1000).to_bytes(8, "big")
         hash_input = timestamp_bytes + images[:4].tobytes()[:4096]
         episode_hash = hashlib.sha256(hash_input).hexdigest()[:8]
         filename = f"episode_{episode_hash}.h5"
         filepath = self.output_dir / filename
 
+        pano_width = config.camera_width * len(config.camera_yaws)
+
         with h5py.File(filepath, "w") as f:
+            # --- Images: panoramic (N, H, W_total, 3) ---
             f.create_dataset(
                 S.IMAGES,
                 data=images,
                 compression="gzip",
-                compression_opts=1,  # Level 1 = fastest decompression, ~same ratio
-                chunks=(1, config.camera_height, config.camera_width, 3),
+                compression_opts=1,
+                chunks=(1, config.camera_height, pano_width, 3),
             )
+
+            # --- Controls ---
             f.create_dataset(S.STEERING, data=steering)
             f.create_dataset(S.THROTTLE, data=throttle)
             f.create_dataset(S.BRAKE, data=brake)
-            f.create_dataset(S.VELOCITY, data=velocity)
+
+            # --- Navigation ---
             f.create_dataset(S.NAV_COMMAND, data=nav_command)
 
+            # --- Ego state ---
+            f.create_dataset(S.POSITION, data=position)
+            f.create_dataset(S.ROTATION, data=rotation)
+            f.create_dataset(S.VELOCITY, data=velocity)
+
+            # --- Privileged data ---
+            f.create_dataset(S.TRAFFIC_LIGHT_STATE, data=traffic_light_state)
+            f.create_dataset(S.TARGET_SPEED, data=target_speed)
+            f.create_dataset(S.DRIVING_MODE, data=driving_mode)
+
+            # Variable-length JSON strings for actor lists
+            dt_str = h5py.string_dtype()
+            f.create_dataset(
+                S.NEARBY_VEHICLES,
+                data=np.array(nearby_vehicles, dtype=object),
+                dtype=dt_str,
+            )
+            f.create_dataset(
+                S.NEARBY_PEDESTRIANS,
+                data=np.array(nearby_pedestrians, dtype=object),
+                dtype=dt_str,
+            )
+
+            # --- Metadata ---
             meta = f.create_group(S.METADATA_GROUP)
             meta.attrs[S.META_SCHEMA_VERSION] = S.SCHEMA_VERSION
             meta.attrs[S.META_TOWN] = config.town
@@ -636,19 +849,33 @@ class ExpertDataCollector:
             meta.attrs[S.META_FPS] = config.fps
             meta.attrs[S.META_N_FRAMES] = len(images)
             meta.attrs[S.META_STATUS] = status
+            meta.attrs[S.META_CAMERA_WIDTH] = config.camera_width
+            meta.attrs[S.META_CAMERA_HEIGHT] = config.camera_height
+            meta.attrs[S.META_N_CAMERAS] = len(config.camera_yaws)
+            meta.attrs[S.META_CAMERA_FOV] = config.camera_fov
+            meta.attrs[S.META_CAMERA_YAWS] = list(config.camera_yaws)
+            meta.attrs[S.META_EXPERT_TYPE] = "privileged_expert"
+            meta.attrs[S.META_EXPERT_TARGET_SPEED] = config.expert_config.target_speed
             if collision_frame is not None:
                 meta.attrs[S.META_COLLISION_FRAME] = collision_frame
 
-        # Nav distribution
-        nav_names = {0: "LaneFollow", 1: "Left", 2: "Right", 3: "Straight"}
+        # Nav distribution (using RoadOption integer values)
+        nav_names = {
+            int(RoadOption.LANEFOLLOW): "LaneFollow",
+            int(RoadOption.LEFT): "Left",
+            int(RoadOption.RIGHT): "Right",
+            int(RoadOption.STRAIGHT): "Straight",
+        }
         nav_dist = {}
         for cmd_id, cmd_name in nav_names.items():
             nav_dist[cmd_name] = int(np.sum(nav_command == cmd_id))
 
         logger.info(
-            "Saved %s — %d frames, status=%s, town=%s",
+            "Saved %s — %d frames (%dx%d panoramic), status=%s, town=%s",
             filename,
             len(images),
+            pano_width,
+            config.camera_height,
             status,
             config.town,
         )
@@ -663,6 +890,33 @@ class ExpertDataCollector:
             nav_distribution=nav_dist,
             collision_frame=collision_frame,
         )
+
+    # ------------------------------------------------------------------
+    # Helpers
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _parse_road_option(name: str) -> RoadOption:
+        """Parse a road option string to RoadOption enum."""
+        mapping = {
+            "LaneFollow": RoadOption.LANEFOLLOW,
+            "Left": RoadOption.LEFT,
+            "Right": RoadOption.RIGHT,
+            "Straight": RoadOption.STRAIGHT,
+            "RoadOption.LANEFOLLOW": RoadOption.LANEFOLLOW,
+            "RoadOption.LEFT": RoadOption.LEFT,
+            "RoadOption.RIGHT": RoadOption.RIGHT,
+            "RoadOption.STRAIGHT": RoadOption.STRAIGHT,
+            "LANEFOLLOW": RoadOption.LANEFOLLOW,
+            "LEFT": RoadOption.LEFT,
+            "RIGHT": RoadOption.RIGHT,
+            "STRAIGHT": RoadOption.STRAIGHT,
+            "CHANGELANELEFT": RoadOption.CHANGELANELEFT,
+            "CHANGELANERIGHT": RoadOption.CHANGELANERIGHT,
+            "ChangeLaneLeft": RoadOption.CHANGELANELEFT,
+            "ChangeLaneRight": RoadOption.CHANGELANERIGHT,
+        }
+        return mapping.get(name, RoadOption.LANEFOLLOW)
 
 
 class CollectionManifest:
@@ -717,13 +971,19 @@ class CollectionManifest:
             json.dump(self.data, f, indent=2)
 
     def get_completed_configs(self) -> set[tuple[str, str]]:
-        """Return set of (town, weather) combos already completed.
-
-        Only counts episodes with status='completed'.
-        """
+        """Return set of (town, weather) combos already completed."""
         return {
             (e["town"], e["weather"]) for e in self.data["episodes"] if e["status"] == "completed"
         }
+
+    def get_completed_counts(self) -> dict[tuple[str, str], int]:
+        """Return count of completed episodes per (town, weather) combo."""
+        counts: dict[tuple[str, str], int] = {}
+        for e in self.data["episodes"]:
+            if e["status"] == "completed":
+                key = (e["town"], e["weather"])
+                counts[key] = counts.get(key, 0) + 1
+        return counts
 
     def summary(self) -> str:
         """Return human-readable summary."""
@@ -735,7 +995,7 @@ class CollectionManifest:
 
         lines = [
             f"Episodes: {self.data['total_episodes']}",
-            f"Frames:   {self.data['total_frames']} ({total_hrs:.1f} hours at 20 FPS)",
+            f"Frames:   {self.data['total_frames']}" f" ({total_hrs:.1f} hours at 20 FPS)",
             f"Statuses: {status_counts}",
         ]
         return "\n".join(lines)
