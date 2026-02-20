@@ -15,6 +15,7 @@ Schema v3 changes:
 
 from __future__ import annotations
 
+import warnings
 from pathlib import Path
 from typing import Any
 
@@ -70,6 +71,16 @@ class DrivingSequenceDataset(Dataset):
         self.stride = stride
         self.split = split
         self.n_cameras = n_cameras
+
+        if VELOCITY_STATS_VERSION == "placeholder_v0":
+            warnings.warn(
+                "Using placeholder velocity normalization stats "
+                f"(VELOCITY_STATS_VERSION={VELOCITY_STATS_VERSION!r}). "
+                "Recompute from real collection data before training — "
+                "see scripts/analyze_dataset.py for per-axis statistics.",
+                UserWarning,
+                stacklevel=2,
+            )
 
         if augment is None:
             self.augment = split == "train"
