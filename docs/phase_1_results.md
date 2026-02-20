@@ -2,6 +2,11 @@
 
 > **Date:** 2026-02-18
 > **Branch:** `phase-1/data-pipeline`
+>
+> **⚠️ Historical:** These results are from the original v2 schema (single 224×224
+> camera, TrafficManager autopilot). The codebase has since migrated to schema v3
+> (3-camera panoramic 1920×320, PrivilegedExpert agent, RoadOption nav labels).
+> New validation results will be recorded after re-collection.
 
 ---
 

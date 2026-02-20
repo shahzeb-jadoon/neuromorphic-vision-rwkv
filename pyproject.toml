@@ -50,6 +50,7 @@ dev = [
 
 [tool.setuptools.packages.find]
 where = ["."]
+include = ["src*", "agents*", "scripts*"]
 
 [tool.mypy]
 python_version = "3.11"
@@ -96,3 +97,28 @@ testpaths = ["tests"]
 python_files = ["test_*.py"]
 python_functions = ["test_*"]
 addopts = "--strict-markers -v"
+markers = [
+    "online: requires a running CARLA server (deselect with '-m not online')",
+]
+
+# ── Coverage ─────────────────────────────────────────────────────────
+
+[tool.coverage.run]
+source = ["src"]
+omit = [
+    # Modules that require a running CARLA server — untestable in CI
+    "src/data/expert_collector.py",
+    "src/data/route_generator.py",
+    # Model stubs not yet implemented
+    "src/models/*",
+]
+
+[tool.coverage.report]
+fail_under = 80
+show_missing = true
+exclude_lines = [
+    "pragma: no cover",
+    "if __name__ == .__main__.",
+    "if TYPE_CHECKING:",
+    "raise NotImplementedError",
+]

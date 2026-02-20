@@ -3,6 +3,11 @@
 > **Timeline:** Weeks 5–7
 > **Goal:** Vision-RWKV driving agent trained and converging
 > **Depends on:** Phase I (dataset ready)
+>
+> **⚠️ Schema v3 Update:** Input dimensions changed from (B,T,3,224,224) to
+> (B,T,3,320,1920). Patch grid is now 120×20 = 2400 tokens (was 14×14 = 196).
+> Navigation commands use RoadOption enum (5 values: 0-4) not old 4-class mapping.
+> See `src/models/config.py` for current defaults.
 
 ---
 

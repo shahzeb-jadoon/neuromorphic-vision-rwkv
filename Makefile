@@ -9,8 +9,11 @@ help:  ## Show this help message
 
 # ── Quality ──────────────────────────────────────────────────────────
 
-test:  ## Run tests with coverage
-	pytest tests/ -v --cov=src/ --cov-report=term-missing --cov-fail-under=80
+test:  ## Run offline tests with coverage (no CARLA needed)
+	pytest tests/ -v -m "not online" --cov=src/ --cov-report=term-missing --cov-config=pyproject.toml
+
+test-online:  ## Run CARLA integration tests (requires live CARLA server)
+	pytest tests/ -v -m online
 
 lint:  ## Run linting (flake8)
 	flake8 src/ scripts/ tests/
