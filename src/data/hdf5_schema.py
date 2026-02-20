@@ -32,6 +32,17 @@ BRAKE = "brake"
 #   LEFT=1, RIGHT=2, STRAIGHT=3, LANEFOLLOW=4
 NAV_COMMAND = "nav_command"
 
+# Valid nav command IDs for schema v3 (used by validation / analysis scripts).
+VALID_NAV_COMMANDS = {1, 2, 3, 4}
+
+# Human-readable names for reporting and visualisation.
+NAV_COMMAND_NAMES: dict[int, str] = {
+    1: "Left",
+    2: "Right",
+    3: "Straight",
+    4: "LaneFollow",
+}
+
 # Legacy aliases kept for backward-compatible readers of v2 files.
 NAV_COMMAND_PLANNER = "nav_command_planner"
 NAV_COMMAND_HEURISTIC = "nav_command_heuristic"

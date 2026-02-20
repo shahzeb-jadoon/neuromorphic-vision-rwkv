@@ -18,7 +18,7 @@ from pathlib import Path
 import h5py
 import numpy as np
 
-NAV_NAMES = {0: "LaneFollow", 1: "Left", 2: "Right", 3: "Straight"}
+from src.data import hdf5_schema as S
 
 
 def analyze_dataset(data_dir: Path, save_samples: int = 0) -> None:
@@ -53,19 +53,19 @@ def analyze_dataset(data_dir: Path, save_samples: int = 0) -> None:
             episode_lengths.append(n_frames)
 
             # Nav distribution
-            nav = f["nav_command"][:]
-            for cmd_id in range(4):
+            nav = f[S.NAV_COMMAND][:]
+            for cmd_id in S.VALID_NAV_COMMANDS:
                 nav_counts[cmd_id] += int(np.sum(nav == cmd_id))
 
             # Controls
-            steering_all.append(f["steering"][:])
-            throttle_all.append(f["throttle"][:])
+            steering_all.append(f[S.STEERING][:])
+            throttle_all.append(f[S.THROTTLE][:])
 
             # Metadata
-            meta = f["metadata"]
-            town_counts[meta.attrs["town"]] += 1
-            weather_counts[meta.attrs["weather"]] += 1
-            status_counts[meta.attrs["status"]] += 1
+            meta = f[S.METADATA_GROUP]
+            town_counts[meta.attrs[S.META_TOWN]] += 1
+            weather_counts[meta.attrs[S.META_WEATHER]] += 1
+            status_counts[meta.attrs[S.META_STATUS]] += 1
 
     # Summary
     fps = 20  # Assumed
@@ -101,7 +101,7 @@ def analyze_dataset(data_dir: Path, save_samples: int = 0) -> None:
     # Navigation command distribution
     print("Navigation commands:")
     for cmd_id in sorted(nav_counts.keys()):
-        name = NAV_NAMES.get(cmd_id, f"Unknown({cmd_id})")
+        name = S.NAV_COMMAND_NAMES.get(cmd_id, f"Unknown({cmd_id})")
         count = nav_counts[cmd_id]
         pct = 100 * count / total_frames if total_frames > 0 else 0
         bar = "█" * int(pct / 2)
@@ -111,7 +111,7 @@ def analyze_dataset(data_dir: Path, save_samples: int = 0) -> None:
     print()
     for cmd_id in [1, 2, 3]:  # Left, Right, Straight
         pct = 100 * nav_counts[cmd_id] / total_frames if total_frames > 0 else 0
-        name = NAV_NAMES[cmd_id]
+        name = S.NAV_COMMAND_NAMES[cmd_id]
         status = "✓" if pct >= 10.0 else "✗ BELOW 10%"
         print(f"  {name} balance check: {pct:.1f}% {status}")
     print()
@@ -165,9 +165,9 @@ def _save_sample_frames(
 
     for i, ep_idx in enumerate(selected):
         with h5py.File(episodes[int(ep_idx)], "r") as f:
-            n_frames = f["images"].shape[0]
+            n_frames = f[S.IMAGES].shape[0]
             frame_idx = rng.integers(n_frames)
-            img = f["images"][int(frame_idx)]
+            img = f[S.IMAGES][int(frame_idx)]
 
         save_path = sample_dir / f"sample_{i:03d}_{episodes[int(ep_idx)].stem}_f{frame_idx}.png"
         Image.fromarray(img).save(save_path)

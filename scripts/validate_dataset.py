@@ -8,7 +8,7 @@ Checks each episode file for:
   - All-black images (camera failure)
   - Image shape consistency
   - Control value ranges (steering [-1,1], throttle [0,1], brake [0,1])
-  - Nav command range [0, 3]
+  - Nav command range (schema v3: LEFT=1, RIGHT=2, STRAIGHT=3, LANEFOLLOW=4)
   - Frame count consistency (n_frames attr vs actual array length)
 
 Usage:
@@ -26,10 +26,7 @@ from pathlib import Path
 import h5py
 import numpy as np
 
-# Add project root to path
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-
-from src.data import hdf5_schema as S  # noqa: E402
+from src.data import hdf5_schema as S
 
 REQUIRED_FIELDS = [S.IMAGES, S.STEERING, S.THROTTLE, S.VELOCITY, S.NAV_COMMAND]
 OPTIONAL_FIELDS = [S.BRAKE]
@@ -195,9 +192,8 @@ def validate_episode(filepath: Path, strict: bool = False) -> ValidationResult:
 
         # --- 9. Nav command range ---
         nav_cmd = f[S.NAV_COMMAND][:]
-        valid_cmds = {0, 1, 2, 3}
         unique_cmds = set(np.unique(nav_cmd).tolist())
-        invalid_cmds = unique_cmds - valid_cmds
+        invalid_cmds = unique_cmds - S.VALID_NAV_COMMANDS
         if invalid_cmds:
             result.errors.append(f"Invalid nav command IDs: {invalid_cmds}")
 
