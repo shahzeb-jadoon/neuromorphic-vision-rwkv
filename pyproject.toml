@@ -7,7 +7,7 @@ name = "neuromorphic-vision-rwkv"
 version = "0.1.0"
 description = "Vision-RWKV based autonomous driving agent with neuromorphic alignment"
 readme = "README.md"
-license = {text = "MIT"}
+license = {text = "All Rights Reserved"}
 requires-python = ">=3.11"
 authors = [
     {name = "Shahzeb Jadoon"},
@@ -17,6 +17,7 @@ keywords = ["RWKV", "autonomous-driving", "neuromorphic", "CARLA", "vision"]
 dependencies = [
     "torch>=2.6.0",
     "torchvision>=0.21.0",
+    "torchaudio>=2.6.0",
     "numpy>=2.2.0",
     "h5py>=3.13.0",
     "pyyaml>=6.0.2",
@@ -25,19 +26,31 @@ dependencies = [
     "tqdm>=4.67.0",
     "matplotlib>=3.10.0",
     "tensorboard>=2.19.0",
+    "scipy>=1.14.0",
+    "einops>=0.8.0",
+    "scikit-learn>=1.5.0",
 ]
 
 [project.optional-dependencies]
+simulator = [
+    "carla==0.9.16",
+    "rwkv>=0.8.0",
+]
 dev = [
     "pytest>=8.0",
     "pytest-cov>=4.0",
     "black>=24.0",
     "flake8>=7.0",
+    "flake8-pyproject>=1.2",
     "mypy>=1.8",
     "pre-commit>=3.6",
     "types-PyYAML",
     "types-tqdm",
 ]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["src*", "agents*", "scripts*"]
 
 [tool.mypy]
 python_version = "3.11"
@@ -50,6 +63,7 @@ no_implicit_optional = true
 warn_redundant_casts = true
 warn_unused_ignores = true
 show_error_codes = true
+exclude = ["agents/"]
 
 [[tool.mypy.overrides]]
 module = [
@@ -59,20 +73,52 @@ module = [
     "h5py.*",
     "cv2.*",
     "torchvision.*",
+    "networkx.*",
 ]
 ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = ["agents.*"]
+ignore_missing_imports = true
+follow_imports = "skip"
 
 [tool.black]
 line-length = 100
 target-version = ["py311"]
+extend-exclude = "agents/"
 
 [tool.flake8]
 max-line-length = 100
 extend-ignore = ["E203", "W503"]
-exclude = [".git", "__pycache__", "build", "dist"]
+exclude = [".git", "__pycache__", "build", "dist", "agents/"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 python_files = ["test_*.py"]
 python_functions = ["test_*"]
 addopts = "--strict-markers -v"
+markers = [
+    "online: requires a running CARLA server (deselect with '-m not online')",
+]
+
+# ── Coverage ─────────────────────────────────────────────────────────
+
+[tool.coverage.run]
+source = ["src"]
+omit = [
+    # Modules that require a running CARLA server — untestable in CI
+    "src/data/expert_collector.py",
+    "src/data/route_generator.py",
+    # Model stubs not yet implemented
+    "src/models/*",
+]
+
+[tool.coverage.report]
+fail_under = 80
+show_missing = true
+exclude_lines = [
+    "pragma: no cover",
+    "if __name__ == .__main__.",
+    "if TYPE_CHECKING:",
+    "raise NotImplementedError",
+]

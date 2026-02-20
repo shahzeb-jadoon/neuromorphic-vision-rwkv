@@ -3,6 +3,13 @@
 > **Timeline:** Weeks 1–4
 > **Goal:** CARLA running reliably, data collector built, 10+ hours of expert driving data collected
 > **Depends on:** Phase 0 (environment ready)
+>
+> **⚠️ Schema v3 Update:** This document was originally written for the v2 schema
+> (single 224×224 camera, TrafficManager autopilot, dual nav labels). The codebase
+> now uses schema v3: 3-camera panoramic (1920×320), custom PrivilegedExpert agent,
+> single nav_command (RoadOption enum), and privileged metadata. See
+> `src/data/hdf5_schema.py` and `agents/expert/privileged_expert.py` for current
+> implementation.
 
 ---
 
@@ -289,4 +296,3 @@ Status of each criterion for starting Phase II:
 | 9 | All code committed and documented | ✅ | `phase-1/data-pipeline` branch |
 
 > **Assessment:** Items 4, 5, and 7 are partially met but acceptable for Phase II start. The TurnBalancedSampler and natural RWKV forward time mitigate items 5 and 7. Item 4 can be supplemented with a second overnight run if training reveals insufficient data.
-

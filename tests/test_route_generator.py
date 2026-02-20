@@ -17,7 +17,7 @@ from unittest.mock import MagicMock, patch
 import numpy as np
 import pytest
 
-from src.data.route_generator import RouteConfig
+from src.data.route_generator import BalancedRouteGenerator, RouteConfig
 
 # ── Test RouteConfig defaults ──────────────────────────────────────────
 
@@ -62,7 +62,7 @@ class TestDistributionReport:
     """
 
     @pytest.fixture
-    def generator(self):
+    def generator(self) -> BalancedRouteGenerator:
         """Create a BalancedRouteGenerator with mocked __init__."""
         from src.data.route_generator import BalancedRouteGenerator
 
@@ -70,17 +70,17 @@ class TestDistributionReport:
             gen = BalancedRouteGenerator.__new__(BalancedRouteGenerator)
             return gen
 
-    def test_empty_route(self, generator) -> None:
+    def test_empty_route(self, generator: BalancedRouteGenerator) -> None:
         report = generator.get_distribution_report([])
         assert report == {}
 
-    def test_all_lane_follow(self, generator) -> None:
+    def test_all_lane_follow(self, generator: BalancedRouteGenerator) -> None:
         route = [(MagicMock(), "LaneFollow")] * 10
         report = generator.get_distribution_report(route)
         assert report["LaneFollow"] == 1.0
         assert len(report) == 1
 
-    def test_mixed_route(self, generator) -> None:
+    def test_mixed_route(self, generator: BalancedRouteGenerator) -> None:
         route = (
             [(MagicMock(), "LaneFollow")] * 6
             + [(MagicMock(), "Left")] * 2
@@ -108,7 +108,7 @@ class TestFindTargetJunction:
     """Test _find_target_junction — geometry + distance filtering."""
 
     @pytest.fixture
-    def generator(self):
+    def generator(self) -> BalancedRouteGenerator:
         """Create a BalancedRouteGenerator with mocked __init__ and junctions."""
         from src.data.route_generator import BalancedRouteGenerator
 
@@ -137,14 +137,14 @@ class TestFindTargetJunction:
             ]
             return gen
 
-    def test_returns_valid_junction(self, generator) -> None:
+    def test_returns_valid_junction(self, generator: BalancedRouteGenerator) -> None:
         current = MockLocation(0.0, 0.0)
         rng = np.random.default_rng(42)
         result = generator._find_target_junction(current, {}, rng)
         assert result is not None
         assert result["junction_id"] in (1, 2)  # Junction 3 too close
 
-    def test_filters_too_close(self, generator) -> None:
+    def test_filters_too_close(self, generator: BalancedRouteGenerator) -> None:
         """Junction at 10m should be filtered out (threshold is 20m)."""
         current = MockLocation(0.0, 0.0)
         rng = np.random.default_rng(42)
@@ -191,7 +191,7 @@ class TestExtendRoute:
     """Test _extend_route — waypoint chaining logic."""
 
     @pytest.fixture
-    def generator(self):
+    def generator(self) -> BalancedRouteGenerator:
         from src.data.route_generator import BalancedRouteGenerator
 
         with patch.object(BalancedRouteGenerator, "__init__", lambda self, *a, **kw: None):
@@ -199,7 +199,7 @@ class TestExtendRoute:
             gen.config = RouteConfig()
             return gen
 
-    def test_extends_correct_length(self, generator) -> None:
+    def test_extends_correct_length(self, generator: BalancedRouteGenerator) -> None:
         """Extends route by the requested number of waypoints."""
         # Build a chain of mock waypoints
         waypoints = []
@@ -219,7 +219,7 @@ class TestExtendRoute:
         for _, option in result:
             assert option == "LaneFollow"
 
-    def test_stops_at_road_end(self, generator) -> None:
+    def test_stops_at_road_end(self, generator: BalancedRouteGenerator) -> None:
         """Stops early if no next waypoints."""
         wp = MagicMock()
         wp.next = MagicMock(return_value=[])

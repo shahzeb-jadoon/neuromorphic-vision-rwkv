@@ -69,7 +69,7 @@ Each approach sacrifices temporal context - the very information essential for u
 
 ### 2.3 The Energy Efficiency Problem
 
-Beyond memory constraints, the energy consumption of quadratic attention poses operational challenges. Edge compute modules in autonomous vehicles typically operate within tight power envelopes (less than 100W for the entire AD stack) to preserve vehicle range. The current reliance on GPUs for dense matrix operations prioritizes throughput over energy efficiency, creating a barrier to widespread deployment of advanced perception systems. Studies on neuromorphic computing consistently demonstrate 10-100x energy efficiency improvements over GPU-based inference for equivalent computational tasks when architectures align with neuromorphic principles (Davies et al., 2018; Akida Whitepaper, 2025).
+Beyond memory constraints, the energy consumption of quadratic attention poses operational challenges. Edge compute modules in autonomous vehicles typically operate within tight power envelopes (less than 100W for the entire AD stack) to preserve vehicle range. The current reliance on GPUs for dense matrix operations prioritizes throughput over energy efficiency, creating a barrier to widespread deployment of advanced perception systems. Studies on neuromorphic computing report energy efficiency improvements of 10-100x over GPU-based inference for specific workloads that align with neuromorphic principles (Davies et al., 2018). These figures should be interpreted cautiously: the upper range comes from vendor documentation (BrainChip, 2025) which has not been independently peer-reviewed, and the improvement factor is highly workload-dependent. Nevertheless, even conservative estimates suggest substantial efficiency gains for event-driven, sparse computation patterns characteristic of recurrent inference.
 
 ---
 
@@ -265,7 +265,7 @@ Standard Transformers utilizing Softmax Self-Attention require memory for the $N
 
 RWKV's recurrent formulation requires only the fixed-size state tensors $(a_t, b_t)$ and compute of $O(1)$ per token during inference.
 
-**Practical Impact:** An RWKV-based driving policy can theoretically process an infinite stream of driving data without any increase in memory usage. The inference time for the 10,000th frame is identical to that of the 1st frame. This creates a **predictable, deterministic latency profile** - a non-negotiable requirement for real-time safety-critical control systems.
+**Practical Impact:** An RWKV-based driving policy can theoretically process an arbitrarily long stream of driving data without any increase in memory usage. The inference time for the 10,000th frame is identical to that of the 1st frame. This creates a **predictable, deterministic latency profile** - a non-negotiable requirement for real-time safety-critical control systems. However, it is important to note that the fixed-size state acts as a lossy compression of history - it retains a learned summary rather than a perfect record. The practical "effective context length" (i.e., how far back state information meaningfully influences predictions) depends on the decay parameters and training dynamics, and is an empirical question to be investigated.
 
 ### 5.2 The "Infinite Context" Hypothesis
 
@@ -474,7 +474,7 @@ Fuse multi-modal sensor streams into unified recurrent state, avoiding quadratic
 
 **Controller: RWKV Policy Head**
 
-Output control signals (steering, acceleration) directly from fused state, leveraging "infinite context" for long-horizon planning while maintaining deterministic latency for safety-critical operation.
+Output control signals (steering, acceleration) directly from fused state, leveraging the recurrent state's long-horizon contextual summary for planning while maintaining deterministic latency for safety-critical operation.
 
 **Hardware Mapping: Neuromorphic Deployment Path**
 
@@ -542,7 +542,7 @@ This review focuses on the temporal efficiency argument. Comprehensive compariso
 
 The evidence gathered in this review supports the following thesis:
 
-The Receptance Weighted Key Value (RWKV) architecture, specifically its formulation as a Linear Recurrent Neural Network with dynamic state evolution, offers a theoretically superior alternative to Transformers for autonomous vehicle control. By leveraging a linear attention mechanism ($O(N)$ complexity) that is structurally analogous to the sub-threshold dynamics of Leaky Integrate-and-Fire (LIF) neurons, an RWKV-based driving policy can maintain an effectively infinite temporal context with constant inference cost. This architecture represents a "Third Way" that combines:
+The Receptance Weighted Key Value (RWKV) architecture, specifically its formulation as a Linear Recurrent Neural Network with dynamic state evolution, offers a theoretically superior alternative to Transformers for autonomous vehicle control. By leveraging a linear attention mechanism ($O(N)$ complexity) that is structurally analogous to the sub-threshold dynamics of Leaky Integrate-and-Fire (LIF) neurons, an RWKV-based driving policy can maintain an effectively unbounded temporal context window with constant inference cost, though the fixed-size recurrent state imposes a finite information capacity that acts as a learned lossy compression of history. This architecture represents a "Third Way" that combines:
 
 **Transformer Trainability:** Parallelizable training using standard backpropagation
 

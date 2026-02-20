@@ -7,17 +7,26 @@
 #   conda activate rwkv
 #   bash scripts/overnight_collection.sh
 #
-# Expected runtime: ~4-6 hours
+# Expected runtime: ~6-10 hours
 # Expected output:  ~10+ hours of driving data (720K+ frames)
-# Expected storage: ~50-70 GB (gzip-1 compressed)
+# Expected storage: ~200-300 GB at 512×512 (gzip-1, ~270 KB/frame)
+#
+# Storage estimates (50 hrs driving):
+#   224×224:  ~34 GB    (measured ~68 KB/frame)
+#   512×512:  ~1.22 TB  (estimated ~270 KB/frame)
+#   1024×1024: ~4.9 TB  (estimated ~1.08 MB/frame)
 #
 # Monitor progress: tail -f data/collected/collection.log
 # Resume after interruption: just re-run the script (manifest-based resume)
+# Move data to NFS and re-run to continue on larger storage.
 # ============================================================================
 
-set -euo pipefail
+set -uo pipefail  # Don't use -e: allow per-town failures without aborting
 
-OUTPUT_DIR="data/collected"
+# --- Storage location ---
+# Default: the dataset directory below
+# Override: OUTPUT_DIR=/path/to/dir bash scripts/overnight_collection.sh
+OUTPUT_DIR="${OUTPUT_DIR:-/mnt/data/carla_data}"
 LOG_FILE="${OUTPUT_DIR}/collection.log"
 MANIFEST="${OUTPUT_DIR}/collection_manifest.json"
 
@@ -37,8 +46,8 @@ TOWNS=("Town01" "Town03" "Town04" "Town05")
 # Weather conditions
 WEATHERS=("ClearNoon" "CloudyNoon" "WetNoon" "SoftRainNoon" "HardRainNoon" "ClearSunset")
 
-# Episodes per (town, weather) combination = 4×6×5 = 120 episodes
-EPISODES_PER_CONFIG=5
+# Episodes per (town, weather) combination = 4×6×6 = 144 episodes
+EPISODES_PER_CONFIG=6
 
 # Each episode = 4000 frames (200 seconds at 20 FPS)
 MAX_FRAMES=4000
@@ -47,73 +56,56 @@ MAX_FRAMES=4000
 N_VEHICLES=40
 N_WALKERS=0
 
-# Total expected: 120 episodes × 4000 frames = 480,000 frames (≈6.7 hours)
-# With additional runs or more episodes_per_config, aim for 720K+ frames
+# Route generation strategy: balanced turns
+ROUTE_STRATEGY="balanced"
+TARGET_LEFT=0.15
+TARGET_RIGHT=0.15
+
+# Total expected: 144 episodes × 4000 frames = 576,000 frames (≈8 hours)
+# At 512×512: ~156 GB (576K × 270 KB/frame)
 echo ""
 echo "Plan: ${#TOWNS[@]} towns × ${#WEATHERS[@]} weathers × ${EPISODES_PER_CONFIG} episodes"
 echo "Total: $(( ${#TOWNS[@]} * ${#WEATHERS[@]} * ${EPISODES_PER_CONFIG} )) episodes"
 echo "Frames per episode: ${MAX_FRAMES} ($(( MAX_FRAMES / 20 ))s at 20 FPS)"
 echo "Expected total: $(( ${#TOWNS[@]} * ${#WEATHERS[@]} * ${EPISODES_PER_CONFIG} * MAX_FRAMES )) frames"
+echo "Route strategy: ${ROUTE_STRATEGY} (left=${TARGET_LEFT}, right=${TARGET_RIGHT})"
 echo ""
 
-# --- Run Collection ---
+# --- Run Collection via collect_data.py (uses route generator) ---
+# Each town runs as its own collect_data.py invocation for isolation.
+# Weathers come from configs/collection.yaml (not overridden here).
+# Resume is automatic: manifest tracks completed episodes.
+FAILED_TOWNS=()
 for town in "${TOWNS[@]}"; do
-    for weather in "${WEATHERS[@]}"; do
-        echo "[$(date +%H:%M:%S)] Starting: ${town} / ${weather} (${EPISODES_PER_CONFIG} episodes)" | tee -a "${LOG_FILE}"
+    echo "[$(date +%H:%M:%S)] Starting: ${town} (${EPISODES_PER_CONFIG} episodes per weather)" | tee -a "${LOG_FILE}"
 
-        python -c "
-import logging, time, sys
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s [%(levelname)s] %(name)s: %(message)s',
-    datefmt='%H:%M:%S',
-    handlers=[
-        logging.FileHandler('${LOG_FILE}', mode='a'),
-        logging.StreamHandler(sys.stdout),
-    ]
-)
+    if python scripts/collect_data.py \
+        --config configs/collection.yaml \
+        --output "${OUTPUT_DIR}" \
+        --town "${town}" \
+        --episodes "${EPISODES_PER_CONFIG}" \
+        --route-strategy "${ROUTE_STRATEGY}" \
+        --target-left "${TARGET_LEFT}" \
+        --target-right "${TARGET_RIGHT}" \
+        --resume \
+        2>&1 | tee -a "${LOG_FILE}"; then
+        echo "[$(date +%H:%M:%S)] ✓ ${town} complete" | tee -a "${LOG_FILE}"
+    else
+        echo "[$(date +%H:%M:%S)] ✗ ${town} FAILED — continuing with next town" | tee -a "${LOG_FILE}"
+        FAILED_TOWNS+=("${town}")
+    fi
 
-from src.data.expert_collector import ExpertDataCollector, EpisodeConfig, CollectionManifest
-from pathlib import Path
-
-collector = ExpertDataCollector(host='auto', port=2000, output_dir='${OUTPUT_DIR}')
-collector.connect()
-
-manifest = CollectionManifest(Path('${MANIFEST}'))
-
-# Check if this (town, weather) is already done
-completed = manifest.get_completed_configs()
-if ('${town}', '${weather}') in completed:
-    print('Skipping ${town}/${weather} — already completed')
-else:
-    for ep in range(${EPISODES_PER_CONFIG}):
-        config = EpisodeConfig(
-            town='${town}',
-            weather='${weather}',
-            max_frames=${MAX_FRAMES},
-            n_vehicles=${N_VEHICLES},
-            fps=20,
-        )
-        result = collector.collect_episode(config)
-        manifest.add_episode(result)
-        manifest.save()
-        print(f'  Episode {ep+1}/${EPISODES_PER_CONFIG}: {result.status}, {result.n_frames} frames, nav={result.nav_distribution}')
-
-        # If crashed, try to reconnect
-        if result.status == 'crashed' and result.error_message:
-            print('  Attempting reconnect after crash...')
-            if not collector._reconnect():
-                print('  FATAL: Could not reconnect. Skipping remaining episodes.')
-                break
-"
-        # Small pause between town/weather combos to let CARLA settle
-        sleep 2
-    done
+    # Pause between towns to let CARLA settle after map change
+    sleep 10
 done
 
 echo ""
 echo "============================================================"
 echo "Campaign finished: $(date)"
+if [ ${#FAILED_TOWNS[@]} -gt 0 ]; then
+    echo "FAILED TOWNS: ${FAILED_TOWNS[*]}"
+    echo "Re-run this script to retry (resume is automatic)."
+fi
 echo "============================================================"
 
 # Run analysis

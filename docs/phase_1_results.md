@@ -2,6 +2,11 @@
 
 > **Date:** 2026-02-18
 > **Branch:** `phase-1/data-pipeline`
+>
+> **⚠️ Historical:** These results are from the original v2 schema (single 224×224
+> camera, TrafficManager autopilot). The codebase has since migrated to schema v3
+> (3-camera panoramic 1920×320, PrivilegedExpert agent, RoadOption nav labels).
+> New validation results will be recorded after re-collection.
 
 ---
 
@@ -103,6 +108,25 @@ Straight    :    57,914 ( 12.1%) ██████
 **Mitigation strategy (for training):**
 - `TurnBalancedSampler` oversamples clips containing Left/Right commands (~7–10× upweighting)
 - This is sufficient for the model to learn turn behavior despite the natural distribution imbalance
+- **Data re-collection planned** (see below): use `BalancedRouteGenerator` in
+  `overnight_collection.sh` to reach 15% left / 15% right target distribution
+  with 10+ hours of driving data
+
+### Data Re-Collection Plan
+
+The original collection used autopilot without route generation, resulting in
+84% LaneFollow and only 2% turns. The overnight script has been updated to:
+
+1. Use `BalancedRouteGenerator` via `collect_data.py` for turn-balanced routes
+2. Increase to 144 episodes × 5000 frames (720K+ frames, ~10 hours)
+3. Target distribution: 60% LaneFollow, 15% Left, 15% Right, 10% Straight
+
+**Old data status:** The existing 120 episodes (480K frames) remain
+schema-compatible — the HDF5 files store throttle and brake separately, and
+the dataset loader now computes `acceleration = throttle - brake` on the fly.
+However, due to poor turn balance, the old data should be archived to
+`data/collected_v1/` before re-collection. It can be combined with the new
+data later if additional volume is needed for training.
 
 ### Speed Analysis
 

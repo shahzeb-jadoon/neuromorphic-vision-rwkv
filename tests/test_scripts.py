@@ -9,9 +9,11 @@ Run with: pytest tests/test_scripts.py -v
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import subprocess
 import sys
+from collections.abc import Iterator
 from pathlib import Path
 
 import h5py
@@ -22,9 +24,19 @@ from src.data import hdf5_schema as S
 # Directory for test outputs
 TEST_OUTPUT_DIR = Path("/tmp/test_scripts_output")
 
+# Project root — needed so subprocess can find `src` package
+_PROJECT_ROOT = str(Path(__file__).resolve().parent.parent)
+
+
+def _script_env() -> dict[str, str]:
+    """Return an env dict with PYTHONPATH set to project root."""
+    env = os.environ.copy()
+    env["PYTHONPATH"] = _PROJECT_ROOT + os.pathsep + env.get("PYTHONPATH", "")
+    return env
+
 
 @pytest.fixture(scope="module", autouse=True)
-def clean_output_dir():
+def clean_output_dir() -> Iterator[None]:
     """Create fresh output directory before tests, clean up after."""
     if TEST_OUTPUT_DIR.exists():
         shutil.rmtree(TEST_OUTPUT_DIR)
@@ -41,7 +53,7 @@ class TestCreateToyDataset:
     TOY_DIR = TEST_OUTPUT_DIR / "toy_data"
 
     @pytest.fixture(scope="class", autouse=True)
-    def run_toy_script(self):
+    def run_toy_script(self) -> None:
         """Run create_toy_dataset.py once for all tests in this class."""
         result = subprocess.run(
             [
@@ -56,7 +68,8 @@ class TestCreateToyDataset:
             ],
             capture_output=True,
             text=True,
-            cwd=str(Path(__file__).parent.parent),
+            cwd=_PROJECT_ROOT,
+            env=_script_env(),
         )
         assert result.returncode == 0, f"Script failed:\n{result.stderr}"
 
@@ -114,7 +127,7 @@ class TestAnalyzeDataset:
     """Test that analyze_dataset.py runs successfully on toy data."""
 
     @pytest.fixture(scope="class")
-    def toy_data_dir(self):
+    def toy_data_dir(self) -> Path:
         """Generate toy data for analysis."""
         toy_dir = TEST_OUTPUT_DIR / "analyze_toy_data"
         if not toy_dir.exists():
@@ -129,12 +142,13 @@ class TestAnalyzeDataset:
                 ],
                 capture_output=True,
                 text=True,
-                cwd=str(Path(__file__).parent.parent),
+                cwd=_PROJECT_ROOT,
+                env=_script_env(),
             )
             assert result.returncode == 0, f"Toy data generation failed:\n{result.stderr}"
         return toy_dir
 
-    def test_analyze_runs_without_error(self, toy_data_dir) -> None:
+    def test_analyze_runs_without_error(self, toy_data_dir: Path) -> None:
         """analyze_dataset.py completes successfully on toy data."""
         result = subprocess.run(
             [
@@ -144,11 +158,12 @@ class TestAnalyzeDataset:
             ],
             capture_output=True,
             text=True,
-            cwd=str(Path(__file__).parent.parent),
+            cwd=_PROJECT_ROOT,
+            env=_script_env(),
         )
         assert result.returncode == 0, f"Analysis failed:\n{result.stderr}"
 
-    def test_analyze_outputs_statistics(self, toy_data_dir) -> None:
+    def test_analyze_outputs_statistics(self, toy_data_dir: Path) -> None:
         """analyze_dataset.py output includes expected statistics."""
         result = subprocess.run(
             [
@@ -158,7 +173,8 @@ class TestAnalyzeDataset:
             ],
             capture_output=True,
             text=True,
-            cwd=str(Path(__file__).parent.parent),
+            cwd=_PROJECT_ROOT,
+            env=_script_env(),
         )
         output = result.stdout.lower()
         # Should mention episodes, frames, or similar stats

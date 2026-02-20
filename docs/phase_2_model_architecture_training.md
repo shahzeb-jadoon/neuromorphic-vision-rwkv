@@ -3,6 +3,11 @@
 > **Timeline:** Weeks 5–7
 > **Goal:** Vision-RWKV driving agent trained and converging
 > **Depends on:** Phase I (dataset ready)
+>
+> **⚠️ Schema v3 Update:** Input dimensions changed from (B,T,3,224,224) to
+> (B,T,3,320,1920). Patch grid is now 120×20 = 2400 tokens (was 14×14 = 196).
+> Navigation commands use RoadOption enum (5 values: 0-4) not old 4-class mapping.
+> See `src/models/config.py` for current defaults.
 
 ---
 
@@ -12,8 +17,8 @@ This is the core ML engineering phase. You will:
 
 - **Vision encoder** — Implement patch tokenization with Q-Shift (3 stages: frozen pretrained → fine-tuned → from-scratch)
 - **RWKV encoder** — Build the RWKV-7 encoder with data-dependent decay (attempt-first-then-pivot to RWKV-6)
-- **Full pipeline** — Assemble tokenizer → encoder → LICA fusion → policy head
-- **Training** — Implement TBPTT with burn-in, DAgger recovery training, crash-safe checkpointing
+- **Full pipeline** — Assemble tokenizer → encoder → NavigationFusion → policy head
+- **Training** — Implement TBPTT with burn-in, steering noise injection for implicit recovery, crash-safe checkpointing
 - **Baselines** — Train CNN, Transformer, and LSTM baselines with identical protocol
 
 ### Branching Strategy for Concurrent Experiments
@@ -36,7 +41,7 @@ With multiple GPUs available, run experiments in parallel on separate branches:
 
 ### 2.1 — Patch Embedding & Q-Shift Tokenizer (Week 5)
 
-**Objective:** Convert 224×224 RGB images into token sequences with spatial awareness.
+**Objective:** Convert 320×1920 panoramic RGB images into token sequences with spatial awareness.
 
 #### Vision Tokenization Strategy (3 Stages)
 
@@ -58,17 +63,17 @@ All three stages are required — they are run sequentially (or concurrently on 
 - **Preparation during Stage 2:** While Stage 2 trains on GPU 1, simultaneously on a separate branch: (1) implement `PatchEmbedding` module, (2) ensure sufficient CARLA data is collected (extend collection if <50 hours), (3) set up augmentation pipeline more aggressively (heavier color jitter, random erasing), (4) write comparison evaluation script
 
 **Tasks:**
-- [ ] Implement `PatchEmbedding`: Conv2d(3, D, kernel=16, stride=16) → (B, 196, D) where D=768
+- [ ] Implement `PatchEmbedding`: Conv2d(3, D, kernel=16, stride=16) → (B, 2400, D) where D=384 (lightweight) or 768 (full)
 - [ ] Implement pretrained encoder wrapper: load CLIP ViT-B/16 or DINOv2, extract patch tokens
 - [ ] Implement `QShift` (Quad-directional Token Shift): shift tokens by 1 position in 4 spatial directions to inject 2D locality
-- [ ] Add positional encoding (learnable 2D positional embeddings for 14×14 grid)
+- [ ] Add positional encoding (learnable 2D positional embeddings for 120×20 grid)
 - [ ] Config flag: `use_pretrained_vision: true/false` to switch between stages
 - [ ] Unit test: verify output shapes, gradient flow for both modes
 - [ ] Reference implementation: [OpenGVLab/Vision-RWKV](https://github.com/OpenGVLab/Vision-RWKV) (ICLR 2025)
 
 **Key code artifact:** `src/models/tokenizer.py`
 
-**Q-Shift explained:** After flattening the 14×14 patch grid into a 196-token sequence, Q-Shift splits the channel dimension into 4 groups. Each group is shifted by 1 position corresponding to up/down/left/right spatial neighbors. This recovers local 2D structure that raster-scan flattening destroys, without adding any parameters.
+**Q-Shift explained:** After flattening the 120×20 patch grid into a 2400-token sequence, Q-Shift splits the channel dimension into 4 groups. Each group is shifted by 1 position corresponding to up/down/left/right spatial neighbors. This recovers local 2D structure that raster-scan flattening destroys, without adding any parameters.
 
 ### 2.2 — RWKV-7 Encoder Block (Week 5)
 
@@ -110,18 +115,19 @@ class RWKVEncoder(nn.Module):
         """
 ```
 
-### 2.3 — Sensor Fusion (LICA) & Policy Head (Week 5–6)
+### 2.3 — Sensor Fusion (NavigationFusion) & Policy Head (Week 5–6)
 
 **Objective:** Fuse visual features with navigation commands, output driving controls.
 
 **Tasks:**
-- [ ] Implement `LICA` (Linear Cross-Attention): fuses visual features with nav command embedding
+- [ ] Implement `NavigationFusion` (gated linear fusion): fuses visual features with nav command embedding
   - Nav command → learned embedding (dim 64)
-  - Linear cross-attention: visual features attend to nav embedding without quadratic cost
-- [ ] Implement `PolicyHead`: MLP that outputs [steer, throttle]
+  - Gated linear fusion: concatenate visual + nav embeddings, linear projection with learned sigmoid gate
+- [ ] Implement `PolicyHead`: MLP that outputs [steer, acceleration]
   - Architecture: Linear(D, 256) → ReLU → Linear(256, 64) → ReLU → Linear(64, 2)
   - Steering: tanh activation (range [-1, 1])
-  - Throttle: sigmoid activation (range [0, 1])
+  - Acceleration: tanh activation (range [-1, 1]), where positive = throttle, negative = brake
+  - This merged axis avoids the throttle-brake conflict in expert data and follows standard practice in imitation learning literature
 - [ ] Optional: velocity prediction auxiliary head for improved representation learning
 
 **Key code artifacts:** `src/models/fusion.py`, `src/models/policy_head.py`
@@ -131,17 +137,23 @@ class RWKVEncoder(nn.Module):
 **Objective:** Wire all components into a single end-to-end model.
 
 **Tasks:**
-- [ ] Implement `VisionRWKVDriver` that composes: PatchEmbedding → QShift → RWKVEncoder → LICA → PolicyHead
-- [ ] Verify forward pass end-to-end: input (B, T, 3, 224, 224) → output (B, T, 2)
+- [ ] Implement `VisionRWKVDriver` that composes: PatchEmbedding → QShift → RWKVEncoder → NavigationFusion → PolicyHead
+- [ ] Verify forward pass end-to-end: input (B, T, 3, 320, 1920) → output (B, T, 2) where output is [steer, acceleration]
 - [ ] Implement model config via YAML (see `configs/`)
 - [ ] Config flag: `use_pretrained_vision` controls Stage 1/2 vs Stage 3 tokenizer
+
+**Testing note:** The existing `tests/test_model_interfaces.py` currently only verifies that `forward()` raises `NotImplementedError` (stub assertions). As each module is implemented, **rewrite these tests** to verify:
+- Output shapes match expected `(B, T, D)` or `(B, T, 2)` dimensions
+- Gradient flow (`.backward()` succeeds, `.grad` is not None on parameters)
+- State propagation (RWKV hidden state shapes, persistence across calls)
+- Numerical behavior (outputs bounded by `tanh`, no NaN/Inf)
 
 **Key code artifact:** `src/models/vision_rwkv_driver.py`
 
 ```python
 class VisionRWKVDriver(nn.Module):
     def __init__(self, config):
-        # config: d_model, n_layers, n_heads, img_size, patch_size, use_pretrained_vision, ...
+        # config: d_model, n_layers, n_heads, img_height, img_width, patch_size, use_pretrained_vision, ...
 
     def forward(self, images, nav_commands, state=None):
         """
@@ -169,10 +181,20 @@ class VisionRWKVDriver(nn.Module):
 
 **Objective:** Implement training with Truncated Backpropagation Through Time, burn-in, and crash-safe checkpointing.
 
+**Important data notes for training:**
+- **Collision episodes:** `DrivingSequenceDataset` already truncates at `collision_frame` metadata
+  to exclude post-collision garbage frames. Verify this works correctly before training.
+- **Town05 speed range:** Town05 has highway-like roads where the autopilot reaches 29 m/s (104 km/h).
+  This is valid data; the model should learn to handle highway-speed driving.
+  Consider normalizing velocity inputs if the distribution is very wide.
+- **Aggressive traffic (deferred):** A future collection campaign could spawn erratic NPC vehicles
+  (varying `ignore_lights_percentage`, `ignore_signs_percentage` in TrafficManager) to expose
+  the model to adversarial driving conditions. Not required for initial training.
+
 **Tasks:**
 - [ ] Implement `Trainer` class with TBPTT
 - [ ] Burn-in: first K=20 frames of each clip run forward-only (no gradient) to warm up state
-- [ ] Loss: MSE on steering + throttle predictions (after burn-in frames only)
+- [ ] Loss: MSE on steering + acceleration predictions (after burn-in frames only)\n  - Training target: `acceleration = expert_throttle - expert_brake`
 - [ ] Optimizer: AdamW, lr=1e-4, weight_decay=0.01
 - [ ] LR schedule: linear warmup (1000 steps) + cosine decay
 - [ ] Gradient clipping: max_norm=1.0
@@ -203,24 +225,27 @@ Training runs may be interrupted by OOM, hardware issues, or power loss. The che
 
 - Project: `neuromorphic-vision-rwkv`, entity: your personal W&B username
 - Run naming convention: `{model_name}_{timestamp}` (e.g., `vrwkv_base_20260301_143022`)
-- Log: loss components (steer MSE + throttle MSE), gradient norms, learning rate, epoch, val predictions vs. ground truth
+- Log: loss components (steer MSE + acceleration MSE), gradient norms, learning rate, epoch, val predictions vs. ground truth
 - Tags: `[rwkv-7, carla, imitation-learning]` (update tag to `rwkv-6` if pivoting)
 
-### 2.5b — DAgger Recovery Training (After Initial Convergence)
+### 2.5b — Steering Noise Injection (During Data Collection)
 
-**Objective:** Mitigate distribution drift via DAgger-like iterative data augmentation.
+**Objective:** Mitigate distribution drift without requiring a closed-loop evaluation pipeline (which is built in Phase III).
+
+**Rationale:** Full DAgger requires running the trained agent in CARLA and measuring deviations — this depends on the closed-loop evaluation pipeline (Phase III, Step 3.1). Instead, we use a simpler Phase 2 alternative: inject Gaussian noise into expert steering during data collection. This creates "slightly wrong" states that the expert then corrects from naturally, giving the model implicit recovery demonstrations without needing a running agent.
 
 **Tasks:**
-- [ ] After initial imitation learning converges, run the trained agent in CARLA closed-loop
-- [ ] Record states where the agent deviates from expert (steering difference > 0.3 rad)
-- [ ] Collect recovery demonstrations: re-run expert from those deviated states (or use expert correction overlay)
-- [ ] Mix recovery data (10-20% of total dataset) back into training set
-- [ ] Retrain for 10 additional epochs on augmented dataset
-- [ ] Also during initial data collection: add Gaussian noise (σ=0.05) to expert steering for implicit recovery demonstrations
+- [ ] Add `steering_noise_std` parameter to `EpisodeConfig` (default σ=0.05)
+- [ ] During data collection, apply noise to the recorded steering signal: `steering_noisy = steering + N(0, σ)`, clamped to [-1, 1]
+- [ ] Store the *noisy* steering as the "observation" and the *clean* expert steering as the "label" — the model learns to correct back toward the expert action
+- [ ] Collect ~20% of episodes with noise enabled, 80% clean
+- [ ] Validate that noise magnitude doesn't cause unsafe driving (σ=0.05 ≈ 3° perturbation)
 
-**Key code artifact:** `src/training/dagger.py`
+**Key code artifact:** `src/data/expert_collector.py` (noise injection in `collect_episode`)
 
-**Why DAgger matters:** Pure imitation learning trains on expert-quality data, but at inference time the agent makes small errors that compound over time (distribution drift). DAgger exposes the model to recovery scenarios during training.
+**Why this works:** Noise injection is a well-established technique in imitation learning (Ross & Bagnell, 2010). It exposes the model to off-policy states without the engineering overhead of DAgger's iterative data collection loop. Full DAgger can be applied in Phase III once closed-loop evaluation exists.
+
+> **Note:** Full DAgger recovery training is deferred to Phase III (Step 3.7) where the closed-loop evaluation pipeline provides the required deviation detection.
 
 ### 2.6 — Training Run (Week 6–7)
 
@@ -230,7 +255,7 @@ Training runs may be interrupted by OOM, hardware issues, or power loss. The che
 - [ ] Run initial training on laptop (small batch, 1-2 epochs) to verify pipeline correctness
 - [ ] Transfer to the 24 GB workstation for full training
 - [ ] Train for 50+ epochs with early stopping (patience=10 on val loss)
-- [ ] Monitor: loss curves, steering/throttle prediction distributions, gradient norms
+- [ ] Monitor: loss curves, steering/acceleration prediction distributions, gradient norms
 - [ ] Batch size: 16-32 sequences (each 32 frames) — adjust based on memory profiling results (Step 2.4b)
 - [ ] Expected training time: ~30-50 GPU-hours on workstation GPU (24 GB)
 
@@ -272,16 +297,32 @@ python -m src.training.trainer --config configs/vrwkv_base.yaml
 
 ## Model Configurations
 
+> **Dimension rationale:** Panoramic input is 320×1920 (3 cameras × 640px wide).
+> With 16×16 patches this yields 20×120 = **2400 tokens per frame** — 12× more
+> than a standard 224×224 ViT (196 tokens).  RWKV's O(N) complexity makes this
+> tractable, but VRAM is still dominated by activation storage during
+> backpropagation.
+>
+> | Config | d_model | n_layers | Params (est.) | 2400 tok × 32 seq FP16 VRAM (est.) | Target GPU |
+> |--------|---------|----------|---------------|-----------------------------------|------------|
+> | Debug  | 256     | 6        | ~8 M          | ~4 GB                             | laptop GPU (16 GB) |
+> | Base   | 768     | 12       | ~85 M         | ~18 GB                            | workstation GPU (24 GB) |
+>
+> Start with Debug config on the laptop for rapid iteration, then scale to
+> Base on the 24 GB workstation GPU.  If Base exceeds memory, reduce `batch_size` or
+> `seq_len` before reducing `d_model`.
+
 Create these YAML configs in `configs/`:
 
 ```yaml
 # configs/vrwkv_base.yaml
 model:
   name: "VisionRWKVDriver"
-  d_model: 768
+  d_model: 768           # Explicit: code default is 384 (lightweight for dev/test)
   n_layers: 12
   patch_size: 16
-  img_size: 224
+  img_height: 320
+  img_width: 1920
   nav_embed_dim: 64
   use_pretrained_vision: true  # Stage 1/2
   vision_encoder: "openai/clip-vit-base-patch16"
@@ -316,7 +357,8 @@ model:
   d_model: 256
   n_layers: 6
   patch_size: 16
-  img_size: 224
+  img_height: 320
+  img_width: 1920
   nav_embed_dim: 32
   use_pretrained_vision: true
 
@@ -348,8 +390,8 @@ All of the following must be true before starting Phase III:
 3. Val loss shows improvement and early stopping hasn't triggered too early
 4. All 3 baselines trained with same protocol
 5. Checkpointing implemented and tested for model resumption
-6. DAgger recovery training completed (at least 1 round)
+6. Steering noise injection implemented and validated (σ=0.05, ~20% of episodes)
 7. Memory profiling completed — batch size validated for target GPU
 8. Training curves logged in W&B and visually inspected
-9. Forward pass verified: (B, T, 3, 224, 224) → (B, T, 2) with correct ranges
+9. Forward pass verified: (B, T, 3, 320, 1920) → (B, T, 2) where output = [steer, acceleration ∈ [-1, 1]]
 10. At least 2 vision tokenization stages compared (pretrained vs from-scratch)

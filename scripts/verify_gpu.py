@@ -1,9 +1,10 @@
 """Verify GPU access and PyTorch CUDA functionality."""
+
 import sys
 import torch
 
 
-def main():
+def main() -> None:
     print(f"Python:         {sys.version.split()[0]}")
     print(f"PyTorch:        {torch.__version__}")
     print(f"CUDA available: {torch.cuda.is_available()}")

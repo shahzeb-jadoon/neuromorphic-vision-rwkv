@@ -15,7 +15,6 @@ import argparse
 import queue
 import subprocess
 import sys
-import time
 from pathlib import Path
 
 import numpy as np
@@ -29,7 +28,7 @@ except ImportError:
 try:
     from PIL import Image
 except ImportError:
-    Image = None  # type: ignore[assignment, misc]
+    Image = None  # type: ignore[assignment]
 
 
 def get_windows_host_ip() -> str | None:
@@ -169,7 +168,9 @@ def main() -> None:
                 print(f"\nSample frame saved: {save_path} ({saved_frame.shape})")
             else:
                 np.save(save_path.with_suffix(".npy"), saved_frame)
-                print(f"\nSample frame saved: {save_path.with_suffix('.npy')} (Pillow not available)")
+                print(
+                    f"\nSample frame saved: {save_path.with_suffix('.npy')} (Pillow not available)"
+                )
 
         print()
         print("CARLA synchronous mode test: PASSED ✓")
@@ -180,6 +181,7 @@ def main() -> None:
     except Exception as e:
         print(f"\nERROR: {e}")
         import traceback
+
         traceback.print_exc()
         sys.exit(1)
 
