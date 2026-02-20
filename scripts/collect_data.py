@@ -17,6 +17,7 @@ import logging
 import sys
 import time
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 import yaml
@@ -26,6 +27,7 @@ from src.data.expert_collector import (
     EpisodeConfig,
     ExpertDataCollector,
 )
+from agents.expert.privileged_expert import ExpertConfig
 from src.data.route_generator import BalancedRouteGenerator, RouteConfig
 
 logging.basicConfig(
@@ -77,6 +79,36 @@ def build_campaign(
 
         for n_vehicles in traffic_configs:
             cam_cfg = cfg.get("cameras", {})
+
+            # Parse expert agent config from YAML (falls back to defaults)
+            expert_cfg_dict = cfg.get("expert", {})
+            expert_kw: dict[str, Any] = {}
+            if "target_speed" in expert_cfg_dict:
+                expert_kw["target_speed"] = float(expert_cfg_dict["target_speed"])
+            if "max_speed" in expert_cfg_dict:
+                expert_kw["max_speed"] = float(expert_cfg_dict["max_speed"])
+            if "speed_pid" in expert_cfg_dict:
+                kp, ki, kd = expert_cfg_dict["speed_pid"]
+                expert_kw.update(speed_kp=float(kp), speed_ki=float(ki), speed_kd=float(kd))
+            if "steer_pid" in expert_cfg_dict:
+                kp, ki, kd = expert_cfg_dict["steer_pid"]
+                expert_kw.update(steer_kp=float(kp), steer_ki=float(ki), steer_kd=float(kd))
+            if "traffic_light_brake_distance" in expert_cfg_dict:
+                expert_kw["traffic_light_brake_distance"] = float(
+                    expert_cfg_dict["traffic_light_brake_distance"]
+                )
+            if "vehicle_hazard_distance" in expert_cfg_dict:
+                expert_kw["vehicle_hazard_distance"] = float(
+                    expert_cfg_dict["vehicle_hazard_distance"]
+                )
+            if "pedestrian_hazard_distance" in expert_cfg_dict:
+                expert_kw["pedestrian_hazard_distance"] = float(
+                    expert_cfg_dict["pedestrian_hazard_distance"]
+                )
+            if "turn_speed_factor" in expert_cfg_dict:
+                expert_kw["turn_speed_factor"] = float(expert_cfg_dict["turn_speed_factor"])
+            expert_config = ExpertConfig(**expert_kw)
+
             ep = EpisodeConfig(
                 town=town,
                 weather=weather,
@@ -90,6 +122,7 @@ def build_campaign(
                 camera_height=cam_cfg.get("per_camera_height", 320),
                 camera_fov=cam_cfg.get("fov", 60),
                 camera_yaws=tuple(cam_cfg.get("yaw_offsets", [-60, 0, 60])),
+                expert_config=expert_config,
             )
             episodes.append((ep, remaining))
 
@@ -115,6 +148,16 @@ def main() -> None:
     )
     parser.add_argument("--target-left", type=float, default=0.15)
     parser.add_argument("--target-right", type=float, default=0.15)
+    parser.add_argument(
+        "--spectator",
+        action="store_true",
+        help="Follow ego vehicle with CARLA spectator camera (real-time view)",
+    )
+    parser.add_argument(
+        "--record",
+        action="store_true",
+        help="Record simulation with CARLA's built-in recorder for later replay",
+    )
     args = parser.parse_args()
 
     # Load config
@@ -136,6 +179,15 @@ def main() -> None:
 
     n_episodes = args.episodes or 1  # Episodes per (town, weather, traffic) config
     campaign = build_campaign(cfg, completed_counts, n_episodes)
+
+    # Apply visualization / recording flags to every episode config
+    if args.spectator or args.record:
+        patched = []
+        for ep_cfg, remaining in campaign:
+            ep_cfg.spectator_follow = args.spectator
+            ep_cfg.record_simulation = args.record
+            patched.append((ep_cfg, remaining))
+        campaign = patched
 
     total_episodes = sum(remaining for _, remaining in campaign)
     logger.info(
