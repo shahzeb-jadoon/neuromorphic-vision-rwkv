@@ -206,12 +206,13 @@ class DrivingSequenceDataset(Dataset):
 
     def close(self) -> None:
         """Close all cached HDF5 file handles."""
-        for fh in self._h5_cache.values():
+        cache = getattr(self, "_h5_cache", {})
+        for fh in cache.values():
             try:
                 fh.close()
             except Exception:
                 pass
-        self._h5_cache.clear()
+        cache.clear()
 
     def __del__(self) -> None:
         self.close()

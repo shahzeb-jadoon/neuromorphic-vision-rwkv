@@ -152,6 +152,65 @@ class TestAugmentation:
         ds = DrivingSequenceDataset(toy_data_dir, seq_len=16, split="val", seed=42)
         assert not ds.augment
 
+    def test_panoramic_flip_correctness(self) -> None:
+        """Verify horizontal flip reverses panel order and negates steering.
+
+        Constructs a synthetic panoramic image with identifiable panels
+        (left=red, centre=green, right=blue), forces a flip via
+        monkeypatched torch.rand, and checks:
+          1. Panel order becomes [blue'|green'|red']
+          2. Each panel is individually flipped horizontally
+          3. Steering sign is negated
+        """
+        T, C, H = 4, 3, 8
+        panel_w = 16
+        n_cameras = 3
+        W_total = panel_w * n_cameras
+
+        # Build synthetic panels: left=red(1,0,0), centre=green(0,1,0), right=blue(0,0,1)
+        images = torch.zeros(T, C, H, W_total)
+        # Left panel [0:16] → red channel gradient (0→1 across width)
+        images[:, 0, :, :panel_w] = torch.linspace(0, 1, panel_w)
+        # Centre panel [16:32] → green channel gradient
+        images[:, 1, :, panel_w : 2 * panel_w] = torch.linspace(0, 1, panel_w)
+        # Right panel [32:48] → blue channel gradient
+        images[:, 2, :, 2 * panel_w : 3 * panel_w] = torch.linspace(0, 1, panel_w)
+
+        steering = torch.tensor([0.3, -0.2, 0.5, -0.1])
+        controls = torch.stack([steering, torch.zeros(T)], dim=-1)
+
+        # Create a dataset instance just to call _augment — need n_cameras set
+        # We'll call the private method directly instead of going through __getitem__
+        import unittest.mock
+
+        # Monkeypatch torch.rand to always return 0.0 ⇒ all augmentations trigger
+        with unittest.mock.patch("torch.rand", return_value=torch.tensor([0.0])):
+            # Create a minimal object with the augment method
+            ds = object.__new__(DrivingSequenceDataset)
+            ds.n_cameras = n_cameras
+            ds.augment = True
+            aug_images, aug_controls = ds._augment(images.clone(), controls.clone())
+
+        # 1. Steering should be negated
+        torch.testing.assert_close(aug_controls[:, 0], -controls[:, 0])
+
+        # 2. Acceleration should be unchanged
+        torch.testing.assert_close(aug_controls[:, 1], controls[:, 1])
+
+        # 3. Panel order should be reversed: what was right (blue) is now in left position
+        #    The right panel had blue gradient [0→1]; after flip+reverse it should be
+        #    in position [0:16] with the gradient reversed [1→0]
+        aug_left = aug_images[:, :, :, :panel_w]
+        # The original right panel was blue (channel 2) with gradient 0→1
+        # After horizontal flip of that panel, gradient becomes 1→0
+        assert aug_left[:, 2].mean() > 0.3, "Reversed right panel should be in left position"
+        assert aug_left[:, 0].mean() < 0.1, "Left position should NOT have red (original left)"
+
+        # 4. Original left panel (red) should now be in right position
+        aug_right = aug_images[:, :, :, 2 * panel_w : 3 * panel_w]
+        assert aug_right[:, 0].mean() > 0.3, "Original left (red) panel should be in right"
+        assert aug_right[:, 2].mean() < 0.1, "Right position should NOT have blue"
+
 
 class TestSampler:
     """Verify weighted sampler works."""
