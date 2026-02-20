@@ -21,7 +21,7 @@
 # Move data to NFS and re-run to continue on larger storage.
 # ============================================================================
 
-set -euo pipefail
+set -uo pipefail  # Don't use -e: allow per-town failures without aborting
 
 # --- Storage location ---
 # Default: the dataset directory below
@@ -72,10 +72,14 @@ echo "Route strategy: ${ROUTE_STRATEGY} (left=${TARGET_LEFT}, right=${TARGET_RIG
 echo ""
 
 # --- Run Collection via collect_data.py (uses route generator) ---
+# Each town runs as its own collect_data.py invocation for isolation.
+# Weathers come from configs/collection.yaml (not overridden here).
+# Resume is automatic: manifest tracks completed episodes.
+FAILED_TOWNS=()
 for town in "${TOWNS[@]}"; do
     echo "[$(date +%H:%M:%S)] Starting: ${town} (${EPISODES_PER_CONFIG} episodes per weather)" | tee -a "${LOG_FILE}"
 
-    python scripts/collect_data.py \
+    if python scripts/collect_data.py \
         --config configs/collection.yaml \
         --output "${OUTPUT_DIR}" \
         --town "${town}" \
@@ -84,15 +88,24 @@ for town in "${TOWNS[@]}"; do
         --target-left "${TARGET_LEFT}" \
         --target-right "${TARGET_RIGHT}" \
         --resume \
-        2>&1 | tee -a "${LOG_FILE}"
+        2>&1 | tee -a "${LOG_FILE}"; then
+        echo "[$(date +%H:%M:%S)] ✓ ${town} complete" | tee -a "${LOG_FILE}"
+    else
+        echo "[$(date +%H:%M:%S)] ✗ ${town} FAILED — continuing with next town" | tee -a "${LOG_FILE}"
+        FAILED_TOWNS+=("${town}")
+    fi
 
-    # Small pause between towns to let CARLA settle
-    sleep 5
+    # Pause between towns to let CARLA settle after map change
+    sleep 10
 done
 
 echo ""
 echo "============================================================"
 echo "Campaign finished: $(date)"
+if [ ${#FAILED_TOWNS[@]} -gt 0 ]; then
+    echo "FAILED TOWNS: ${FAILED_TOWNS[*]}"
+    echo "Re-run this script to retry (resume is automatic)."
+fi
 echo "============================================================"
 
 # Run analysis

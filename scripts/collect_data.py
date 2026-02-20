@@ -76,6 +76,7 @@ def build_campaign(
             continue
 
         for n_vehicles in traffic_configs:
+            cam_cfg = cfg.get("cameras", {})
             ep = EpisodeConfig(
                 town=town,
                 weather=weather,
@@ -85,9 +86,10 @@ def build_campaign(
                 timeout_speed=cfg.get("episode", {}).get("timeout_speed", 0.1),
                 timeout_duration=cfg.get("episode", {}).get("timeout_duration", 180),
                 fps=cfg.get("carla", {}).get("fps", 20),
-                camera_width=cfg.get("camera", {}).get("width", 512),
-                camera_height=cfg.get("camera", {}).get("height", 512),
-                camera_fov=cfg.get("camera", {}).get("fov", 100),
+                camera_width=cam_cfg.get("per_camera_width", 640),
+                camera_height=cam_cfg.get("per_camera_height", 320),
+                camera_fov=cam_cfg.get("fov", 60),
+                camera_yaws=tuple(cam_cfg.get("yaw_offsets", [-60, 0, 60])),
             )
             episodes.append((ep, remaining))
 
@@ -171,9 +173,25 @@ def main() -> None:
         if config.town != current_town:
             logger.info("Loading map: %s", config.town)
             assert collector.client is not None
-            collector.client.load_world(config.town)
-            collector.world = collector.client.get_world()
-            time.sleep(2.0)
+            # Map loading can take 60-120s over WSL2; temporarily increase timeout
+            collector.client.set_timeout(120.0)
+            try:
+                collector.client.load_world(config.town)
+                time.sleep(5.0)  # Let the new map fully settle
+                collector.world = collector.client.get_world()
+            except RuntimeError as e:
+                logger.error("Failed to load %s: %s — retrying once", config.town, e)
+                time.sleep(10.0)
+                try:
+                    collector.client.load_world(config.town)
+                    time.sleep(5.0)
+                    collector.world = collector.client.get_world()
+                except RuntimeError as e2:
+                    logger.error("Retry failed for %s: %s — skipping town", config.town, e2)
+                    collector.client.set_timeout(60.0)
+                    current_town = None
+                    continue
+            collector.client.set_timeout(60.0)
             current_town = config.town
 
             # (Re-)create route generator on the now-correct map
