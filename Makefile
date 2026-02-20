@@ -1,11 +1,18 @@
 # ── Neuromorphic Vision-RWKV for Autonomous Driving ──────────────────
 # Convenience targets for common development tasks.
 
-.PHONY: test lint format typecheck ci clean analyze train help
+.PHONY: test lint format typecheck ci clean analyze train help setup
 
 help:  ## Show this help message
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | \
 		awk 'BEGIN {FS = ":.*?## "}; {printf "  %-14s %s\n", $$1, $$2}'
+
+# ── Setup ────────────────────────────────────────────────────────────
+
+setup:  ## Install package in dev mode + pre-commit hooks
+	pip install -e ".[dev]" --extra-index-url https://download.pytorch.org/whl/cu124
+	pre-commit install
+	@echo "\n✓ Dev environment ready. Pre-commit hooks installed."
 
 # ── Quality ──────────────────────────────────────────────────────────
 
@@ -16,13 +23,13 @@ test-online:  ## Run CARLA integration tests (requires live CARLA server)
 	pytest tests/ -v -m online
 
 lint:  ## Run linting (flake8)
-	flake8 src/ scripts/ tests/
+	flake8 src/ scripts/ tests/ agents/
 
 format:  ## Check formatting (black)
-	black --check --line-length 100 src/ scripts/ tests/
+	black --check --line-length 100 src/ scripts/ tests/ agents/
 
 format-fix:  ## Auto-format code with black
-	black --line-length 100 src/ scripts/ tests/
+	black --line-length 100 src/ scripts/ tests/ agents/
 
 typecheck:  ## Run type checking (mypy)
 	mypy src/ --config-file pyproject.toml
