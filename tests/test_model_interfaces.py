@@ -92,8 +92,8 @@ class TestVisionTokenizer:
         assert isinstance(module, torch.nn.Module)
 
     def test_qshift_instantiates(self) -> None:
-        n_h = 224 // 16
-        n_w = 224 // 16
+        n_h = 320 // 16
+        n_w = 1920 // 16
         module = QShift(embed_dim=384, n_patches_h=n_h, n_patches_w=n_w)
         assert isinstance(module, torch.nn.Module)
 
@@ -104,13 +104,13 @@ class TestVisionTokenizer:
 
     def test_patch_embedding_forward_raises(self) -> None:
         module = PatchEmbedding(TokenizerConfig())
-        x = torch.randn(1, 4, 3, 224, 224)
+        x = torch.randn(1, 4, 3, 320, 1920)
         with pytest.raises(NotImplementedError, match="PatchEmbedding"):
             module(x)
 
     def test_qshift_forward_raises(self) -> None:
-        n_h = 224 // 16
-        n_w = 224 // 16
+        n_h = 320 // 16
+        n_w = 1920 // 16
         module = QShift(embed_dim=384, n_patches_h=n_h, n_patches_w=n_w)
         n_patches = n_h * n_w
         x = torch.randn(1, 4, n_patches, 384)
@@ -119,7 +119,7 @@ class TestVisionTokenizer:
 
     def test_vision_tokenizer_forward_raises(self) -> None:
         module = VisionTokenizer(TokenizerConfig())
-        x = torch.randn(1, 4, 3, 224, 224)
+        x = torch.randn(1, 4, 3, 320, 1920)
         with pytest.raises(NotImplementedError, match="VisionTokenizer"):
             module(x)
 
@@ -175,9 +175,9 @@ class TestNavigationFusion:
             module(visual, nav)
 
     def test_fusion_nav_embedding_size(self) -> None:
-        config = FusionConfig(n_nav_commands=4, nav_embed_dim=64)
+        config = FusionConfig(n_nav_commands=5, nav_embed_dim=64)
         module = NavigationFusion(config)
-        assert module.nav_embedding.num_embeddings == 4
+        assert module.nav_embedding.num_embeddings == 5
         assert module.nav_embedding.embedding_dim == 64
 
 
@@ -230,7 +230,7 @@ class TestVisionRWKVDriver:
 
     def test_model_forward_raises(self) -> None:
         model = VisionRWKVDriver(ModelConfig())
-        images = torch.randn(1, 4, 3, 224, 224)
+        images = torch.randn(1, 4, 3, 320, 1920)
         nav = torch.zeros(1, 4, dtype=torch.long)
         with pytest.raises(NotImplementedError, match="VisionRWKVDriver"):
             model(images, nav)

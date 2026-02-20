@@ -15,12 +15,15 @@ class TokenizerConfig:
 
     The tokenizer converts raw image frames into a sequence of visual
     tokens suitable for the RWKV encoder.
+
+    Default image size matches the 3-camera panoramic setup:
+        3 cameras × 640 px wide × 320 px tall → 1920 × 320 stitched.
     """
 
-    img_height: int = 224
-    img_width: int = 224
+    img_height: int = 320
+    img_width: int = 1920
     in_channels: int = 3
-    patch_size: int = 16  # Divides image into (H/P × W/P) patches
+    patch_size: int = 16  # Divides image into (H/P × W/P) = 20×120 = 2400 patches
     embed_dim: int = 384  # Dimension of each patch token
     use_qshift: bool = True  # Apply Q-Shift spatial mixing
 
@@ -51,7 +54,7 @@ class FusionConfig:
 
     visual_dim: int = 384
     nav_embed_dim: int = 64
-    n_nav_commands: int = 4  # LaneFollow, Left, Right, Straight
+    n_nav_commands: int = 5  # RoadOption: VOID=0, LEFT=1, RIGHT=2, STRAIGHT=3, LANEFOLLOW=4
     fused_dim: int = 384
     dropout: float = 0.1
 
