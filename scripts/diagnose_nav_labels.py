@@ -13,7 +13,6 @@ import sys
 import h5py
 import numpy as np
 
-
 NAV_NAMES = {0: "LF", 1: "L ", 2: "R ", 3: "ST"}
 NAV_CHARS = {0: ".", 1: "L", 2: "R", 3: "S"}
 
