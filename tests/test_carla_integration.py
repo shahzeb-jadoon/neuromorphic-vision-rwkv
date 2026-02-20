@@ -16,7 +16,9 @@ from __future__ import annotations
 
 import shutil
 import tempfile
+from collections.abc import Generator
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import h5py
 import numpy as np
@@ -28,6 +30,9 @@ try:
     CARLA_AVAILABLE = True
 except ImportError:
     CARLA_AVAILABLE = False
+
+if TYPE_CHECKING:
+    from agents.navigation.global_route_planner import GlobalRoutePlanner
 
 from src.data import hdf5_schema as S
 
@@ -89,6 +94,32 @@ def carla_world(carla_client: "carla.Client") -> "carla.World":
     return carla_client.get_world()
 
 
+@pytest.fixture(scope="module")
+def carla_vehicle(carla_world: "carla.World") -> Generator["carla.Vehicle", None, None]:
+    """Spawn a Tesla Model 3 ego vehicle, yield it, and destroy on teardown."""
+    bp_lib = carla_world.get_blueprint_library()
+    vehicle_bp = bp_lib.filter("vehicle.tesla.model3")[0]
+    spawn_points = carla_world.get_map().get_spawn_points()
+    assert len(spawn_points) > 0, "No spawn points on map"
+
+    vehicle = carla_world.try_spawn_actor(vehicle_bp, spawn_points[0])
+    assert vehicle is not None, "Failed to spawn ego vehicle"
+    yield vehicle
+    try:
+        vehicle.destroy()
+    except RuntimeError:
+        pass
+
+
+@pytest.fixture(scope="module")
+def carla_route_planner(carla_world: "carla.World") -> "GlobalRoutePlanner":
+    """Create a GlobalRoutePlanner for the current map."""
+    from agents.navigation.global_route_planner import GlobalRoutePlanner  # noqa: F811
+
+    grp = GlobalRoutePlanner(carla_world.get_map(), sampling_resolution=2.0)
+    return grp
+
+
 # ------------------------------------------------------------------
 # Tests
 # ------------------------------------------------------------------
@@ -114,54 +145,46 @@ class TestCarlaConnection:
 class TestPrivilegedExpert:
     """PrivilegedExpert instantiation and basic tick."""
 
-    def test_expert_runs_10_ticks(self, carla_world: "carla.World") -> None:
+    def test_expert_runs_10_ticks(
+        self,
+        carla_world: "carla.World",
+        carla_vehicle: "carla.Vehicle",
+        carla_route_planner: "GlobalRoutePlanner",
+    ) -> None:
         from agents.expert.privileged_expert import (
             ExpertConfig,
-            FrameInfo,
             PrivilegedExpert,
         )
         from agents.navigation.local_planner import RoadOption
 
-        spawn_points = carla_world.get_map().get_spawn_points()
-        assert len(spawn_points) > 0
+        expert = PrivilegedExpert(
+            vehicle=carla_vehicle,
+            world=carla_world,
+            route_planner=carla_route_planner,
+            config=ExpertConfig(),
+        )
 
-        # Spawn ego vehicle
-        bp_lib = carla_world.get_blueprint_library()
-        vehicle_bp = bp_lib.filter("vehicle.tesla.model3")[0]
-        vehicle = carla_world.try_spawn_actor(vehicle_bp, spawn_points[0])
-        assert vehicle is not None, "Failed to spawn ego vehicle"
+        # Build a short route: just 5 waypoints ahead
+        spawn_loc = carla_vehicle.get_transform().location
+        wp = carla_world.get_map().get_waypoint(spawn_loc)
+        route = []
+        for _ in range(5):
+            nxt = wp.next(5.0)
+            if not nxt:
+                break
+            wp = nxt[0]
+            route.append((wp, RoadOption.LANEFOLLOW))
 
-        try:
-            expert = PrivilegedExpert(ExpertConfig())
+        expert.set_route(route)
 
-            # Build a short route: just 5 waypoints ahead
-            wp = carla_world.get_map().get_waypoint(spawn_points[0].location)
-            route = []
-            for _ in range(5):
-                nxt = wp.next(5.0)
-                if not nxt:
-                    break
-                wp = nxt[0]
-                route.append((wp, RoadOption.LANEFOLLOW))
-
-            expert.set_route(route)
-
-            for tick in range(10):
-                carla_world.tick()
-                transform = vehicle.get_transform()
-                velocity = vehicle.get_velocity()
-                frame_info = FrameInfo(
-                    transform=transform,
-                    velocity=velocity,
-                    world=carla_world,
-                    tick=tick,
-                )
-                ctrl = expert.run_step(frame_info)
-                assert hasattr(ctrl, "steer")
-                assert hasattr(ctrl, "throttle")
-                assert hasattr(ctrl, "brake")
-        finally:
-            vehicle.destroy()
+        for _tick in range(10):
+            carla_world.tick()
+            ctrl, info = expert.run_step()
+            assert hasattr(ctrl, "steer")
+            assert hasattr(ctrl, "throttle")
+            assert hasattr(ctrl, "brake")
+            # FrameInfo should have valid nav command
+            assert info.nav_command in {1, 2, 3, 4}
 
 
 class TestShortCollection:
