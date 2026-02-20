@@ -47,7 +47,7 @@ class TestDatasetShapes:
 
     def test_images_shape(self, train_dataset: DrivingSequenceDataset) -> None:
         item = train_dataset[0]
-        assert item["images"].shape == (16, 3, 224, 224)
+        assert item["images"].shape == (16, 3, 320, 1920)
 
     def test_controls_shape(self, train_dataset: DrivingSequenceDataset) -> None:
         item = train_dataset[0]
@@ -175,7 +175,7 @@ class TestDataLoader:
             train_dataset, batch_size=2, shuffle=True, num_workers=0
         )
         batch = next(iter(loader))
-        assert batch["images"].shape == (2, 16, 3, 224, 224)
+        assert batch["images"].shape == (2, 16, 3, 320, 1920)
         assert batch["controls"].shape == (2, 16, 2)
         assert batch["nav_command"].shape == (2, 16)
         assert batch["velocity"].shape == (2, 16, 3)

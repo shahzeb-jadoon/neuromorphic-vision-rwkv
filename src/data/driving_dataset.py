@@ -5,6 +5,12 @@ with Truncated Backpropagation Through Time (TBPTT).
 
 Each item is a contiguous sequence of frames from a single episode,
 suitable for recurrent model training where temporal continuity matters.
+
+Schema v3 changes:
+    - Images are 3-camera panoramic (H, W_total, 3) where W_total = 3 * W_cam.
+    - Navigation commands use RoadOption values (LEFT=1 .. LANEFOLLOW=4).
+    - Position, rotation, traffic light state available as extras.
+    - Horizontal flip augmentation swaps left/right camera panels.
 """
 
 from __future__ import annotations
@@ -23,6 +29,12 @@ from src.data import hdf5_schema as S
 IMAGENET_MEAN = torch.tensor([0.485, 0.456, 0.406]).view(3, 1, 1)
 IMAGENET_STD = torch.tensor([0.229, 0.224, 0.225]).view(3, 1, 1)
 
+# Velocity z-score normalisation constants.
+# TODO: Recompute from real collection data and update.
+VELOCITY_STATS_VERSION = "placeholder_v0"
+VELOCITY_MEAN = torch.tensor([5.0, 0.0, 0.0])
+VELOCITY_STD = torch.tensor([4.0, 0.5, 0.1])
+
 
 class DrivingSequenceDataset(Dataset):
     """Dataset that returns fixed-length sequential clips from driving episodes.
@@ -38,6 +50,8 @@ class DrivingSequenceDataset(Dataset):
         val_fraction: Fraction of episodes reserved for validation (default: 0.2).
         seed: Random seed for reproducible train/val split (default: 42).
         augment: Whether to apply data augmentation (default: True for train).
+        n_cameras: Number of cameras in the panoramic image (default: 3).
+            Used by the horizontal flip augmentation to swap camera panels.
     """
 
     def __init__(
@@ -49,11 +63,13 @@ class DrivingSequenceDataset(Dataset):
         val_fraction: float = 0.2,
         seed: int = 42,
         augment: bool | None = None,
+        n_cameras: int = 3,
     ) -> None:
         self.data_dir = Path(data_dir)
         self.seq_len = seq_len
         self.stride = stride
         self.split = split
+        self.n_cameras = n_cameras
 
         if augment is None:
             self.augment = split == "train"
@@ -79,6 +95,26 @@ class DrivingSequenceDataset(Dataset):
 
         self.episode_files = [all_episodes[i] for i in selected_indices]
 
+        # --- Schema version gate ---
+        # Fail fast if any episode is not schema v3+.  Older schemas
+        # lack panoramic images and RoadOption nav commands, leading to
+        # cryptic KeyErrors deep in training loops.
+        _MIN_SCHEMA = 3
+        for ep_path in self.episode_files:
+            with h5py.File(ep_path, "r") as f:
+                sv = 0
+                if S.METADATA_GROUP in f:
+                    sv = int(f[S.METADATA_GROUP].attrs.get(S.META_SCHEMA_VERSION, 0))
+                if sv < _MIN_SCHEMA:
+                    raise ValueError(
+                        f"Episode {ep_path.name} has schema_version={sv} "
+                        f"(minimum required: {_MIN_SCHEMA}).  Re-collect "
+                        f"with the current ExpertCollector to produce v3 data."
+                    )
+
+        # Per-worker HDF5 file handle cache (fork-safe via worker_init_fn)
+        self._h5_cache: dict[int, h5py.File] = {}
+
         # Build index of (episode_idx, start_frame) pairs
         self.clips: list[tuple[int, int]] = []
         self.episode_nav_counts: list[dict[int, int]] = []
@@ -96,9 +132,11 @@ class DrivingSequenceDataset(Dataset):
                         n_frames = min(n_frames, collision_frame)
                         nav_cmds = nav_cmds[:n_frames]
 
-            # Count nav commands for balanced sampling
+            # Count nav commands for balanced sampling.
+            # Schema v3 uses RoadOption values: LEFT=1, RIGHT=2,
+            # STRAIGHT=3, LANEFOLLOW=4.  Schema v2 used 0–3.
             nav_counts = {}
-            for cmd in range(4):
+            for cmd in [0, 1, 2, 3, 4]:
                 nav_counts[cmd] = int(np.sum(nav_cmds == cmd))
             self.episode_nav_counts.append(nav_counts)
 
@@ -129,8 +167,9 @@ class DrivingSequenceDataset(Dataset):
                 weights.append(1.0)
                 continue
             # Weight = inverse of LaneFollow fraction (more turns → higher weight)
-            lane_follow_frac = nav.get(0, 0) / total
-            # Avoid division by zero; cap minimum fraction
+            # Schema v3: LANEFOLLOW=4; schema v2: LaneFollow=0
+            lane_follow = nav.get(4, 0) + nav.get(0, 0)
+            lane_follow_frac = lane_follow / total
             weight = 1.0 / max(lane_follow_frac, 0.1)
             weights.append(weight)
 
@@ -152,6 +191,24 @@ class DrivingSequenceDataset(Dataset):
             replacement=True,
         )
 
+    def _get_h5(self, ep_idx: int) -> h5py.File:
+        """Return a cached h5py.File handle for the given episode."""
+        if ep_idx not in self._h5_cache:
+            self._h5_cache[ep_idx] = h5py.File(self.episode_files[ep_idx], "r")
+        return self._h5_cache[ep_idx]
+
+    def close(self) -> None:
+        """Close all cached HDF5 file handles."""
+        for fh in self._h5_cache.values():
+            try:
+                fh.close()
+            except Exception:
+                pass
+        self._h5_cache.clear()
+
+    def __del__(self) -> None:
+        self.close()
+
     def __len__(self) -> int:
         return len(self.clips)
 
@@ -160,24 +217,23 @@ class DrivingSequenceDataset(Dataset):
 
         Returns:
             Dictionary with:
-                images: (seq_len, 3, 224, 224) float32, ImageNet-normalized
+                images: (seq_len, 3, H, W_total) float32, ImageNet-normalized.
+                    W_total = n_cameras * per_camera_width (panoramic).
                 controls: (seq_len, 2) float32 [steering, acceleration]
                     acceleration = throttle - brake  ∈ [-1, 1]
-                nav_command: (seq_len,) int64
+                nav_command: (seq_len,) int64  (RoadOption values)
                 velocity: (seq_len, 3) float32
         """
         ep_idx, start = self.clips[idx]
         end = start + self.seq_len
 
-        ep_path = self.episode_files[ep_idx]
-
-        with h5py.File(ep_path, "r") as f:
-            images = f[S.IMAGES][start:end]  # (T, H, W, 3) uint8
-            steering = f[S.STEERING][start:end]  # (T,) float32
-            throttle = f[S.THROTTLE][start:end]  # (T,) float32
-            brake = f[S.BRAKE][start:end]  # (T,) float32
-            nav_cmd = f[S.NAV_COMMAND][start:end]  # (T,) int32
-            velocity = f[S.VELOCITY][start:end]  # (T, 3) float32
+        f = self._get_h5(ep_idx)
+        images = f[S.IMAGES][start:end]  # (T, H, W_total, 3) uint8
+        steering = f[S.STEERING][start:end]
+        throttle = f[S.THROTTLE][start:end]
+        brake = f[S.BRAKE][start:end]
+        nav_cmd = f[S.NAV_COMMAND][start:end]
+        velocity = f[S.VELOCITY][start:end]
 
         # Convert images: uint8 HWC → float32 CHW [0, 1]
         images = torch.from_numpy(images.copy()).permute(0, 3, 1, 2).float() / 255.0
@@ -185,13 +241,14 @@ class DrivingSequenceDataset(Dataset):
         steering = torch.from_numpy(steering.copy())
         throttle = torch.from_numpy(throttle.copy())
         brake = torch.from_numpy(brake.copy())
-        # Merge throttle/brake into single acceleration axis:
-        # positive = throttle, negative = brake
-        acceleration = throttle - brake  # ∈ [-1, 1]
-        controls = torch.stack([steering, acceleration], dim=-1)  # (T, 2)
+        acceleration = throttle - brake
+        controls = torch.stack([steering, acceleration], dim=-1)
 
         nav_cmd = torch.from_numpy(nav_cmd.copy()).long()
         velocity = torch.from_numpy(velocity.copy())
+
+        # Z-score normalise velocity
+        velocity = (velocity - VELOCITY_MEAN) / VELOCITY_STD.clamp(min=1e-6)
 
         # Data augmentation BEFORE normalization (operates on [0, 1] pixel values)
         if self.augment:
@@ -244,9 +301,23 @@ class DrivingSequenceDataset(Dataset):
             contrast = 1.0 + (torch.rand(1).item() - 0.5) * 0.4
             images = (images - mean) * contrast + mean
 
-        # Horizontal flip with steering sign flip
+        # Horizontal flip with steering sign flip.
+        # For panoramic images (n_cameras > 1), we must also swap the
+        # camera panels: [Left|Centre|Right] → [Right'|Centre'|Left']
+        # so the spatial layout stays physically consistent.
         if torch.rand(1).item() < 0.5:
-            images = images.flip(dims=[-1])  # Flip W dimension
+            if self.n_cameras > 1:
+                # Split into panels, reverse order, flip each panel
+                T, C, H, W_total = images.shape
+                panel_w = W_total // self.n_cameras
+                panels = [
+                    images[:, :, :, i * panel_w : (i + 1) * panel_w] for i in range(self.n_cameras)
+                ]
+                # Reverse panel order AND horizontally flip each panel
+                panels = [p.flip(dims=[-1]) for p in reversed(panels)]
+                images = torch.cat(panels, dim=-1)
+            else:
+                images = images.flip(dims=[-1])
             controls[:, 0] = -controls[:, 0]  # Flip steering sign
 
         # Clamp to valid [0, 1] range after brightness/contrast adjustments
@@ -265,3 +336,27 @@ class DrivingSequenceDataset(Dataset):
             "augment": self.augment,
             "episode_files": [p.name for p in self.episode_files],
         }
+
+
+def driving_worker_init_fn(worker_id: int) -> None:
+    """DataLoader ``worker_init_fn`` for fork-safe HDF5 caching.
+
+    After a DataLoader worker is forked, inherited h5py.File handles are
+    invalid.  This callback clears the cache so handles are re-opened
+    lazily in the new process.
+
+    Usage::
+
+        loader = DataLoader(
+            dataset,
+            num_workers=4,
+            worker_init_fn=driving_worker_init_fn,
+        )
+    """
+    import torch.utils.data as _data
+
+    info = _data.get_worker_info()
+    if info is not None:
+        ds = info.dataset
+        if hasattr(ds, "_h5_cache"):
+            ds._h5_cache = {}
