@@ -216,6 +216,12 @@ class DrivingSequenceDataset(Dataset):
     def __del__(self) -> None:
         self.close()
 
+    def __enter__(self) -> "DrivingSequenceDataset":
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        self.close()
+
     def __len__(self) -> int:
         return len(self.clips)
 
@@ -352,6 +358,10 @@ def driving_worker_init_fn(worker_id: int) -> None:
     invalid.  This callback clears the cache so handles are re-opened
     lazily in the new process.
 
+    Also seeds the per-worker PyTorch RNG so that data augmentation
+    (random flips, colour jitter) is reproducible across runs with the
+    same number of workers.
+
     Usage::
 
         loader = DataLoader(
@@ -367,3 +377,9 @@ def driving_worker_init_fn(worker_id: int) -> None:
         ds = info.dataset
         if hasattr(ds, "_h5_cache"):
             ds._h5_cache = {}
+
+        # Deterministic per-worker seed for augmentation reproducibility.
+        # base_seed is set by the DataLoader's generator or global seed.
+        base_seed = torch.initial_seed() % (2**32)
+        torch.manual_seed(base_seed + info.id)
+        np.random.seed((base_seed + info.id) % (2**32))
