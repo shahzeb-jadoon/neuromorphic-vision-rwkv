@@ -128,7 +128,8 @@ class DrivingSequenceDataset(Dataset):
 
         # Build index of (episode_idx, start_frame) pairs
         self.clips: list[tuple[int, int]] = []
-        self.episode_nav_counts: list[dict[int, int]] = []
+        # Per-episode nav command arrays (kept for per-clip weight computation)
+        _episode_nav_arrays: list[np.ndarray] = []
 
         for ep_idx, ep_path in enumerate(self.episode_files):
             with h5py.File(ep_path, "r") as f:
@@ -143,13 +144,7 @@ class DrivingSequenceDataset(Dataset):
                         n_frames = min(n_frames, collision_frame)
                         nav_cmds = nav_cmds[:n_frames]
 
-            # Count nav commands for balanced sampling.
-            # Schema v3 uses RoadOption values: LEFT=1, RIGHT=2,
-            # STRAIGHT=3, LANEFOLLOW=4.  Schema v2 used 0–3.
-            nav_counts = {}
-            for cmd in [0, 1, 2, 3, 4]:
-                nav_counts[cmd] = int(np.sum(nav_cmds == cmd))
-            self.episode_nav_counts.append(nav_counts)
+            _episode_nav_arrays.append(nav_cmds)
 
             # Generate clip start positions
             if n_frames >= seq_len:
@@ -162,24 +157,25 @@ class DrivingSequenceDataset(Dataset):
             )
 
         # Compute per-clip sampling weights (inverse of LaneFollow frequency)
-        self._clip_weights = self._compute_sampling_weights()
+        self._clip_weights = self._compute_sampling_weights(_episode_nav_arrays)
 
-    def _compute_sampling_weights(self) -> torch.Tensor:
-        """Compute sampling weights to balance turn distribution.
+    def _compute_sampling_weights(self, episode_nav_arrays: list[np.ndarray]) -> torch.Tensor:
+        """Compute per-clip sampling weights to balance turn distribution.
 
-        Episodes with more turns (Left/Right) get higher weight to
-        counteract the natural LaneFollow dominance.
+        Each clip's weight is derived from its own nav command distribution
+        (not the parent episode's), so clips with more turns get genuinely
+        higher sampling probability.
         """
         weights = []
-        for ep_idx, _start in self.clips:
-            nav = self.episode_nav_counts[ep_idx]
-            total = sum(nav.values())
+        for ep_idx, start in self.clips:
+            clip_nav = episode_nav_arrays[ep_idx][start : start + self.seq_len]
+            total = len(clip_nav)
             if total == 0:
                 weights.append(1.0)
                 continue
             # Weight = inverse of LaneFollow fraction (more turns → higher weight)
             # Schema v3: LANEFOLLOW=4; schema v2: LaneFollow=0
-            lane_follow = nav.get(4, 0) + nav.get(0, 0)
+            lane_follow = int(np.sum((clip_nav == 4) | (clip_nav == 0)))
             lane_follow_frac = lane_follow / total
             weight = 1.0 / max(lane_follow_frac, 0.1)
             weights.append(weight)
