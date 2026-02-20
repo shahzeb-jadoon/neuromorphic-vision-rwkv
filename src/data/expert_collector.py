@@ -79,6 +79,11 @@ class EpisodeConfig:
     camera_x: float = 1.5
     camera_z: float = 2.4
 
+    # Visualization / recording
+    spectator_follow: bool = False  # Attach CARLA spectator camera to ego vehicle
+    spectator_offset: tuple[float, float, float] = (-8.0, 0.0, 5.0)  # (x, y, z) behind/above
+    record_simulation: bool = False  # Use CARLA built-in recorder
+
     # Expert agent
     expert_config: ExpertConfig = field(default_factory=ExpertConfig)
 
@@ -97,6 +102,7 @@ class EpisodeResult:
     collision_frame: int | None = None
     error_message: str | None = None
     duration_seconds: float = 0.0
+    recording_path: str | None = None
 
 
 class ExpertDataCollector:
@@ -199,6 +205,41 @@ class ExpertDataCollector:
     # ------------------------------------------------------------------
     # Camera helpers
     # ------------------------------------------------------------------
+
+    @staticmethod
+    def _update_spectator(
+        world: "carla.World",
+        vehicle: "carla.Vehicle",
+        offset: tuple[float, float, float] = (-8.0, 0.0, 5.0),
+    ) -> None:
+        """Move the CARLA spectator camera to follow the ego vehicle.
+
+        The spectator is positioned behind and above the vehicle so
+        you can watch it drive in the CARLA viewport in real-time.
+
+        Args:
+            world: CARLA world instance.
+            vehicle: Ego vehicle to follow.
+            offset: (x, y, z) offset in vehicle-local frame.
+                    Default ``(-8, 0, 5)`` gives a chase-cam view.
+        """
+        vt = vehicle.get_transform()
+        # Compute world-space offset using vehicle's forward/right/up
+        fwd = vt.get_forward_vector()
+        right = vt.get_right_vector()
+        up = carla.Location(x=0.0, y=0.0, z=1.0)
+
+        cam_loc = vt.location + carla.Location(
+            x=fwd.x * offset[0] + right.x * offset[1] + up.x * offset[2],
+            y=fwd.y * offset[0] + right.y * offset[1] + up.y * offset[2],
+            z=fwd.z * offset[0] + right.z * offset[1] + up.z * offset[2],
+        )
+        cam_rot = carla.Rotation(
+            pitch=-15.0,
+            yaw=vt.rotation.yaw,
+            roll=0.0,
+        )
+        world.get_spectator().set_transform(carla.Transform(cam_loc, cam_rot))
 
     @staticmethod
     def _spawn_cameras(
@@ -493,6 +534,14 @@ class ExpertDataCollector:
                     except queue.Empty:
                         break
 
+            # --- Start CARLA recorder if requested ---
+            recording_path: str | None = None
+            if config.record_simulation:
+                rec_name = f"episode_{int(time.time())}.log"
+                recording_path = rec_name
+                self.client.start_recorder(rec_name, True)
+                logger.info("CARLA recorder started: %s", rec_name)
+
             # --- Tick loop ---
             stuck_start: float | None = None
             distance_traveled = 0.0
@@ -510,6 +559,10 @@ class ExpertDataCollector:
                 # --- Expert step ---
                 control, info = expert.run_step(dt)
                 vehicle.apply_control(control)
+
+                # --- Spectator follow (real-time visualization) ---
+                if config.spectator_follow:
+                    self._update_spectator(self.world, vehicle, config.spectator_offset)
 
                 # --- Capture panoramic image ---
                 panoramic = self._capture_panoramic(cameras, config)
@@ -609,6 +662,7 @@ class ExpertDataCollector:
                     collision_frame=collision_frame,
                 )
                 result.duration_seconds = time.time() - start_time
+                result.recording_path = recording_path
                 return result
             else:
                 return EpisodeResult(
@@ -657,6 +711,14 @@ class ExpertDataCollector:
             )
 
         finally:
+            # Stop CARLA recorder if it was started
+            if config.record_simulation and self.client is not None:
+                try:
+                    self.client.stop_recorder()
+                    logger.info("CARLA recorder stopped")
+                except Exception:
+                    pass
+
             # Stop sensors first
             for actor in actors:
                 try:
