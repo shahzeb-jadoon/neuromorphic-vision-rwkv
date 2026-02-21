@@ -63,9 +63,10 @@ class ExpertConfig:
     All distances are in **metres**.
     """
 
-    # Target cruising speed
+    # Target cruising speed (used as fallback when road has no speed-limit sign)
     target_speed: float = 30.0
     max_speed: float = 50.0
+    speed_limit_margin: float = 0.90  # drive at 90% of posted limit
 
     # --- PID: longitudinal (speed) ---
     speed_kp: float = 0.8
@@ -93,17 +94,21 @@ class ExpertConfig:
     waypoint_buffer_size: int = 40
 
     # --- Safety thresholds ---
-    traffic_light_brake_distance: float = 20.0
-    traffic_light_stop_distance: float = 4.0
-    vehicle_hazard_distance: float = 20.0
-    vehicle_emergency_distance: float = 5.0
+    traffic_light_brake_distance: float = 35.0  # metres — start braking
+    traffic_light_stop_distance: float = 4.0  # metres — full stop
+    tl_comfort_decel: float = 3.0  # m/s² — comfortable deceleration for TL
+    vehicle_hazard_distance: float = 25.0  # metres — start slowing (min)
+    vehicle_emergency_distance: float = 5.0  # metres — emergency (min)
+    vehicle_reaction_time: float = 2.0  # seconds — scale hazard dist with speed
+    vehicle_emergency_time: float = 0.8  # seconds — scale emergency with speed
     pedestrian_hazard_distance: float = 15.0
     pedestrian_emergency_distance: float = 5.0
     lane_half_width: float = 2.5  # metres — lateral check for "in-lane"
     pedestrian_lane_half_width: float = 3.0  # metres — wider lateral band for pedestrians
 
     # --- Turn behaviour ---
-    turn_speed_factor: float = 0.55  # reduce speed to 55% at turns
+    turn_speed_factor: float = 0.45  # reduce speed to 45% at turns
+    junction_turn_factor: float = 0.65  # additional reduction inside junctions
     turn_anticipation_distance: float = 30.0  # start slowing this far ahead
 
     # --- Speed limits / curvature ---
@@ -311,6 +316,14 @@ class PrivilegedExpert:
         speed_ms = math.sqrt(velocity.x ** 2 + velocity.y ** 2 + velocity.z ** 2)
         speed_kmh = speed_ms * 3.6
 
+        # Dynamic speed limit from road signs (falls back to config)
+        cfg = self.config
+        road_limit = self.vehicle.get_speed_limit()  # km/h
+        if road_limit is not None and road_limit > 0:
+            base_target = min(road_limit * cfg.speed_limit_margin, cfg.max_speed)
+        else:
+            base_target = cfg.target_speed
+
         # --- 2.  Route progress ---
         self._advance_route(transform.location)
         target_wp, nav_command = self._get_target(transform)
@@ -325,7 +338,7 @@ class PrivilegedExpert:
         # --- 4.  Target speed & driving mode ---
         target_speed, mode = self._plan_speed(
             speed_kmh, nav_command, tl_state, tl_distance,
-            lead_dist, ped_dist,
+            lead_dist, ped_dist, base_target,
         )
         self.mode = mode
         self._apply_gain_blending()
@@ -454,28 +467,34 @@ class PrivilegedExpert:
         tl_distance: float | None,
         lead_dist: float | None,
         ped_dist: float | None,
+        base_target: float | None = None,
     ) -> Tuple[float, DrivingMode]:
         """Determine target speed and driving mode from hazards."""
         cfg = self.config
-        target = cfg.target_speed
+        target = base_target if base_target is not None else cfg.target_speed
         mode = DrivingMode.FOLLOW_LANE
 
         # --- Curvature (route bends) ---
         curve_angle = self._route_curvature()
         if curve_angle > cfg.curvature_threshold_deg:
-            target = min(target, cfg.target_speed * cfg.curvature_speed_factor)
+            # Scale reduction with curvature intensity
+            curvature_factor = max(
+                cfg.curvature_speed_factor,
+                1.0 - (curve_angle / 90.0) * 0.5,
+            )
+            target = min(target, target * curvature_factor)
 
         # --- Upcoming turn ---
         if nav_command in (RoadOption.LEFT, RoadOption.RIGHT):
             mode = DrivingMode.APPROACHING_TURN
-            target = min(target, cfg.target_speed * cfg.turn_speed_factor)
+            target = min(target, target * cfg.turn_speed_factor)
 
         # At a junction and actively turning → even slower
         ego_wp = self.map.get_waypoint(self.vehicle.get_transform().location)
         if ego_wp is not None and ego_wp.is_junction:
             if nav_command in (RoadOption.LEFT, RoadOption.RIGHT):
                 mode = DrivingMode.TURNING
-                target = min(target, cfg.target_speed * cfg.turn_speed_factor * 0.8)
+                target = min(target, target * cfg.junction_turn_factor)
 
         # --- Traffic light ---
         if tl_state is not None and tl_distance is not None:
@@ -486,19 +505,35 @@ class PrivilegedExpert:
                     if tl_distance < cfg.traffic_light_stop_distance:
                         target = 0.0
                     else:
-                        # Smooth deceleration proportional to distance
-                        ratio = tl_distance / cfg.traffic_light_brake_distance
-                        target = min(target, speed_kmh * ratio)
+                        # Kinematic profile: v = sqrt(2 * a * d)
+                        # Produces a smooth, constant-deceleration stop
+                        # at the stop line — no oscillation.
+                        d = max(tl_distance - cfg.traffic_light_stop_distance, 0.0)
+                        v_ms = math.sqrt(2.0 * cfg.tl_comfort_decel * d)
+                        target = min(target, v_ms * 3.6)  # m/s → km/h
 
         # --- Lead vehicle ---
+        # Scale safety distances with current speed (kinematic braking
+        # envelope).  At low speed the fixed minimums apply; at high
+        # speed the distances stretch to preserve reaction time.
+        speed_ms = speed_kmh / 3.6
+        dyn_hazard = max(
+            cfg.vehicle_hazard_distance,
+            speed_ms * cfg.vehicle_reaction_time,
+        )
+        dyn_emergency = max(
+            cfg.vehicle_emergency_distance,
+            speed_ms * cfg.vehicle_emergency_time,
+        )
+
         if lead_dist is not None:
-            if lead_dist < cfg.vehicle_emergency_distance:
+            if lead_dist < dyn_emergency:
                 mode = DrivingMode.EMERGENCY_STOP
                 target = 0.0
-            elif lead_dist < cfg.vehicle_hazard_distance:
+            elif lead_dist < dyn_hazard:
                 mode = DrivingMode.VEHICLE_FOLLOWING
-                ratio = lead_dist / cfg.vehicle_hazard_distance
-                target = min(target, cfg.target_speed * ratio)
+                ratio = lead_dist / dyn_hazard
+                target = min(target, target * ratio)
 
         # --- Pedestrians ---
         if ped_dist is not None:
