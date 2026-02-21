@@ -71,7 +71,7 @@ class ExpertConfig:
 
     # --- PID: lateral (steering) ---
     steer_kp: float = 1.2
-    steer_ki: float = 0.0
+    steer_ki: float = 0.05
     steer_kd: float = 0.15
 
     # --- Waypoint following ---
