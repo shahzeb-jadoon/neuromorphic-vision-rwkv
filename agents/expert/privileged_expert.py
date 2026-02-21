@@ -77,6 +77,7 @@ class ExpertConfig:
     steer_kp: float = 1.2
     steer_ki: float = 0.0
     steer_kd: float = 0.15
+    cross_track_gain: float = 2.0  # Stanley k for cross-track correction
 
     # --- Speed-adaptive PID gains (active during turns) ---
     turn_speed_kp: float = 1.0
@@ -85,6 +86,7 @@ class ExpertConfig:
     turn_steer_kp: float = 1.5
     turn_steer_ki: float = 0.05
     turn_steer_kd: float = 0.3
+    turn_cross_track_gain: float = 3.0  # tighter CTE correction in turns
 
     # --- Waypoint following ---
     min_follow_distance: float = 3.0  # metres — pop threshold
@@ -97,8 +99,10 @@ class ExpertConfig:
     traffic_light_brake_distance: float = 35.0  # metres — start braking
     traffic_light_stop_distance: float = 4.0  # metres — full stop
     tl_comfort_decel: float = 3.0  # m/s² — comfortable deceleration for TL
-    vehicle_hazard_distance: float = 25.0  # metres — start slowing
-    vehicle_emergency_distance: float = 5.0
+    vehicle_hazard_distance: float = 25.0  # metres — start slowing (min)
+    vehicle_emergency_distance: float = 5.0  # metres — emergency (min)
+    vehicle_reaction_time: float = 2.0  # seconds — scale hazard dist with speed
+    vehicle_emergency_time: float = 0.8  # seconds — scale emergency with speed
     pedestrian_hazard_distance: float = 15.0
     pedestrian_emergency_distance: float = 5.0
     lane_half_width: float = 2.5  # metres — lateral check for "in-lane"
@@ -429,9 +433,13 @@ class PrivilegedExpert:
             break
 
         # --- Pick target waypoint at desired follow distance ---
-        # Shorter look-ahead during turns keeps the car tracking the
-        # inside of the curve instead of cutting the corner.
-        if nav_command in (RoadOption.LEFT, RoadOption.RIGHT):
+        # Use route curvature to adapt follow distance regardless of
+        # nav command.  Curved roads tagged LANEFOLLOW still need a
+        # shorter look-ahead to prevent corner-cutting.
+        curve_angle = self._route_curvature()
+        if curve_angle > self.config.curvature_threshold_deg:
+            follow_dist = self.config.turn_follow_distance
+        elif nav_command in (RoadOption.LEFT, RoadOption.RIGHT):
             follow_dist = self.config.turn_follow_distance
         else:
             follow_dist = self.config.target_follow_distance
@@ -466,7 +474,12 @@ class PrivilegedExpert:
         # --- Curvature (route bends) ---
         curve_angle = self._route_curvature()
         if curve_angle > cfg.curvature_threshold_deg:
-            target = min(target, target * cfg.curvature_speed_factor)
+            # Scale reduction with curvature intensity
+            curvature_factor = max(
+                cfg.curvature_speed_factor,
+                1.0 - (curve_angle / 90.0) * 0.5,
+            )
+            target = min(target, target * curvature_factor)
 
         # --- Upcoming turn ---
         if nav_command in (RoadOption.LEFT, RoadOption.RIGHT):
@@ -497,13 +510,26 @@ class PrivilegedExpert:
                         target = min(target, v_ms * 3.6)  # m/s → km/h
 
         # --- Lead vehicle ---
+        # Scale safety distances with current speed (kinematic braking
+        # envelope).  At low speed the fixed minimums apply; at high
+        # speed the distances stretch to preserve reaction time.
+        speed_ms = speed_kmh / 3.6
+        dyn_hazard = max(
+            cfg.vehicle_hazard_distance,
+            speed_ms * cfg.vehicle_reaction_time,
+        )
+        dyn_emergency = max(
+            cfg.vehicle_emergency_distance,
+            speed_ms * cfg.vehicle_emergency_time,
+        )
+
         if lead_dist is not None:
-            if lead_dist < cfg.vehicle_emergency_distance:
+            if lead_dist < dyn_emergency:
                 mode = DrivingMode.EMERGENCY_STOP
                 target = 0.0
-            elif lead_dist < cfg.vehicle_hazard_distance:
+            elif lead_dist < dyn_hazard:
                 mode = DrivingMode.VEHICLE_FOLLOWING
-                ratio = lead_dist / cfg.vehicle_hazard_distance
+                ratio = lead_dist / dyn_hazard
                 target = min(target, target * ratio)
 
         # --- Pedestrians ---
@@ -568,19 +594,86 @@ class PrivilegedExpert:
     def _lateral_control(
         self, transform: "carla.Transform", target_wp: "carla.Waypoint",
     ) -> float:
-        """PID steering on the signed heading error to the target waypoint."""
-        ego = transform.location
-        tgt = target_wp.transform.location
+        """Stanley-style steering: heading error + cross-track error.
 
-        # Desired heading
-        target_yaw = math.degrees(math.atan2(tgt.y - ego.y, tgt.x - ego.x))
+        Uses the **Stanley controller** formulation from Stanford's 2005
+        DARPA Grand Challenge entry:
 
-        # Heading error wrapped to [−180, 180]
-        error = target_yaw - transform.rotation.yaw
-        error = (error + 180) % 360 - 180
+            δ = heading_error + arctan(k * cross_track_error / v)
 
-        # Normalise so ±90° → ±1.0
-        return self.steer_pid.step(error / 90.0)
+        This corrects both the *direction* the car is pointing (heading)
+        **and** how far the car has drifted laterally from the path.
+        Without the cross-track term, curved LANEFOLLOW roads cause
+        systematic inside-cutting because heading error alone is small
+        when the car is pointed roughly forward but offset sideways.
+
+        References:
+            Thrun et al., "Stanley: The Robot that Won the DARPA Grand
+            Challenge", Journal of Field Robotics, 2006.
+        """
+        ego_loc = transform.location
+        tgt_loc = target_wp.transform.location
+
+        # ---- 1. Heading error (PID-filtered) ----
+        target_yaw = math.degrees(math.atan2(
+            tgt_loc.y - ego_loc.y, tgt_loc.x - ego_loc.x,
+        ))
+        heading_err = target_yaw - transform.rotation.yaw
+        heading_err = (heading_err + 180) % 360 - 180
+
+        # PID on normalised heading error (same as before)
+        pid_out = self.steer_pid.step(heading_err / 90.0)
+
+        # ---- 2. Cross-track error (Stanley term) ----
+        # Nearest point on the segment between the first two buffer wps.
+        # Cross-track error = signed perpendicular distance from ego to
+        # the route segment.  Positive = ego is to the *right* of path.
+        cte = self._cross_track_error(transform)
+
+        # Stanley gain — inversely proportional to speed so the
+        # correction is strong at low speed (parking-lot precision)
+        # and gentle at high speed (highway stability).
+        speed_ms = math.sqrt(
+            self.vehicle.get_velocity().x ** 2
+            + self.vehicle.get_velocity().y ** 2
+        )
+        if self.mode in (DrivingMode.APPROACHING_TURN, DrivingMode.TURNING):
+            k = self.config.turn_cross_track_gain
+        else:
+            k = self.config.cross_track_gain
+
+        cte_steer = math.atan2(k * cte, max(speed_ms, 1.0))
+        # Convert radians → normalised [−1, 1] (90° = 1.0)
+        cte_steer_norm = cte_steer / (math.pi / 2)
+
+        return pid_out + cte_steer_norm
+
+    def _cross_track_error(self, transform: "carla.Transform") -> float:
+        """Signed perpendicular distance from ego to the nearest route segment.
+
+        Positive → ego is to the RIGHT of the path.
+        Negative → ego is to the LEFT.
+        Zero     → ego is on the path.
+        """
+        if len(self._wp_buffer) < 2:
+            return 0.0
+
+        # Segment: first two waypoints in the look-ahead buffer
+        a = self._wp_buffer[0][0].transform.location
+        b = self._wp_buffer[1][0].transform.location
+        p = transform.location
+
+        # Vector AB and AP
+        abx, aby = b.x - a.x, b.y - a.y
+        apx, apy = p.x - a.x, p.y - a.y
+
+        # Signed cross product: positive when P is to the right of AB
+        cross = abx * apy - aby * apx
+        seg_len = math.sqrt(abx * abx + aby * aby)
+        if seg_len < 1e-6:
+            return 0.0
+
+        return cross / seg_len
 
     def _longitudinal_control(
         self, speed_kmh: float, target_speed: float, dt: float,
@@ -752,19 +845,22 @@ class PrivilegedExpert:
     ) -> List[Dict[str, Any]]:
         """Return up to 10 nearest vehicles with privileged info.
 
-        Each entry includes an ``obb_in_lane`` flag computed via
-        Oriented Bounding-Box (OBB) projection: the 4 corners of the
-        other vehicle's bounding box are projected into the ego frame,
-        and SAT (Separating Axis Theorem) is used to test overlap with
-        the ego's lane corridor rectangle.  This correctly detects
-        large trucks whose centre-of-mass is outside the lane but
-        whose body extends into it.
+        Distances are measured **bumper-to-bumper**: the raw centre-to-
+        centre distance minus both vehicles' longitudinal half-extents.
+        This is critical for large vehicles (buses, trucks) where the
+        centre-of-mass can be 5–6 m from the rear bumper.
+
+        Each entry also includes an ``obb_in_lane`` flag computed via
+        Oriented Bounding-Box (OBB) projection + SAT overlap.
         """
         ego_loc = transform.location
         fwd = transform.get_forward_vector()
         right = carla.Vector3D(-fwd.y, fwd.x, 0)
         cutoff = self.config.vehicle_hazard_distance * 2
         half_lane = self.config.lane_half_width
+
+        # Ego half-extent along its forward axis
+        ego_half_len = self.vehicle.bounding_box.extent.x
 
         # Build ego lane corridor polygon (rectangle ahead of ego)
         ego_xy = np.array([ego_loc.x, ego_loc.y])
@@ -782,8 +878,8 @@ class PrivilegedExpert:
             if v.id == self.vehicle.id:
                 continue
             v_loc = v.get_transform().location
-            dist = ego_loc.distance(v_loc)
-            if dist > cutoff:
+            center_dist = ego_loc.distance(v_loc)
+            if center_dist > cutoff:
                 continue
 
             dx = v_loc.x - ego_loc.x
@@ -794,16 +890,21 @@ class PrivilegedExpert:
             v_vel = v.get_velocity()
             v_speed = math.sqrt(v_vel.x ** 2 + v_vel.y ** 2 + v_vel.z ** 2) * 3.6
 
-            # Heading similarity: positive = same direction, negative = oncoming
+            # Heading similarity: positive = same direction
             v_fwd = v.get_transform().get_forward_vector()
             heading_dot = fwd.x * v_fwd.x + fwd.y * v_fwd.y
+
+            # Bumper-to-bumper distance: subtract both half-extents
+            v_half_len = v.bounding_box.extent.x
+            bumper_gap = center_dist - ego_half_len - v_half_len
 
             # OBB overlap check via SAT
             v_corners = self._get_actor_obb_2d(v)
             obb_in_lane = self._sat_overlap(corridor, v_corners)
 
             nearby.append({
-                "distance": round(dist, 2),
+                "distance": round(max(bumper_gap, 0.0), 2),
+                "center_distance": round(center_dist, 2),
                 "longitudinal": round(longitudinal, 2),
                 "lateral": round(lateral, 2),
                 "speed_kmh": round(v_speed, 1),
