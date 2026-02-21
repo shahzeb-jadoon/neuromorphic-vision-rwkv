@@ -41,17 +41,17 @@ import numpy as np
 try:
     import carla
 
+    from agents.expert.privileged_expert import (  # noqa: F401
+        ExpertConfig,
+        FrameInfo,
+        PrivilegedExpert,
+    )
+    from agents.navigation.global_route_planner import GlobalRoutePlanner
+    from agents.navigation.local_planner import RoadOption
+
     CARLA_AVAILABLE = True
 except ImportError:
     CARLA_AVAILABLE = False
-
-from agents.expert.privileged_expert import (  # noqa: F401
-    ExpertConfig,
-    FrameInfo,
-    PrivilegedExpert,
-)
-from agents.navigation.global_route_planner import GlobalRoutePlanner
-from agents.navigation.local_planner import RoadOption
 
 logger = logging.getLogger(__name__)
 
@@ -388,7 +388,23 @@ class ExpertDataCollector:
             bp_lib = self.world.get_blueprint_library()
             vehicle_bp = bp_lib.filter("vehicle.tesla.model3")[0]
             spawn_points = carla_map.get_spawn_points()
-            spawn_idx = np.random.randint(len(spawn_points))
+
+            # When a pre-planned route is provided, spawn the vehicle
+            # at the closest spawn point to the route start so it faces
+            # the correct direction.  Without this, the vehicle may
+            # spawn far from the route origin and attempt a 180° turn.
+            if route_waypoints:
+                route_start_loc = route_waypoints[0][0].location
+                distances = [sp.location.distance(route_start_loc) for sp in spawn_points]
+                spawn_idx = int(np.argmin(distances))
+                logger.info(
+                    "Spawning at spawn point %d (%.1fm from route start)",
+                    spawn_idx,
+                    distances[spawn_idx],
+                )
+            else:
+                spawn_idx = np.random.randint(len(spawn_points))
+
             vehicle = self.world.try_spawn_actor(vehicle_bp, spawn_points[spawn_idx])
 
             if vehicle is None:
