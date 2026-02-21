@@ -622,19 +622,27 @@ class PrivilegedExpert:
     ) -> List[Dict[str, Any]]:
         """Return up to 10 nearest vehicles with privileged info.
 
+        Distances are computed between **bounding-box centroids** (not
+        actor transform origins, which sit at the rear axle for most
+        CARLA vehicles).  This is critical for large vehicles (buses,
+        trucks) where the centre-of-mass can be several metres from
+        the rear axle.
+
+        A bumper-to-bumper ``distance`` is also computed by subtracting
+        each vehicle's forward half-extent from the centroid distance.
+
         Each entry includes an ``obb_in_lane`` flag computed via
-        Oriented Bounding-Box (OBB) projection: the 4 corners of the
-        other vehicle's bounding box are projected into the ego frame,
-        and SAT (Separating Axis Theorem) is used to test overlap with
-        the ego's lane corridor rectangle.  This correctly detects
-        large trucks whose centre-of-mass is outside the lane but
-        whose body extends into it.
+        Oriented Bounding-Box (OBB) projection + SAT overlap.
         """
         ego_loc = transform.location
         fwd = transform.get_forward_vector()
         right = carla.Vector3D(-fwd.y, fwd.x, 0)
         cutoff = self.config.vehicle_hazard_distance * 2
         half_lane = self.config.lane_half_width
+
+        # Ego bounding-box centroid in world space
+        ego_bb_center = transform.transform(self.vehicle.bounding_box.location)
+        ego_half_len = self.vehicle.bounding_box.extent.x
 
         # Build ego lane corridor polygon (rectangle ahead of ego)
         ego_xy = np.array([ego_loc.x, ego_loc.y])
@@ -651,29 +659,46 @@ class PrivilegedExpert:
         for v in self.world.get_actors().filter("*vehicle*"):
             if v.id == self.vehicle.id:
                 continue
-            v_loc = v.get_transform().location
-            dist = ego_loc.distance(v_loc)
-            if dist > cutoff:
+
+            v_transform = v.get_transform()
+            v_loc = v_transform.location
+
+            # Quick cull on actor-root distance (cheap)
+            if ego_loc.distance(v_loc) > cutoff:
                 continue
 
-            dx = v_loc.x - ego_loc.x
-            dy = v_loc.y - ego_loc.y
+            # Bounding-box centroid in world space
+            v_bb_center = v_transform.transform(v.bounding_box.location)
+            center_dist = ego_bb_center.distance(v_bb_center)
+
+            dx = v_bb_center.x - ego_bb_center.x
+            dy = v_bb_center.y - ego_bb_center.y
             longitudinal = fwd.x * dx + fwd.y * dy  # positive = ahead
             lateral = right.x * dx + right.y * dy  # positive = right
 
             v_vel = v.get_velocity()
             v_speed = math.sqrt(v_vel.x ** 2 + v_vel.y ** 2 + v_vel.z ** 2) * 3.6
 
+            # Heading similarity: positive = same direction
+            v_fwd = v_transform.get_forward_vector()
+            heading_dot = fwd.x * v_fwd.x + fwd.y * v_fwd.y
+
+            # Bumper-to-bumper distance
+            v_half_len = v.bounding_box.extent.x
+            bumper_gap = max(center_dist - ego_half_len - v_half_len, 0.0)
+
             # OBB overlap check via SAT
             v_corners = self._get_actor_obb_2d(v)
             obb_in_lane = self._sat_overlap(corridor, v_corners)
 
             nearby.append({
-                "distance": round(dist, 2),
+                "distance": round(bumper_gap, 2),
+                "center_distance": round(center_dist, 2),
                 "longitudinal": round(longitudinal, 2),
                 "lateral": round(lateral, 2),
                 "speed_kmh": round(v_speed, 1),
                 "is_ahead": longitudinal > 0,
+                "same_direction": heading_dot > 0,
                 "obb_in_lane": obb_in_lane,
             })
 
