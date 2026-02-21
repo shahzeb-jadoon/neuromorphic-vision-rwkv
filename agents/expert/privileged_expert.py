@@ -72,14 +72,23 @@ class ExpertConfig:
     speed_ki: float = 0.05
     speed_kd: float = 0.01
 
-    # --- PID: lateral (steering) ---
+    # --- PID: lateral (steering) — straight-line defaults ---
     steer_kp: float = 1.2
     steer_ki: float = 0.05
     steer_kd: float = 0.15
 
+    # --- PID gains for turns (blended smoothly via curvature) ---
+    turn_speed_kp: float = 1.0
+    turn_speed_ki: float = 0.1
+    turn_speed_kd: float = 0.05
+    turn_steer_kp: float = 1.5
+    turn_steer_ki: float = 0.05
+    turn_steer_kd: float = 0.3
+
     # --- Waypoint following ---
     min_follow_distance: float = 3.0  # metres — pop threshold
     target_follow_distance: float = 5.0  # metres — desired look-ahead
+    turn_follow_distance: float = 3.0  # metres — shorter look-ahead in turns
     max_follow_distance: float = 20.0  # metres — upper bound
     waypoint_buffer_size: int = 40
 
@@ -241,6 +250,9 @@ class PrivilegedExpert:
         # Driving state
         self.mode = DrivingMode.FOLLOW_LANE
 
+        # Smoothed curvature estimate (EMA)
+        self._smoothed_curvature: float = 0.0
+
     # ------------------------------------------------------------------
     # Route management
     # ------------------------------------------------------------------
@@ -316,6 +328,7 @@ class PrivilegedExpert:
             lead_dist, ped_dist,
         )
         self.mode = mode
+        self._apply_gain_blending()
 
         # --- 5.  Control ---
         steer = self._lateral_control(transform, target_wp)
@@ -406,9 +419,24 @@ class PrivilegedExpert:
             break
 
         # --- Pick target waypoint at desired follow distance ---
+        # Adapt follow distance smoothly using EMA-smoothed curvature.
+        # Curved roads tagged LANEFOLLOW still need a shorter look-ahead
+        # to prevent corner-cutting.
+        curve_angle = self._route_curvature()
+        # EMA update: alpha=0.3 gives ~5-frame half-life at 20 Hz
+        self._smoothed_curvature += 0.3 * (curve_angle - self._smoothed_curvature)
+        cur = self._smoothed_curvature
+
+        # Interpolate between target and turn follow distance
+        cfg = self.config
+        blend = min(cur / 45.0, 1.0)  # 0→45° maps to 0→1
+        follow_dist = cfg.target_follow_distance + blend * (
+            cfg.turn_follow_distance - cfg.target_follow_distance
+        )
+
         target_wp, _ = self._wp_buffer[0]
         for wp, _ in self._wp_buffer:
-            if ego_loc.distance(wp.transform.location) >= self.config.target_follow_distance:
+            if ego_loc.distance(wp.transform.location) >= follow_dist:
                 target_wp = wp
                 break
 
@@ -504,6 +532,29 @@ class PrivilegedExpert:
     # ------------------------------------------------------------------
     # Internal — controllers
     # ------------------------------------------------------------------
+
+    def _apply_gain_blending(self) -> None:
+        """Smoothly blend PID gains between straight and turn presets.
+
+        Uses the EMA-smoothed curvature as a blend factor instead of a
+        binary switch.  This avoids the abrupt gain jumps that cause
+        jerky transitions between straight and turn behaviour.
+
+        The blend ramp (0–45°) matches the curvature range used by the
+        adaptive follow-distance logic so both respond in sync.
+        """
+        cfg = self.config
+        blend = min(self._smoothed_curvature / 45.0, 1.0)
+
+        def _lerp(a: float, b: float) -> float:
+            return a + blend * (b - a)
+
+        self.steer_pid.kp = _lerp(cfg.steer_kp, cfg.turn_steer_kp)
+        self.steer_pid.ki = _lerp(cfg.steer_ki, cfg.turn_steer_ki)
+        self.steer_pid.kd = _lerp(cfg.steer_kd, cfg.turn_steer_kd)
+        self.speed_pid.kp = _lerp(cfg.speed_kp, cfg.turn_speed_kp)
+        self.speed_pid.ki = _lerp(cfg.speed_ki, cfg.turn_speed_ki)
+        self.speed_pid.kd = _lerp(cfg.speed_kd, cfg.turn_speed_kd)
 
     def _lateral_control(
         self, transform: "carla.Transform", target_wp: "carla.Waypoint",
