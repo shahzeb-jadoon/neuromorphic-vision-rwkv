@@ -38,20 +38,32 @@ from typing import Any
 import h5py
 import numpy as np
 
+# RoadOption is a pure-Python IntEnum with no carla dependency,
+# so import it unconditionally.
+from agents.navigation.local_planner import RoadOption
+
 try:
     import carla
 
+    from agents.expert.privileged_expert import (  # noqa: F401
+        ExpertConfig,
+        FrameInfo,
+        PrivilegedExpert,
+    )
+    from agents.navigation.global_route_planner import GlobalRoutePlanner
+
     CARLA_AVAILABLE = True
-except ImportError:
+except (ImportError, ModuleNotFoundError):
     CARLA_AVAILABLE = False
 
-from agents.expert.privileged_expert import (  # noqa: F401
-    ExpertConfig,
-    FrameInfo,
-    PrivilegedExpert,
-)
-from agents.navigation.global_route_planner import GlobalRoutePlanner
-from agents.navigation.local_planner import RoadOption
+    # Provide a lightweight stub so EpisodeConfig (which references
+    # ExpertConfig in its default_factory) can still be defined.
+    @dataclass
+    class ExpertConfig:  # type: ignore[no-redef]
+        """Stub — real config lives in agents.expert.privileged_expert."""
+
+        target_speed: float = 30.0
+
 
 logger = logging.getLogger(__name__)
 
