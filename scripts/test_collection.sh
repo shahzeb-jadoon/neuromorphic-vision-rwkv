@@ -65,6 +65,14 @@ echo ""
 python scripts/analyze_dataset.py "${OUTPUT_DIR}" --save-samples 5
 
 echo ""
+
+# --- Visualize trajectories ---
+echo "============================================================"
+echo "Generating trajectory visualizations..."
+echo "============================================================"
+python scripts/visualize_routes.py "${OUTPUT_DIR}" --save "${OUTPUT_DIR}/plots"
+
+echo ""
 echo "============================================================"
 echo "Verification Checklist"
 echo "============================================================"
