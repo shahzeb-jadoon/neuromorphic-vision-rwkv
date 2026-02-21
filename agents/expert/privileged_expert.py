@@ -96,7 +96,7 @@ class ExpertConfig:
 
     # --- Speed limits / curvature ---
     curvature_speed_factor: float = 0.7  # reduce by 30% on curves
-    curvature_threshold_deg: float = 15.0  # angle change between successive wps
+    curvature_threshold_deg: float = 20.0  # angle change between successive wps
 
 
 # ---------------------------------------------------------------------------
