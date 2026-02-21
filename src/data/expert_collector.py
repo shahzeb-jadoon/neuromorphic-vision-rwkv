@@ -95,6 +95,7 @@ class EpisodeConfig:
     spectator_follow: bool = False  # Attach CARLA spectator camera to ego vehicle
     spectator_offset: tuple[float, float, float] = (-8.0, 0.0, 5.0)  # (x, y, z) behind/above
     record_simulation: bool = False  # Use CARLA built-in recorder
+    debug_draw: bool = False  # Draw route + trajectory in CARLA viewport
 
     # Expert agent
     expert_config: ExpertConfig = field(default_factory=ExpertConfig)
@@ -252,6 +253,91 @@ class ExpertDataCollector:
             roll=0.0,
         )
         world.get_spectator().set_transform(carla.Transform(cam_loc, cam_rot))
+
+    @staticmethod
+    def _draw_route_debug(
+        world: "carla.World",
+        expert: "PrivilegedExpert",
+        vehicle: "carla.Vehicle",
+        frame_idx: int,
+    ) -> None:
+        """Draw debug markers in the CARLA viewport.
+
+        Renders three layers so you can see:
+          1. **Planned route** — green dots along the remaining route
+          2. **Actual position** — orange breadcrumb at current location
+          3. **Upcoming target** — cyan sphere at the expert's steering target
+
+        All markers use ``life_time=0.3`` so they refresh each tick without
+        accumulating clutter.
+        """
+        debug = world.debug
+        life = 0.3  # seconds — slightly longer than 1 tick so no flicker
+
+        # 1. Planned route — draw every 5th remaining waypoint in green
+        route = expert._route
+        idx = expert._route_index
+        GREEN = carla.Color(0, 255, 0)
+        for i in range(idx, min(len(route), idx + 200), 5):
+            wp, _opt = route[i]
+            loc = wp.transform.location
+            debug.draw_point(
+                carla.Location(loc.x, loc.y, loc.z + 0.5),
+                size=0.08,
+                color=GREEN,
+                life_time=life,
+            )
+
+        # Draw route as connected line segments (every 2nd point)
+        for i in range(idx, min(len(route) - 1, idx + 200), 2):
+            wp_a = route[i][0].transform.location
+            wp_b = route[i + 1][0].transform.location
+            debug.draw_line(
+                carla.Location(wp_a.x, wp_a.y, wp_a.z + 0.5),
+                carla.Location(wp_b.x, wp_b.y, wp_b.z + 0.5),
+                thickness=0.06,
+                color=GREEN,
+                life_time=life,
+            )
+
+        # 2. Actual position — orange breadcrumb (longer life for trail)
+        ego_loc = vehicle.get_transform().location
+        ORANGE = carla.Color(255, 165, 0)
+        debug.draw_point(
+            carla.Location(ego_loc.x, ego_loc.y, ego_loc.z + 0.5),
+            size=0.10,
+            color=ORANGE,
+            life_time=8.0,  # persist for 8s to form a visible trail
+        )
+
+        # 3. Current steering target — cyan sphere
+        if expert._wp_buffer:
+            target_wp = expert._wp_buffer[0]
+            t_loc = target_wp[0].transform.location
+            CYAN = carla.Color(0, 255, 255)
+            debug.draw_point(
+                carla.Location(t_loc.x, t_loc.y, t_loc.z + 1.0),
+                size=0.15,
+                color=CYAN,
+                life_time=life,
+            )
+            # Line from ego to target
+            debug.draw_line(
+                carla.Location(ego_loc.x, ego_loc.y, ego_loc.z + 0.5),
+                carla.Location(t_loc.x, t_loc.y, t_loc.z + 1.0),
+                thickness=0.04,
+                color=CYAN,
+                life_time=life,
+            )
+
+        # 4. Frame counter near vehicle
+        debug.draw_string(
+            carla.Location(ego_loc.x, ego_loc.y, ego_loc.z + 3.0),
+            f"F{frame_idx}",
+            draw_shadow=True,
+            color=carla.Color(255, 255, 255),
+            life_time=life,
+        )
 
     @staticmethod
     def _spawn_cameras(
@@ -625,6 +711,10 @@ class ExpertDataCollector:
                 # --- Spectator follow (real-time visualization) ---
                 if config.spectator_follow:
                     self._update_spectator(self.world, vehicle, config.spectator_offset)
+
+                # --- In-CARLA debug drawing (route + trajectory) ---
+                if config.debug_draw:
+                    self._draw_route_debug(self.world, expert, vehicle, frame_idx)
 
                 # --- Capture panoramic image ---
                 panoramic = self._capture_panoramic(cameras, config)
