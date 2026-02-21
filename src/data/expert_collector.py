@@ -38,6 +38,10 @@ from typing import Any
 import h5py
 import numpy as np
 
+# RoadOption is a pure-Python IntEnum with no carla dependency,
+# so import it unconditionally.
+from agents.navigation.local_planner import RoadOption
+
 try:
     import carla
 
@@ -47,7 +51,6 @@ try:
         PrivilegedExpert,
     )
     from agents.navigation.global_route_planner import GlobalRoutePlanner
-    from agents.navigation.local_planner import RoadOption
 
     CARLA_AVAILABLE = True
 except (ImportError, ModuleNotFoundError):
@@ -59,7 +62,7 @@ except (ImportError, ModuleNotFoundError):
     class ExpertConfig:  # type: ignore[no-redef]
         """Stub — real config lives in agents.expert.privileged_expert."""
 
-        pass
+        target_speed: float = 30.0
 
 
 logger = logging.getLogger(__name__)
@@ -484,23 +487,36 @@ class ExpertDataCollector:
             vehicle_bp = bp_lib.filter("vehicle.tesla.model3")[0]
             spawn_points = carla_map.get_spawn_points()
 
-            # When a pre-planned route is provided, spawn the vehicle
-            # at the closest spawn point to the route start so it faces
-            # the correct direction.  Without this, the vehicle may
-            # spawn far from the route origin and attempt a 180° turn.
+            # When a pre-planned route is provided, teleport the vehicle
+            # directly to the route’s first waypoint transform.  This
+            # guarantees the car starts on the route facing the correct
+            # direction (same approach TransFuser / Leaderboard uses).
             if route_waypoints:
-                route_start_loc = route_waypoints[0][0].location
-                distances = [sp.location.distance(route_start_loc) for sp in spawn_points]
-                spawn_idx = int(np.argmin(distances))
-                logger.info(
-                    "Spawning at spawn point %d (%.1fm from route start)",
-                    spawn_idx,
-                    distances[spawn_idx],
-                )
+                spawn_transform = route_waypoints[0][0]  # carla.Transform
+                vehicle = self.world.try_spawn_actor(vehicle_bp, spawn_transform)
+                if vehicle is None:
+                    # Fallback: exact location may be obstructed; try
+                    # closest spawn point instead.
+                    route_start_loc = spawn_transform.location
+                    distances = [sp.location.distance(route_start_loc) for sp in spawn_points]
+                    spawn_idx = int(np.argmin(distances))
+                    vehicle = self.world.try_spawn_actor(vehicle_bp, spawn_points[spawn_idx])
+                    logger.warning(
+                        "Teleport spawn failed; fell back to spawn point %d "
+                        "(%.1fm from route start)",
+                        spawn_idx,
+                        distances[spawn_idx],
+                    )
+                else:
+                    logger.info(
+                        "Teleported ego to route start at (%.1f, %.1f, %.1f)",
+                        spawn_transform.location.x,
+                        spawn_transform.location.y,
+                        spawn_transform.location.z,
+                    )
             else:
                 spawn_idx = np.random.randint(len(spawn_points))
-
-            vehicle = self.world.try_spawn_actor(vehicle_bp, spawn_points[spawn_idx])
+                vehicle = self.world.try_spawn_actor(vehicle_bp, spawn_points[spawn_idx])
 
             if vehicle is None:
                 return EpisodeResult(

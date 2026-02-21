@@ -67,15 +67,23 @@ class ExpertConfig:
     target_speed: float = 30.0
     max_speed: float = 50.0
 
-    # --- PID: longitudinal (speed) ---
+    # --- PID: longitudinal (speed) — straight-line defaults ---
     speed_kp: float = 0.8
     speed_ki: float = 0.05
     speed_kd: float = 0.01
 
-    # --- PID: lateral (steering) ---
+    # --- PID: lateral (steering) — straight-line defaults ---
     steer_kp: float = 1.2
     steer_ki: float = 0.0
     steer_kd: float = 0.15
+
+    # --- Speed-adaptive PID gains (active during turns) ---
+    turn_speed_kp: float = 1.0
+    turn_speed_ki: float = 0.1
+    turn_speed_kd: float = 0.05
+    turn_steer_kp: float = 1.5
+    turn_steer_ki: float = 0.05
+    turn_steer_kd: float = 0.3
 
     # --- Waypoint following ---
     min_follow_distance: float = 3.0  # metres — pop threshold
@@ -316,6 +324,7 @@ class PrivilegedExpert:
             lead_dist, ped_dist,
         )
         self.mode = mode
+        self._apply_adaptive_gains()
 
         # --- 5.  Control ---
         steer = self._lateral_control(transform, target_wp)
@@ -504,6 +513,32 @@ class PrivilegedExpert:
     # ------------------------------------------------------------------
     # Internal — controllers
     # ------------------------------------------------------------------
+
+    def _apply_adaptive_gains(self) -> None:
+        """Switch PID gains based on driving mode (turn vs straight).
+
+        Turns need tighter, more aggressive steering and speed control
+        to track the curved path accurately.  On straights, softer gains
+        produce smoother, more natural demonstrations.
+        """
+        cfg = self.config
+        if self.mode in (
+            DrivingMode.APPROACHING_TURN,
+            DrivingMode.TURNING,
+        ):
+            self.steer_pid.kp = cfg.turn_steer_kp
+            self.steer_pid.ki = cfg.turn_steer_ki
+            self.steer_pid.kd = cfg.turn_steer_kd
+            self.speed_pid.kp = cfg.turn_speed_kp
+            self.speed_pid.ki = cfg.turn_speed_ki
+            self.speed_pid.kd = cfg.turn_speed_kd
+        else:
+            self.steer_pid.kp = cfg.steer_kp
+            self.steer_pid.ki = cfg.steer_ki
+            self.steer_pid.kd = cfg.steer_kd
+            self.speed_pid.kp = cfg.speed_kp
+            self.speed_pid.ki = cfg.speed_ki
+            self.speed_pid.kd = cfg.speed_kd
 
     def _lateral_control(
         self, transform: "carla.Transform", target_wp: "carla.Waypoint",
