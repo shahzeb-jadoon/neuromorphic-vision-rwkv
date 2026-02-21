@@ -160,6 +160,11 @@ def main() -> None:
         action="store_true",
         help="Record simulation with CARLA's built-in recorder for later replay",
     )
+    parser.add_argument(
+        "--debug-draw",
+        action="store_true",
+        help="Draw route waypoints and trajectory in CARLA viewport (green=planned, orange=actual)",
+    )
     args = parser.parse_args()
 
     # Load config
@@ -183,11 +188,12 @@ def main() -> None:
     campaign = build_campaign(cfg, completed_counts, n_episodes)
 
     # Apply visualization / recording flags to every episode config
-    if args.spectator or args.record:
+    if args.spectator or args.record or args.debug_draw:
         patched = []
         for ep_cfg, remaining in campaign:
             ep_cfg.spectator_follow = args.spectator
             ep_cfg.record_simulation = args.record
+            ep_cfg.debug_draw = args.debug_draw
             patched.append((ep_cfg, remaining))
         campaign = patched
 

@@ -45,6 +45,7 @@ python scripts/collect_data.py \
     --weather ClearNoon \
     --episodes 2 \
     --spectator \
+    --debug-draw \
     --route-strategy balanced \
     --target-left 0.15 \
     --target-right 0.15 \
