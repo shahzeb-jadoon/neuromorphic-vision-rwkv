@@ -89,14 +89,15 @@ class ExpertConfig:
     # --- Waypoint following ---
     min_follow_distance: float = 3.0  # metres — pop threshold
     target_follow_distance: float = 8.0  # metres — desired look-ahead
-    turn_follow_distance: float = 4.0  # metres — shorter look-ahead in turns
+    turn_follow_distance: float = 3.0  # metres — shorter look-ahead in turns
     max_follow_distance: float = 20.0  # metres — upper bound
     waypoint_buffer_size: int = 40
 
     # --- Safety thresholds ---
-    traffic_light_brake_distance: float = 30.0  # metres — start braking
-    traffic_light_stop_distance: float = 6.0  # metres — full stop
-    vehicle_hazard_distance: float = 20.0
+    traffic_light_brake_distance: float = 35.0  # metres — start braking
+    traffic_light_stop_distance: float = 4.0  # metres — full stop
+    tl_comfort_decel: float = 3.0  # m/s² — comfortable deceleration for TL
+    vehicle_hazard_distance: float = 25.0  # metres — start slowing
     vehicle_emergency_distance: float = 5.0
     pedestrian_hazard_distance: float = 15.0
     pedestrian_emergency_distance: float = 5.0
@@ -104,7 +105,8 @@ class ExpertConfig:
     pedestrian_lane_half_width: float = 3.0  # metres — wider lateral band for pedestrians
 
     # --- Turn behaviour ---
-    turn_speed_factor: float = 0.55  # reduce speed to 55% at turns
+    turn_speed_factor: float = 0.45  # reduce speed to 45% at turns
+    junction_turn_factor: float = 0.65  # additional reduction inside junctions
     turn_anticipation_distance: float = 30.0  # start slowing this far ahead
 
     # --- Speed limits / curvature ---
@@ -476,7 +478,7 @@ class PrivilegedExpert:
         if ego_wp is not None and ego_wp.is_junction:
             if nav_command in (RoadOption.LEFT, RoadOption.RIGHT):
                 mode = DrivingMode.TURNING
-                target = min(target, target * 0.8)
+                target = min(target, target * cfg.junction_turn_factor)
 
         # --- Traffic light ---
         if tl_state is not None and tl_distance is not None:
@@ -487,15 +489,12 @@ class PrivilegedExpert:
                     if tl_distance < cfg.traffic_light_stop_distance:
                         target = 0.0
                     else:
-                        # Linear ramp: full speed at brake_distance → 0
-                        # at stop_distance.  Independent of current speed
-                        # so we get a deterministic deceleration profile.
-                        ramp = (
-                            (tl_distance - cfg.traffic_light_stop_distance)
-                            / (cfg.traffic_light_brake_distance
-                               - cfg.traffic_light_stop_distance)
-                        )
-                        target = min(target, target * max(ramp, 0.0))
+                        # Kinematic profile: v = sqrt(2 * a * d)
+                        # Produces a smooth, constant-deceleration stop
+                        # at the stop line — no oscillation.
+                        d = max(tl_distance - cfg.traffic_light_stop_distance, 0.0)
+                        v_ms = math.sqrt(2.0 * cfg.tl_comfort_decel * d)
+                        target = min(target, v_ms * 3.6)  # m/s → km/h
 
         # --- Lead vehicle ---
         if lead_dist is not None:
@@ -597,16 +596,17 @@ class PrivilegedExpert:
             throttle = 0.0
             brake = min(abs(output), 1.0)
 
-        # When the target is ≈ 0 (stop required), apply firm braking
-        # regardless of PID output — PID alone is too gentle for full
-        # stops because the normalised error saturates near −1.
-        if target_speed < 1.0 and speed_kmh > 2.0:
+        # When target ≈ 0 (red light, emergency), always full-brake
+        # and zero throttle.  This prevents the PID integral from
+        # producing tiny positive outputs that cause creeping.
+        if target_speed < 1.0:
             throttle = 0.0
-            brake = max(brake, 0.6)
+            brake = 1.0
 
-        # Hard brake when meaningfully over target (lowered from 15 →
-        # 5 km/h so TL stops and emergency stops actually engage).
-        if speed_kmh > target_speed + 5.0:
+        # Hard brake when well above target — safety net for normal
+        # driving.  The threshold is 10 km/h (not 5) to avoid
+        # oscillation during gradual deceleration profiles.
+        elif speed_kmh > target_speed + 10.0:
             throttle = 0.0
             brake = 1.0
 
@@ -794,6 +794,10 @@ class PrivilegedExpert:
             v_vel = v.get_velocity()
             v_speed = math.sqrt(v_vel.x ** 2 + v_vel.y ** 2 + v_vel.z ** 2) * 3.6
 
+            # Heading similarity: positive = same direction, negative = oncoming
+            v_fwd = v.get_transform().get_forward_vector()
+            heading_dot = fwd.x * v_fwd.x + fwd.y * v_fwd.y
+
             # OBB overlap check via SAT
             v_corners = self._get_actor_obb_2d(v)
             obb_in_lane = self._sat_overlap(corridor, v_corners)
@@ -804,6 +808,7 @@ class PrivilegedExpert:
                 "lateral": round(lateral, 2),
                 "speed_kmh": round(v_speed, 1),
                 "is_ahead": longitudinal > 0,
+                "same_direction": heading_dot > 0,
                 "obb_in_lane": obb_in_lane,
             })
 
@@ -910,9 +915,16 @@ class PrivilegedExpert:
         Uses the OBB-based ``obb_in_lane`` flag when available (set by
         ``_detect_vehicles``).  Falls back to centre-point lateral
         check for backwards compatibility.
+
+        Oncoming vehicles (``same_direction == False``) are excluded
+        so that head-on traffic on narrow roads or during turns does
+        not trigger false lead-vehicle braking.
         """
         for v in nearby:
             if not v["is_ahead"]:
+                continue
+            # Skip oncoming traffic
+            if not v.get("same_direction", True):
                 continue
             # Prefer OBB overlap flag if present
             in_lane = v.get("obb_in_lane",
