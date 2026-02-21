@@ -76,7 +76,7 @@ class ExpertConfig:
 
     # --- Waypoint following ---
     min_follow_distance: float = 3.0  # metres — pop threshold
-    target_follow_distance: float = 8.0  # metres — desired look-ahead
+    target_follow_distance: float = 5.0  # metres — desired look-ahead
     max_follow_distance: float = 20.0  # metres — upper bound
     waypoint_buffer_size: int = 40
 
