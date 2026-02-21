@@ -624,8 +624,17 @@ class PrivilegedExpert:
             throttle = 0.0
             brake = min(abs(output), 1.0)
 
-        # Hard brake when significantly over target
-        if speed_kmh > target_speed + 15.0:
+        # When target ≈ 0 (red light, emergency), always full-brake
+        # and zero throttle.  This prevents the PID integral from
+        # producing tiny positive outputs that cause creeping.
+        if target_speed < 1.0:
+            throttle = 0.0
+            brake = 1.0
+
+        # Hard brake when well above target — safety net for normal
+        # driving.  The threshold is 10 km/h (not 15) to avoid
+        # oscillation during gradual deceleration profiles.
+        elif speed_kmh > target_speed + 10.0:
             throttle = 0.0
             brake = 1.0
 
@@ -954,9 +963,16 @@ class PrivilegedExpert:
         Uses the OBB-based ``obb_in_lane`` flag when available (set by
         ``_detect_vehicles``).  Falls back to centre-point lateral
         check for backwards compatibility.
+
+        Oncoming vehicles (``same_direction == False``) are excluded
+        so that head-on traffic on narrow roads or during turns does
+        not trigger false lead-vehicle braking.
         """
         for v in nearby:
             if not v["is_ahead"]:
+                continue
+            # Skip oncoming traffic
+            if not v.get("same_direction", True):
                 continue
             # Prefer OBB overlap flag if present
             in_lane = v.get("obb_in_lane",
