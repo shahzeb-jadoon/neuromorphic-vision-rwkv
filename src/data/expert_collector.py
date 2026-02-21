@@ -78,7 +78,7 @@ class EpisodeConfig:
     n_walkers: int = 30
     max_frames: int = 2000
     timeout_speed: float = 0.1  # m/s — below this for timeout_duration → discard
-    timeout_duration: float = 180.0  # seconds stuck
+    timeout_duration: float = 30.0  # seconds stuck before early termination
     fps: int = 20
 
     # 3-camera panoramic setup
@@ -398,8 +398,53 @@ class ExpertDataCollector:
             bp_lib = self.world.get_blueprint_library()
             vehicle_bp = bp_lib.filter("vehicle.tesla.model3")[0]
             spawn_points = carla_map.get_spawn_points()
-            spawn_idx = np.random.randint(len(spawn_points))
-            vehicle = self.world.try_spawn_actor(vehicle_bp, spawn_points[spawn_idx])
+
+            # When a pre-planned route is provided, teleport the vehicle
+            # directly to the route's first waypoint transform.  This
+            # guarantees the car starts on the route facing the correct
+            # direction (same approach TransFuser / Leaderboard uses).
+            ego_spawn_loc: Any = None
+
+            if route_waypoints:
+                # Lift spawn 0.5m above road surface so the vehicle's
+                # physics bounding-box doesn't clip the ground (route
+                # waypoint transforms sit at exact road level).
+                raw = route_waypoints[0][0]  # carla.Transform
+                spawn_transform = carla.Transform(
+                    carla.Location(
+                        x=raw.location.x,
+                        y=raw.location.y,
+                        z=raw.location.z + 0.5,
+                    ),
+                    raw.rotation,
+                )
+                vehicle = self.world.try_spawn_actor(vehicle_bp, spawn_transform)
+                if vehicle is None:
+                    # Fallback: exact location may be obstructed; try
+                    # closest spawn point instead.
+                    route_start_loc = raw.location
+                    distances = [sp.location.distance(route_start_loc) for sp in spawn_points]
+                    spawn_idx = int(np.argmin(distances))
+                    vehicle = self.world.try_spawn_actor(vehicle_bp, spawn_points[spawn_idx])
+                    ego_spawn_loc = spawn_points[spawn_idx].location
+                    logger.warning(
+                        "Teleport spawn failed; fell back to spawn point %d "
+                        "(%.1fm from route start)",
+                        spawn_idx,
+                        distances[spawn_idx],
+                    )
+                else:
+                    ego_spawn_loc = spawn_transform.location
+                    logger.info(
+                        "Teleported ego to route start at (%.1f, %.1f, %.1f)",
+                        spawn_transform.location.x,
+                        spawn_transform.location.y,
+                        spawn_transform.location.z,
+                    )
+            else:
+                spawn_idx = np.random.randint(len(spawn_points))
+                vehicle = self.world.try_spawn_actor(vehicle_bp, spawn_points[spawn_idx])
+                ego_spawn_loc = spawn_points[spawn_idx].location
 
             if vehicle is None:
                 return EpisodeResult(
@@ -418,7 +463,12 @@ class ExpertDataCollector:
             if config.n_vehicles > 0:
                 npc_bps = bp_lib.filter("vehicle.*")
                 npc_bps = [bp for bp in npc_bps if int(bp.get_attribute("number_of_wheels")) == 4]
-                available_spawns = [sp for i, sp in enumerate(spawn_points) if i != spawn_idx]
+                available_spawns = [
+                    sp
+                    for sp in spawn_points
+                    if ego_spawn_loc is None or sp.location.distance(ego_spawn_loc) > 50.0
+                ]
+                np.random.shuffle(available_spawns)
                 n_to_spawn = min(config.n_vehicles, len(available_spawns))
 
                 for i in range(n_to_spawn):
