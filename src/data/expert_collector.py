@@ -66,7 +66,9 @@ class EpisodeConfig:
     n_walkers: int = 30
     max_frames: int = 2000
     timeout_speed: float = 0.1  # m/s — below this for timeout_duration → discard
-    timeout_duration: float = 180.0  # seconds stuck
+    timeout_duration: float = 30.0  # seconds stuck before early termination
+    collision_grace_frames: int = 10  # frames to record after collision, then stop
+    min_npc_spawn_distance: float = 50.0  # metres — don't spawn NPCs closer than this to ego
     fps: int = 20
 
     # 3-camera panoramic setup
@@ -406,7 +408,14 @@ class ExpertDataCollector:
             if config.n_vehicles > 0:
                 npc_bps = bp_lib.filter("vehicle.*")
                 npc_bps = [bp for bp in npc_bps if int(bp.get_attribute("number_of_wheels")) == 4]
-                available_spawns = [sp for i, sp in enumerate(spawn_points) if i != spawn_idx]
+                ego_loc = spawn_points[spawn_idx].location
+                available_spawns = [
+                    sp
+                    for i, sp in enumerate(spawn_points)
+                    if i != spawn_idx
+                    and sp.location.distance(ego_loc) > config.min_npc_spawn_distance
+                ]
+                np.random.shuffle(available_spawns)
                 n_to_spawn = min(config.n_vehicles, len(available_spawns))
 
                 for i in range(n_to_spawn):
@@ -599,6 +608,18 @@ class ExpertDataCollector:
                 if collision_detected[0] and collision_frame is None:
                     collision_frame = frame_idx
                     logger.warning("Collision detected at frame %d", frame_idx)
+
+                # Stop recording shortly after collision (grace period
+                # captures the impact context for debugging).
+                if (
+                    collision_frame is not None
+                    and frame_idx >= collision_frame + config.collision_grace_frames
+                ):
+                    logger.info(
+                        "Stopping episode %d frames after collision",
+                        config.collision_grace_frames,
+                    )
+                    break
 
                 # --- Timeout (stuck) check ---
                 speed_ms = math.sqrt(
