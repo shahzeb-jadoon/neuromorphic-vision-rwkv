@@ -50,8 +50,17 @@ try:
     from agents.navigation.local_planner import RoadOption
 
     CARLA_AVAILABLE = True
-except ImportError:
+except (ImportError, ModuleNotFoundError):
     CARLA_AVAILABLE = False
+
+    # Provide a lightweight stub so EpisodeConfig (which references
+    # ExpertConfig in its default_factory) can still be defined.
+    @dataclass
+    class ExpertConfig:  # type: ignore[no-redef]
+        """Stub — real config lives in agents.expert.privileged_expert."""
+
+        pass
+
 
 logger = logging.getLogger(__name__)
 

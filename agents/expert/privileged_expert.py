@@ -43,8 +43,11 @@ try:
 except ImportError:
     CARLA_AVAILABLE = False
 
-from agents.navigation.local_planner import RoadOption
-from agents.navigation.global_route_planner import GlobalRoutePlanner
+try:
+    from agents.navigation.local_planner import RoadOption
+    from agents.navigation.global_route_planner import GlobalRoutePlanner
+except (ImportError, ModuleNotFoundError):
+    pass
 
 
 # ---------------------------------------------------------------------------

@@ -12,7 +12,7 @@ try:
         EpisodeResult,
     )
     from src.data.route_generator import BalancedRouteGenerator
-except ImportError:
+except (ImportError, NameError):
     pass
 
 __all__ = [
