@@ -491,16 +491,31 @@ class ExpertDataCollector:
             # directly to the route’s first waypoint transform.  This
             # guarantees the car starts on the route facing the correct
             # direction (same approach TransFuser / Leaderboard uses).
+            # Track ego spawn location for NPC distance filtering.
+            ego_spawn_loc: Any = None
+
             if route_waypoints:
-                spawn_transform = route_waypoints[0][0]  # carla.Transform
+                # Lift spawn 0.5m above road surface so the vehicle's
+                # physics bounding-box doesn't clip the ground (route
+                # waypoint transforms sit at exact road level).
+                raw = route_waypoints[0][0]  # carla.Transform
+                spawn_transform = carla.Transform(
+                    carla.Location(
+                        x=raw.location.x,
+                        y=raw.location.y,
+                        z=raw.location.z + 0.5,
+                    ),
+                    raw.rotation,
+                )
                 vehicle = self.world.try_spawn_actor(vehicle_bp, spawn_transform)
                 if vehicle is None:
                     # Fallback: exact location may be obstructed; try
                     # closest spawn point instead.
-                    route_start_loc = spawn_transform.location
+                    route_start_loc = raw.location
                     distances = [sp.location.distance(route_start_loc) for sp in spawn_points]
                     spawn_idx = int(np.argmin(distances))
                     vehicle = self.world.try_spawn_actor(vehicle_bp, spawn_points[spawn_idx])
+                    ego_spawn_loc = spawn_points[spawn_idx].location
                     logger.warning(
                         "Teleport spawn failed; fell back to spawn point %d "
                         "(%.1fm from route start)",
@@ -508,6 +523,7 @@ class ExpertDataCollector:
                         distances[spawn_idx],
                     )
                 else:
+                    ego_spawn_loc = spawn_transform.location
                     logger.info(
                         "Teleported ego to route start at (%.1f, %.1f, %.1f)",
                         spawn_transform.location.x,
@@ -517,6 +533,7 @@ class ExpertDataCollector:
             else:
                 spawn_idx = np.random.randint(len(spawn_points))
                 vehicle = self.world.try_spawn_actor(vehicle_bp, spawn_points[spawn_idx])
+                ego_spawn_loc = spawn_points[spawn_idx].location
 
             if vehicle is None:
                 return EpisodeResult(
@@ -535,12 +552,10 @@ class ExpertDataCollector:
             if config.n_vehicles > 0:
                 npc_bps = bp_lib.filter("vehicle.*")
                 npc_bps = [bp for bp in npc_bps if int(bp.get_attribute("number_of_wheels")) == 4]
-                ego_loc = spawn_points[spawn_idx].location
                 available_spawns = [
                     sp
-                    for i, sp in enumerate(spawn_points)
-                    if i != spawn_idx
-                    and sp.location.distance(ego_loc) > config.min_npc_spawn_distance
+                    for sp in spawn_points
+                    if sp.location.distance(ego_spawn_loc) > config.min_npc_spawn_distance
                 ]
                 np.random.shuffle(available_spawns)
                 n_to_spawn = min(config.n_vehicles, len(available_spawns))

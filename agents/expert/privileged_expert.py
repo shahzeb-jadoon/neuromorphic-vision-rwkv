@@ -63,9 +63,10 @@ class ExpertConfig:
     All distances are in **metres**.
     """
 
-    # Target cruising speed
+    # Target cruising speed (used as fallback when road has no speed-limit sign)
     target_speed: float = 30.0
     max_speed: float = 50.0
+    speed_limit_margin: float = 0.90  # drive at 90 % of posted limit
 
     # --- PID: longitudinal (speed) — straight-line defaults ---
     speed_kp: float = 0.8
@@ -88,12 +89,13 @@ class ExpertConfig:
     # --- Waypoint following ---
     min_follow_distance: float = 3.0  # metres — pop threshold
     target_follow_distance: float = 8.0  # metres — desired look-ahead
+    turn_follow_distance: float = 4.0  # metres — shorter look-ahead in turns
     max_follow_distance: float = 20.0  # metres — upper bound
     waypoint_buffer_size: int = 40
 
     # --- Safety thresholds ---
-    traffic_light_brake_distance: float = 20.0
-    traffic_light_stop_distance: float = 4.0
+    traffic_light_brake_distance: float = 30.0  # metres — start braking
+    traffic_light_stop_distance: float = 6.0  # metres — full stop
     vehicle_hazard_distance: float = 20.0
     vehicle_emergency_distance: float = 5.0
     pedestrian_hazard_distance: float = 15.0
@@ -248,6 +250,7 @@ class PrivilegedExpert:
 
         # Driving state
         self.mode = DrivingMode.FOLLOW_LANE
+        self._tl_waiting: int | None = None  # actor-id of TL we're waiting for
 
     # ------------------------------------------------------------------
     # Route management
@@ -265,6 +268,7 @@ class PrivilegedExpert:
         self.speed_pid.reset()
         self.steer_pid.reset()
         self.mode = DrivingMode.FOLLOW_LANE
+        self._tl_waiting = None
 
     def set_destination(
         self, start: "carla.Location", end: "carla.Location"
@@ -307,6 +311,14 @@ class PrivilegedExpert:
         speed_ms = math.sqrt(velocity.x ** 2 + velocity.y ** 2 + velocity.z ** 2)
         speed_kmh = speed_ms * 3.6
 
+        # Dynamic speed limit from road signs (falls back to config)
+        cfg = self.config
+        road_limit = self.vehicle.get_speed_limit()  # km/h
+        if road_limit is not None and road_limit > 0:
+            base_target = min(road_limit * cfg.speed_limit_margin, cfg.max_speed)
+        else:
+            base_target = cfg.target_speed
+
         # --- 2.  Route progress ---
         self._advance_route(transform.location)
         target_wp, nav_command = self._get_target(transform)
@@ -321,7 +333,7 @@ class PrivilegedExpert:
         # --- 4.  Target speed & driving mode ---
         target_speed, mode = self._plan_speed(
             speed_kmh, nav_command, tl_state, tl_distance,
-            lead_dist, ped_dist,
+            lead_dist, ped_dist, base_target,
         )
         self.mode = mode
         self._apply_adaptive_gains()
@@ -415,9 +427,16 @@ class PrivilegedExpert:
             break
 
         # --- Pick target waypoint at desired follow distance ---
+        # Shorter look-ahead during turns keeps the car tracking the
+        # inside of the curve instead of cutting the corner.
+        if nav_command in (RoadOption.LEFT, RoadOption.RIGHT):
+            follow_dist = self.config.turn_follow_distance
+        else:
+            follow_dist = self.config.target_follow_distance
+
         target_wp, _ = self._wp_buffer[0]
         for wp, _ in self._wp_buffer:
-            if ego_loc.distance(wp.transform.location) >= self.config.target_follow_distance:
+            if ego_loc.distance(wp.transform.location) >= follow_dist:
                 target_wp = wp
                 break
 
@@ -435,28 +454,29 @@ class PrivilegedExpert:
         tl_distance: float | None,
         lead_dist: float | None,
         ped_dist: float | None,
+        base_target: float | None = None,
     ) -> Tuple[float, DrivingMode]:
         """Determine target speed and driving mode from hazards."""
         cfg = self.config
-        target = cfg.target_speed
+        target = base_target if base_target is not None else cfg.target_speed
         mode = DrivingMode.FOLLOW_LANE
 
         # --- Curvature (route bends) ---
         curve_angle = self._route_curvature()
         if curve_angle > cfg.curvature_threshold_deg:
-            target = min(target, cfg.target_speed * cfg.curvature_speed_factor)
+            target = min(target, target * cfg.curvature_speed_factor)
 
         # --- Upcoming turn ---
         if nav_command in (RoadOption.LEFT, RoadOption.RIGHT):
             mode = DrivingMode.APPROACHING_TURN
-            target = min(target, cfg.target_speed * cfg.turn_speed_factor)
+            target = min(target, target * cfg.turn_speed_factor)
 
         # At a junction and actively turning → even slower
         ego_wp = self.map.get_waypoint(self.vehicle.get_transform().location)
         if ego_wp is not None and ego_wp.is_junction:
             if nav_command in (RoadOption.LEFT, RoadOption.RIGHT):
                 mode = DrivingMode.TURNING
-                target = min(target, cfg.target_speed * cfg.turn_speed_factor * 0.8)
+                target = min(target, target * 0.8)
 
         # --- Traffic light ---
         if tl_state is not None and tl_distance is not None:
@@ -467,9 +487,15 @@ class PrivilegedExpert:
                     if tl_distance < cfg.traffic_light_stop_distance:
                         target = 0.0
                     else:
-                        # Smooth deceleration proportional to distance
-                        ratio = tl_distance / cfg.traffic_light_brake_distance
-                        target = min(target, speed_kmh * ratio)
+                        # Linear ramp: full speed at brake_distance → 0
+                        # at stop_distance.  Independent of current speed
+                        # so we get a deterministic deceleration profile.
+                        ramp = (
+                            (tl_distance - cfg.traffic_light_stop_distance)
+                            / (cfg.traffic_light_brake_distance
+                               - cfg.traffic_light_stop_distance)
+                        )
+                        target = min(target, target * max(ramp, 0.0))
 
         # --- Lead vehicle ---
         if lead_dist is not None:
@@ -479,7 +505,7 @@ class PrivilegedExpert:
             elif lead_dist < cfg.vehicle_hazard_distance:
                 mode = DrivingMode.VEHICLE_FOLLOWING
                 ratio = lead_dist / cfg.vehicle_hazard_distance
-                target = min(target, cfg.target_speed * ratio)
+                target = min(target, target * ratio)
 
         # --- Pedestrians ---
         if ped_dist is not None:
@@ -571,8 +597,16 @@ class PrivilegedExpert:
             throttle = 0.0
             brake = min(abs(output), 1.0)
 
-        # Hard brake when significantly over target
-        if speed_kmh > target_speed + 15.0:
+        # When the target is ≈ 0 (stop required), apply firm braking
+        # regardless of PID output — PID alone is too gentle for full
+        # stops because the normalised error saturates near −1.
+        if target_speed < 1.0 and speed_kmh > 2.0:
+            throttle = 0.0
+            brake = max(brake, 0.6)
+
+        # Hard brake when meaningfully over target (lowered from 15 →
+        # 5 km/h so TL stops and emergency stops actually engage).
+        if speed_kmh > target_speed + 5.0:
             throttle = 0.0
             brake = 1.0
 
@@ -585,63 +619,90 @@ class PrivilegedExpert:
     def _check_traffic_light(
         self, transform: "carla.Transform",
     ) -> Tuple[Any, float | None]:
-        """Return (state, distance) of the relevant traffic light, if any.
+        """Return (state, distance-to-stop-line) of the relevant TL.
 
-        Uses a two-tier strategy:
-        1. **Fast path** — CARLA's built-in ``is_at_traffic_light()``
-           (only fires when the vehicle is very close to the stop line).
-        2. **Junction-aware scan** — for each non-green traffic light
-           within ``traffic_light_brake_distance``, check whether any of
-           the light's ``get_affected_lane_waypoints()`` shares both
-           ``road_id`` and ``lane_id`` with the ego waypoint.  This
-           correctly handles multi-road junctions where the naïve
-           ``road_id`` comparison fails.
+        Three-tier strategy:
+        1. **Persistent memory** — if we were already waiting for a
+           specific red/yellow light, keep checking it until it turns
+           green.  Prevents "forgetting" about it when the ego's
+           road_id changes at the junction boundary.
+        2. **Fast path** — CARLA's built-in ``is_at_traffic_light()``.
+        3. **Junction-aware scan** — stop-line distance via
+           ``get_affected_lane_waypoints()`` for early braking.
         """
-        # Fast path: CARLA's own detector
+        ego_loc = transform.location
+
+        # ---- Tier 1: persistent TL memory ----
+        if self._tl_waiting is not None:
+            tl_actor = self.world.get_actor(self._tl_waiting)
+            if tl_actor is not None and tl_actor.state in (
+                carla.TrafficLightState.Red,
+                carla.TrafficLightState.Yellow,
+            ):
+                dist = ego_loc.distance(tl_actor.get_transform().location)
+                # Use stop-line distance if available
+                stop_dist = self._stop_line_distance(
+                    tl_actor, transform,
+                )
+                return tl_actor.state, (stop_dist if stop_dist is not None
+                                        else dist)
+            # Light turned green (or was destroyed) — clear memory.
+            self._tl_waiting = None
+
+        # ---- Tier 2: CARLA built-in (close range) ----
         if self.vehicle.is_at_traffic_light():
             tl = self.vehicle.get_traffic_light()
             if tl is not None:
-                dist = transform.location.distance(tl.get_transform().location)
+                if tl.state != carla.TrafficLightState.Green:
+                    self._tl_waiting = tl.id  # remember it
+                stop_dist = self._stop_line_distance(tl, transform)
+                dist = (stop_dist if stop_dist is not None
+                        else ego_loc.distance(tl.get_transform().location))
                 return tl.state, dist
 
-        # Junction-aware scan
-        ego_wp = self.map.get_waypoint(transform.location)
+        # ---- Tier 3: junction-aware scan ----
+        ego_wp = self.map.get_waypoint(ego_loc)
         if ego_wp is None:
             return None, None
 
         fwd = transform.get_forward_vector()
-        threshold = self.config.traffic_light_brake_distance
+        # Use a generous pre-filter on pole distance (pole can be far
+        # from stop line); the real threshold is applied to the stop-line.
+        pole_cutoff = self.config.traffic_light_brake_distance * 2
 
-        best_state, best_dist = None, None
+        best_state: Any = None
+        best_dist: float | None = None
+        best_tl_id: int | None = None
 
         for tl in self.world.get_actors().filter("*traffic_light*"):
             if tl.state == carla.TrafficLightState.Green:
                 continue
 
             tl_loc = tl.get_transform().location
-            dist = transform.location.distance(tl_loc)
-            if dist > threshold:
+            pole_dist = ego_loc.distance(tl_loc)
+            if pole_dist > pole_cutoff:
                 continue
 
-            # Ahead of us?  (positive dot product with forward vector)
-            dx = tl_loc.x - transform.location.x
-            dy = tl_loc.y - transform.location.y
+            # Ahead of us? (positive dot product with forward vector)
+            dx = tl_loc.x - ego_loc.x
+            dy = tl_loc.y - ego_loc.y
             if fwd.x * dx + fwd.y * dy <= 0:
                 continue
 
-            # Junction-aware lane matching: check whether *any* of the
-            # lanes this traffic light controls matches our road+lane.
+            # ---- Lane matching via affected waypoints ----
             affects_us = False
+            stop_dist: float | None = None
             try:
-                affected_wps = tl.get_affected_lane_waypoints()
-                for awp in affected_wps:
+                for awp in tl.get_affected_lane_waypoints():
                     if (awp.road_id == ego_wp.road_id
                             and awp.lane_id == ego_wp.lane_id):
                         affects_us = True
+                        stop_dist = ego_loc.distance(
+                            awp.transform.location,
+                        )
                         break
-            except AttributeError:
-                # Fallback for older CARLA builds that lack the method:
-                # revert to the simple road_id comparison.
+            except (AttributeError, RuntimeError):
+                # Fallback for older CARLA builds.
                 tl_wp = self.map.get_waypoint(tl_loc)
                 if tl_wp is not None and tl_wp.road_id == ego_wp.road_id:
                     affects_us = True
@@ -649,11 +710,42 @@ class PrivilegedExpert:
             if not affects_us:
                 continue
 
-            if best_dist is None or dist < best_dist:
+            # Prefer stop-line distance; fall back to pole distance.
+            effective_dist = stop_dist if stop_dist is not None else pole_dist
+            if effective_dist > self.config.traffic_light_brake_distance:
+                continue
+
+            if best_dist is None or effective_dist < best_dist:
                 best_state = tl.state
-                best_dist = dist
+                best_dist = effective_dist
+                best_tl_id = tl.id
+
+        if best_tl_id is not None:
+            self._tl_waiting = best_tl_id
 
         return best_state, best_dist
+
+    def _stop_line_distance(
+        self,
+        tl: Any,
+        transform: "carla.Transform",
+    ) -> float | None:
+        """Distance from ego to the traffic-light's stop line.
+
+        Returns ``None`` if the API is unavailable or no stop waypoint
+        matches our lane.
+        """
+        try:
+            ego_wp = self.map.get_waypoint(transform.location)
+            for awp in tl.get_affected_lane_waypoints():
+                if (awp.road_id == ego_wp.road_id
+                        and awp.lane_id == ego_wp.lane_id):
+                    return transform.location.distance(
+                        awp.transform.location,
+                    )
+        except (AttributeError, RuntimeError):
+            pass
+        return None
 
     def _detect_vehicles(
         self, transform: "carla.Transform",
