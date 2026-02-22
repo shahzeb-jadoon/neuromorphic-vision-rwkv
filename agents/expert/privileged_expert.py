@@ -427,6 +427,7 @@ class PrivilegedExpert:
 
         # --- Determine nav command with anticipation ---
         nav_command = RoadOption.LANEFOLLOW
+        self._turn_distance = None
         for wp, cmd in self._wp_buffer:
             if cmd in (RoadOption.LANEFOLLOW, RoadOption.VOID,
                        RoadOption.CHANGELANELEFT, RoadOption.CHANGELANERIGHT):
@@ -434,6 +435,7 @@ class PrivilegedExpert:
             dist = ego_loc.distance(wp.transform.location)
             if dist < self.config.turn_anticipation_distance:
                 nav_command = cmd
+                self._turn_distance = dist
             # break is intentional: we only consider the *first*
             # actionable command (LEFT/RIGHT/STRAIGHT).  If it is
             # beyond turn_anticipation_distance we keep LANEFOLLOW,
@@ -494,16 +496,40 @@ class PrivilegedExpert:
             target = min(target, target * curvature_factor)
 
         # --- Upcoming turn ---
+        # Use a kinematic deceleration profile so the car arrives at
+        # the junction ENTRY at the desired turn speed, rather than
+        # slamming speed down the instant the turn is anticipated.
+        #   turn_target = base_target × turn_speed_factor
+        # Outside the junction, the target speed is the *higher* of
+        # the kinematic profile v=sqrt(2·a·d) and the turn target.
+        # Inside the junction, the car simply holds the turn target
+        # (no further reduction) and accelerates normally on exit.
+        ego_wp = self.map.get_waypoint(
+            self.vehicle.get_transform().location,
+        )
         if nav_command in (RoadOption.LEFT, RoadOption.RIGHT):
-            mode = DrivingMode.APPROACHING_TURN
-            target = min(target, target * cfg.turn_speed_factor)
+            turn_target = target * cfg.turn_speed_factor
+            at_junction = ego_wp is not None and ego_wp.is_junction
 
-        # At a junction and actively turning → even slower
-        ego_wp = self.map.get_waypoint(self.vehicle.get_transform().location)
-        if ego_wp is not None and ego_wp.is_junction:
-            if nav_command in (RoadOption.LEFT, RoadOption.RIGHT):
+            if at_junction:
+                # Inside junction — hold turn speed, don't reduce further
                 mode = DrivingMode.TURNING
-                target = min(target, target * cfg.junction_turn_factor)
+                target = min(target, turn_target)
+            else:
+                # Approaching — kinematic ramp to arrive at turn_target
+                mode = DrivingMode.APPROACHING_TURN
+                turn_dist = self._turn_distance
+                if turn_dist is not None and turn_dist > 0:
+                    # v = sqrt(2·a·d + v_turn²) — arrive at turn_target
+                    v_turn_ms = turn_target / 3.6
+                    d = max(turn_dist, 0.0)
+                    v_ms = math.sqrt(
+                        2.0 * cfg.tl_comfort_decel * d
+                        + v_turn_ms ** 2,
+                    )
+                    target = min(target, v_ms * 3.6)
+                else:
+                    target = min(target, turn_target)
 
         # --- Traffic light ---
         if tl_state is not None and tl_distance is not None:
