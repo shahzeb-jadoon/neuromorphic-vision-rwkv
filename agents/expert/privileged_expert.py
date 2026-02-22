@@ -821,16 +821,23 @@ class PrivilegedExpert:
         ego_loc: "carla.Location",
         cutoff: float,
         half_lane: float,
-    ) -> np.ndarray:
-        """Build a lane corridor polygon that follows the planned route.
+    ) -> Tuple[np.ndarray, List[np.ndarray]]:
+        """Build a lane corridor that follows the planned route.
 
         Instead of projecting a straight rectangle ahead of the ego,
         this samples waypoints from ``_wp_buffer`` up to *cutoff*
         metres and offsets each by ±\ *half_lane* perpendicular to the
-        waypoint's heading.  The result is a closed convex-hull-like
-        polygon that hugs the actual road geometry through curves.
+        waypoint's heading.
 
-        Falls back to a straight rectangle when no route waypoints
+        Returns ``(polygon, segments)``:
+
+        * **polygon** — full corridor outline for debug drawing.
+        * **segments** — list of convex quadrilaterals (one per
+          consecutive waypoint pair).  SAT overlap must be tested
+          per-segment because the full polygon is non-convex on
+          curved roads.
+
+        Falls back to a single rectangle when no route waypoints
         are available.
         """
         # Collect centre-line samples from the route
@@ -857,22 +864,34 @@ class PrivilegedExpert:
             fwd = transform.get_forward_vector()
             fwd_2d = np.array([fwd.x, fwd.y])
             right_2d = np.array([-fwd_2d[1], fwd_2d[0]])
-            return np.array([
+            rect = np.array([
                 ego_xy - right_2d * half_lane,
                 ego_xy + right_2d * half_lane,
                 ego_xy + fwd_2d * cutoff + right_2d * half_lane,
                 ego_xy + fwd_2d * cutoff - right_2d * half_lane,
             ])
+            return rect, [rect]
 
-        # Build corridor: left boundary forward, right boundary backward
-        left_boundary: list[np.ndarray] = [ego_xy - samples[0][1] * half_lane]
-        right_boundary: list[np.ndarray] = [ego_xy + samples[0][1] * half_lane]
+        # Build corridor as individual convex quad segments + full polygon
+        prev_l = ego_xy - samples[0][1] * half_lane
+        prev_r = ego_xy + samples[0][1] * half_lane
+        left_boundary: list[np.ndarray] = [prev_l]
+        right_boundary: list[np.ndarray] = [prev_r]
+        segments: list[np.ndarray] = []
+
         for centre, right_2d in samples:
-            left_boundary.append(centre - right_2d * half_lane)
-            right_boundary.append(centre + right_2d * half_lane)
-        # Close the polygon: left going forward, then right reversed
+            cur_l = centre - right_2d * half_lane
+            cur_r = centre + right_2d * half_lane
+            # Each segment is a thin convex quadrilateral — SAT-safe
+            segments.append(np.array([prev_l, prev_r, cur_r, cur_l]))
+            left_boundary.append(cur_l)
+            right_boundary.append(cur_r)
+            prev_l = cur_l
+            prev_r = cur_r
+
+        # Full polygon for debug visualisation only
         polygon = np.array(left_boundary + right_boundary[::-1])
-        return polygon
+        return polygon, segments
 
     def _detect_vehicles(
         self, transform: "carla.Transform",
@@ -904,8 +923,10 @@ class PrivilegedExpert:
         # Build a curve-aware lane corridor by sampling waypoints
         # along the planned route.  This follows the actual path
         # through turns instead of projecting a straight rectangle.
-        corridor = self._build_route_corridor(ego_loc, cutoff, half_lane)
-        self._corridor = corridor  # expose for debug drawing
+        corridor_poly, corridor_segs = self._build_route_corridor(
+            ego_loc, cutoff, half_lane,
+        )
+        self._corridor = corridor_poly  # expose for debug drawing
 
         nearby: list[dict[str, Any]] = []
         for v in self.world.get_actors().filter("*vehicle*"):
@@ -939,9 +960,14 @@ class PrivilegedExpert:
             v_half_len = v.bounding_box.extent.x
             bumper_gap = max(center_dist - ego_half_len - v_half_len, 0.0)
 
-            # OBB overlap check via SAT
+            # OBB overlap check via SAT — test each convex corridor
+            # segment individually (the full polygon is non-convex on
+            # curved roads, which breaks SAT).
             v_corners = self._get_actor_obb_2d(v)
-            obb_in_lane = self._sat_overlap(corridor, v_corners)
+            obb_in_lane = any(
+                self._sat_overlap(seg, v_corners)
+                for seg in corridor_segs
+            )
 
             nearby.append({
                 "distance": round(bumper_gap, 2),
