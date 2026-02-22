@@ -89,7 +89,7 @@ class ExpertConfig:
     # --- Waypoint following ---
     min_follow_distance: float = 3.0  # metres — pop threshold
     target_follow_distance: float = 5.0  # metres — desired look-ahead
-    turn_follow_distance: float = 3.0  # metres — shorter look-ahead in turns
+    turn_follow_distance: float = 2.0  # metres — shorter look-ahead in turns
     max_follow_distance: float = 20.0  # metres — upper bound
     waypoint_buffer_size: int = 40
 
@@ -100,7 +100,8 @@ class ExpertConfig:
     vehicle_hazard_distance: float = 25.0  # metres — start slowing (min)
     vehicle_emergency_distance: float = 5.0  # metres — emergency (min)
     vehicle_reaction_time: float = 2.0  # seconds — scale hazard dist with speed
-    vehicle_emergency_time: float = 0.8  # seconds — scale emergency with speed
+    vehicle_emergency_time: float = 1.2  # seconds — scale emergency with speed
+    vehicle_comfort_decel: float = 3.0  # m/s² — comfortable braking for following
     pedestrian_hazard_distance: float = 15.0
     pedestrian_emergency_distance: float = 5.0
     lane_half_width: float = 2.5  # metres — lateral check for "in-lane"
@@ -534,8 +535,13 @@ class PrivilegedExpert:
                 target = 0.0
             elif lead_dist < dyn_hazard:
                 mode = DrivingMode.VEHICLE_FOLLOWING
-                ratio = lead_dist / dyn_hazard
-                target = min(target, target * ratio)
+                # Kinematic braking profile: v = sqrt(2 * a * d)
+                # Same physics-based curve used for traffic-light stops.
+                # Produces smooth, progressive braking that matches how
+                # a professional driver modulates brake pressure.
+                d = max(lead_dist - dyn_emergency, 0.0)
+                v_ms = math.sqrt(2.0 * cfg.vehicle_comfort_decel * d)
+                target = min(target, v_ms * 3.6)  # m/s → km/h
 
         # --- Pedestrians ---
         if ped_dist is not None:
