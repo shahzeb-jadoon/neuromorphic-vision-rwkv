@@ -97,6 +97,7 @@ class ExpertConfig:
     traffic_light_brake_distance: float = 35.0  # metres — start braking
     traffic_light_stop_distance: float = 4.0  # metres — full stop
     tl_comfort_decel: float = 3.0  # m/s² — comfortable deceleration for TL
+    turn_comfort_decel: float = 1.5  # m/s² — gentler braking for turn approach
     vehicle_hazard_distance: float = 25.0  # metres — start slowing (min)
     vehicle_emergency_distance: float = 5.0  # metres — emergency (min)
     vehicle_reaction_time: float = 2.0  # seconds — scale hazard dist with speed
@@ -521,10 +522,12 @@ class PrivilegedExpert:
                 turn_dist = self._turn_distance
                 if turn_dist is not None and turn_dist > 0:
                     # v = sqrt(2·a·d + v_turn²) — arrive at turn_target
+                    # Uses turn_comfort_decel (gentler than TL) so braking
+                    # starts earlier and produces a smooth ramp.
                     v_turn_ms = turn_target / 3.6
                     d = max(turn_dist, 0.0)
                     v_ms = math.sqrt(
-                        2.0 * cfg.tl_comfort_decel * d
+                        2.0 * cfg.turn_comfort_decel * d
                         + v_turn_ms ** 2,
                     )
                     target = min(target, v_ms * 3.6)
