@@ -693,8 +693,9 @@ class PrivilegedExpert:
         if self.vehicle.is_at_traffic_light():
             tl = self.vehicle.get_traffic_light()
             if tl is not None:
-                if tl.state != carla.TrafficLightState.Green:
-                    self._tl_waiting = tl.id  # remember it
+                if tl.state == carla.TrafficLightState.Green:
+                    return None, None  # green → no action needed
+                self._tl_waiting = tl.id  # remember red/yellow
                 stop_dist = self._stop_line_distance(tl, transform)
                 dist = (stop_dist if stop_dist is not None
                         else ego_loc.distance(tl.get_transform().location))
