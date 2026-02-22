@@ -30,12 +30,12 @@ expert:
   max_speed: 50.0
   # PID tuning
   speed_pid: [0.8, 0.05, 0.01]
-  steer_pid: [1.2, 0.0, 0.15]
+  steer_pid: [1.2, 0.05, 0.15]
   # Safety
-  traffic_light_brake_distance: 20.0
-  vehicle_hazard_distance: 20.0
+  traffic_light_brake_distance: 35.0
+  vehicle_hazard_distance: 25.0
   pedestrian_hazard_distance: 15.0
-  turn_speed_factor: 0.55
+  turn_speed_factor: 0.45
 
 # Towns for data collection (Town02 reserved for evaluation)
 towns:
@@ -77,7 +77,7 @@ routes:
 episode:
   max_frames: 2000             # ~100 seconds at 20 FPS
   timeout_speed: 0.1           # m/s — below this for timeout_duration → discard
-  timeout_duration: 180        # seconds stuck before timeout
+  timeout_duration: 30         # seconds stuck before timeout
   crash_retries: 3             # CARLA reconnection attempts
   crash_wait: 30               # seconds to wait between retries
 
