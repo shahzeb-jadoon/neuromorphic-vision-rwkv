@@ -751,6 +751,7 @@ class ExpertDataCollector:
                 if collision_detected[0] and collision_frame is None:
                     collision_frame = frame_idx
                     logger.warning("Collision detected at frame %d", frame_idx)
+                    break  # Stop collecting — post-collision data is unusable
 
                 # --- Timeout (stuck) check ---
                 speed_ms = math.sqrt(
