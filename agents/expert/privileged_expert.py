@@ -260,6 +260,12 @@ class PrivilegedExpert:
         # Smoothed curvature estimate (EMA)
         self._smoothed_curvature: float = 0.0
 
+        # Corridor polygon for debug drawing (set each tick)
+        self._corridor: np.ndarray | None = None
+
+        # Distance to the upcoming turn waypoint (set by _get_target)
+        self._turn_distance: float | None = None
+
     # ------------------------------------------------------------------
     # Route management
     # ------------------------------------------------------------------
@@ -781,6 +787,66 @@ class PrivilegedExpert:
             pass
         return None
 
+    # --- Curve-aware corridor -------------------------------------------
+
+    def _build_route_corridor(
+        self,
+        ego_loc: "carla.Location",
+        cutoff: float,
+        half_lane: float,
+    ) -> np.ndarray:
+        """Build a lane corridor polygon that follows the planned route.
+
+        Instead of projecting a straight rectangle ahead of the ego,
+        this samples waypoints from ``_wp_buffer`` up to *cutoff*
+        metres and offsets each by ±\ *half_lane* perpendicular to the
+        waypoint's heading.  The result is a closed convex-hull-like
+        polygon that hugs the actual road geometry through curves.
+
+        Falls back to a straight rectangle when no route waypoints
+        are available.
+        """
+        # Collect centre-line samples from the route
+        samples: list[tuple[np.ndarray, np.ndarray]] = []
+        ego_xy = np.array([ego_loc.x, ego_loc.y])
+
+        for wp, _cmd in self._wp_buffer:
+            wloc = wp.transform.location
+            if ego_loc.distance(wloc) > cutoff:
+                break
+            wp_fwd = wp.transform.get_forward_vector()
+            fwd_2d = np.array([wp_fwd.x, wp_fwd.y])
+            norm = np.linalg.norm(fwd_2d)
+            if norm < 1e-6:
+                continue
+            fwd_2d /= norm
+            right_2d = np.array([-fwd_2d[1], fwd_2d[0]])
+            centre = np.array([wloc.x, wloc.y])
+            samples.append((centre, right_2d))
+
+        if not samples:
+            # Fallback: straight rectangle using ego heading
+            transform = self.vehicle.get_transform()
+            fwd = transform.get_forward_vector()
+            fwd_2d = np.array([fwd.x, fwd.y])
+            right_2d = np.array([-fwd_2d[1], fwd_2d[0]])
+            return np.array([
+                ego_xy - right_2d * half_lane,
+                ego_xy + right_2d * half_lane,
+                ego_xy + fwd_2d * cutoff + right_2d * half_lane,
+                ego_xy + fwd_2d * cutoff - right_2d * half_lane,
+            ])
+
+        # Build corridor: left boundary forward, right boundary backward
+        left_boundary: list[np.ndarray] = [ego_xy - samples[0][1] * half_lane]
+        right_boundary: list[np.ndarray] = [ego_xy + samples[0][1] * half_lane]
+        for centre, right_2d in samples:
+            left_boundary.append(centre - right_2d * half_lane)
+            right_boundary.append(centre + right_2d * half_lane)
+        # Close the polygon: left going forward, then right reversed
+        polygon = np.array(left_boundary + right_boundary[::-1])
+        return polygon
+
     def _detect_vehicles(
         self, transform: "carla.Transform",
     ) -> List[Dict[str, Any]]:
@@ -808,16 +874,11 @@ class PrivilegedExpert:
         ego_bb_center = transform.transform(self.vehicle.bounding_box.location)
         ego_half_len = self.vehicle.bounding_box.extent.x
 
-        # Build ego lane corridor polygon (rectangle ahead of ego)
-        ego_xy = np.array([ego_loc.x, ego_loc.y])
-        fwd_2d = np.array([fwd.x, fwd.y])
-        right_2d = np.array([right.x, right.y])
-        corridor = np.array([
-            ego_xy - right_2d * half_lane,
-            ego_xy + right_2d * half_lane,
-            ego_xy + fwd_2d * cutoff + right_2d * half_lane,
-            ego_xy + fwd_2d * cutoff - right_2d * half_lane,
-        ])
+        # Build a curve-aware lane corridor by sampling waypoints
+        # along the planned route.  This follows the actual path
+        # through turns instead of projecting a straight rectangle.
+        corridor = self._build_route_corridor(ego_loc, cutoff, half_lane)
+        self._corridor = corridor  # expose for debug drawing
 
         nearby: list[dict[str, Any]] = []
         for v in self.world.get_actors().filter("*vehicle*"):
