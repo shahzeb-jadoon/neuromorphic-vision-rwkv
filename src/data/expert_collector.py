@@ -260,13 +260,19 @@ class ExpertDataCollector:
         expert: "PrivilegedExpert",
         vehicle: "carla.Vehicle",
         frame_idx: int,
+        info: Any = None,
     ) -> None:
         """Draw debug markers in the CARLA viewport.
 
-        Renders three layers so you can see:
+        Renders several layers so you can see:
           1. **Planned route** — green dots along the remaining route
           2. **Actual position** — orange breadcrumb at current location
           3. **Upcoming target** — cyan sphere at the expert's steering target
+          4. **Detection corridor** — magenta outline of the curve-aware
+             lane corridor used for vehicle detection
+          5. **Nearby vehicles** — red box for lead (in-lane) vehicles,
+             yellow box for nearby but out-of-lane vehicles
+          6. **HUD** — driving mode, speed, target speed, lead distance
 
         All markers use ``life_time=0.3`` so they refresh each tick without
         accumulating clutter.
@@ -330,10 +336,74 @@ class ExpertDataCollector:
                 life_time=life,
             )
 
-        # 4. Frame counter near vehicle
+        # 4. Detection corridor — magenta polygon outline
+        corridor = getattr(expert, "_corridor", None)
+        if corridor is not None and len(corridor) >= 3:
+            MAGENTA = carla.Color(255, 0, 255)
+            z = ego_loc.z + 0.3
+            n = len(corridor)
+            for i in range(n):
+                p1 = corridor[i]
+                p2 = corridor[(i + 1) % n]
+                debug.draw_line(
+                    carla.Location(float(p1[0]), float(p1[1]), z),
+                    carla.Location(float(p2[0]), float(p2[1]), z),
+                    thickness=0.04,
+                    color=MAGENTA,
+                    life_time=life,
+                )
+
+        # 5. Nearby vehicle bounding boxes
+        #    Red = lead vehicle (in-lane, ahead, same direction)
+        #    Yellow = detected but not in lane / not ahead
+        RED = carla.Color(255, 0, 0)
+        YELLOW = carla.Color(255, 255, 0)
+        if info is not None:
+            for v_info in info.nearby_vehicles:
+                is_lead = v_info["obb_in_lane"] and v_info["is_ahead"] and v_info["same_direction"]
+                color = RED if is_lead else YELLOW
+                # Draw a marker at the vehicle's longitudinal/lateral
+                # offset relative to ego.  We approximate world position
+                # from ego transform + the offset vector.
+                fwd = vehicle.get_transform().get_forward_vector()
+                right = carla.Vector3D(-fwd.y, fwd.x, 0)
+                vx = ego_loc.x + fwd.x * v_info["longitudinal"] + right.x * v_info["lateral"]
+                vy = ego_loc.y + fwd.y * v_info["longitudinal"] + right.y * v_info["lateral"]
+                vz = ego_loc.z + 1.5
+                debug.draw_point(
+                    carla.Location(vx, vy, vz),
+                    size=0.15,
+                    color=color,
+                    life_time=life,
+                )
+                # Distance label
+                debug.draw_string(
+                    carla.Location(vx, vy, vz + 0.5),
+                    f"{v_info['distance']:.0f}m",
+                    draw_shadow=True,
+                    color=color,
+                    life_time=life,
+                )
+
+        # 6. HUD — frame, mode, speed, target speed
+        from agents.expert.privileged_expert import DrivingMode
+
+        mode_name = DrivingMode(info.driving_mode).name if info is not None else "?"
+        spd = info.current_speed if info is not None else 0.0
+        tgt = info.target_speed if info is not None else 0.0
+
+        # Lead vehicle distance from nearby_vehicles
+        lead_str = "--"
+        if info is not None:
+            for v_info in info.nearby_vehicles:
+                if v_info["obb_in_lane"] and v_info["is_ahead"] and v_info["same_direction"]:
+                    lead_str = f"{v_info['distance']:.0f}m"
+                    break
+
+        hud_text = f"F{frame_idx} | {mode_name}\n" f"{spd:.0f}/{tgt:.0f} km/h | lead:{lead_str}"
         debug.draw_string(
             carla.Location(ego_loc.x, ego_loc.y, ego_loc.z + 3.0),
-            f"F{frame_idx}",
+            hud_text,
             draw_shadow=True,
             color=carla.Color(255, 255, 255),
             life_time=life,
@@ -714,7 +784,13 @@ class ExpertDataCollector:
 
                 # --- In-CARLA debug drawing (route + trajectory) ---
                 if config.debug_draw:
-                    self._draw_route_debug(self.world, expert, vehicle, frame_idx)
+                    self._draw_route_debug(
+                        self.world,
+                        expert,
+                        vehicle,
+                        frame_idx,
+                        info,
+                    )
 
                 # --- Capture panoramic image ---
                 panoramic = self._capture_panoramic(cameras, config)
