@@ -24,7 +24,6 @@ from pathlib import Path
 import h5py
 import numpy as np
 
-
 # DrivingMode values (must match privileged_expert.py IntEnum)
 MODE_NAMES = {
     1: "FOLLOW_LANE",
