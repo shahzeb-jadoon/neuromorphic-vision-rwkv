@@ -151,6 +151,11 @@ class TestSaveEpisode:
             "driving_mode": np.zeros(n, dtype=np.int32),
             "nearby_vehicles": [json.dumps([]) for _ in range(n)],
             "nearby_pedestrians": [json.dumps([]) for _ in range(n)],
+            "n_corridor_segments": np.full(n, 10, dtype=np.int32),
+            "wp_buffer_size": np.full(n, 20, dtype=np.int32),
+            "wp_buffer_head_dist": np.full(n, 3.5, dtype=np.float32),
+            "sat_detections": np.zeros(n, dtype=np.int32),
+            "lateral_detections": np.zeros(n, dtype=np.int32),
         }
 
     def test_save_creates_h5_file(

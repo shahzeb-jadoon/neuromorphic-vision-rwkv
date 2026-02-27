@@ -28,6 +28,7 @@ module is vendored from CARLA and retains its original MIT license.
 
 from __future__ import annotations
 
+import logging
 import math
 from collections import deque
 from dataclasses import dataclass, field
@@ -35,6 +36,8 @@ from enum import IntEnum, auto
 from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
+
+logger = logging.getLogger(__name__)
 
 try:
     import carla
@@ -165,6 +168,14 @@ class FrameInfo:
     nearby_vehicles: List[Dict[str, Any]] = field(default_factory=list)
     nearby_pedestrians: List[Dict[str, Any]] = field(default_factory=list)
 
+    # Corridor diagnostics (Option D) — lightweight per-frame metrics
+    # for post-hoc verification that the SAT corridor is healthy.
+    n_corridor_segments: int = 0  # segments built by _build_route_corridor
+    wp_buffer_size: int = 0  # current waypoint buffer length
+    wp_buffer_head_dist: float = -1.0  # distance (m) from ego to buffer[0]
+    sat_detections: int = 0  # vehicles with obb_in_lane=True
+    lateral_detections: int = 0  # vehicles that lateral check would catch
+
 
 # ---------------------------------------------------------------------------
 # PID controller
@@ -174,8 +185,7 @@ class FrameInfo:
 class PIDController:
     """Discrete PID with anti-windup clamping."""
 
-    def __init__(self, kp: float, ki: float, kd: float,
-                 integral_limit: float = 10.0) -> None:
+    def __init__(self, kp: float, ki: float, kd: float, integral_limit: float = 10.0) -> None:
         self.kp = kp
         self.ki = ki
         self.kd = kd
@@ -185,8 +195,7 @@ class PIDController:
 
     def step(self, error: float, dt: float = 0.05) -> float:
         """Compute PID output for a single time-step."""
-        self._integral = max(-self._limit,
-                             min(self._limit, self._integral + error * dt))
+        self._integral = max(-self._limit, min(self._limit, self._integral + error * dt))
         derivative = (error - self._prev_error) / max(dt, 1e-6)
         self._prev_error = error
         return self.kp * error + self.ki * self._integral + self.kd * derivative
@@ -264,6 +273,9 @@ class PrivilegedExpert:
         # Corridor polygon for debug drawing (set each tick)
         self._corridor: np.ndarray | None = None
 
+        # Number of corridor segments built (for diagnostics)
+        self._n_corridor_segments: int = 0
+
         # Distance to the upcoming turn waypoint (set by _get_target)
         self._turn_distance: float | None = None
 
@@ -271,9 +283,7 @@ class PrivilegedExpert:
     # Route management
     # ------------------------------------------------------------------
 
-    def set_route(
-        self, route: List[Tuple["carla.Waypoint", RoadOption]]
-    ) -> None:
+    def set_route(self, route: List[Tuple["carla.Waypoint", RoadOption]]) -> None:
         """Load a pre-computed route (list of (waypoint, RoadOption))."""
         self._route = list(route)
         self._route_length = len(route)
@@ -285,9 +295,7 @@ class PrivilegedExpert:
         self.mode = DrivingMode.FOLLOW_LANE
         self._tl_waiting = None
 
-    def set_destination(
-        self, start: "carla.Location", end: "carla.Location"
-    ) -> None:
+    def set_destination(self, start: "carla.Location", end: "carla.Location") -> None:
         """Plan and load a route from *start* to *end*."""
         route = self.route_planner.trace_route(start, end)
         self.set_route(route)
@@ -296,8 +304,7 @@ class PrivilegedExpert:
         """``True`` when the route has been consumed."""
         if not self._route:
             return True
-        return (self._route_index >= self._route_length
-                and len(self._wp_buffer) <= 1)
+        return self._route_index >= self._route_length and len(self._wp_buffer) <= 1
 
     @property
     def route_completion(self) -> float:
@@ -323,7 +330,7 @@ class PrivilegedExpert:
         # --- 1.  Ego state ---
         transform = self.vehicle.get_transform()
         velocity = self.vehicle.get_velocity()
-        speed_ms = math.sqrt(velocity.x ** 2 + velocity.y ** 2 + velocity.z ** 2)
+        speed_ms = math.sqrt(velocity.x**2 + velocity.y**2 + velocity.z**2)
         speed_kmh = speed_ms * 3.6
 
         # Dynamic speed limit from road signs (falls back to config)
@@ -335,7 +342,7 @@ class PrivilegedExpert:
             base_target = cfg.target_speed
 
         # --- 2.  Route progress ---
-        self._advance_route(transform.location)
+        self._advance_route(transform)
         target_wp, nav_command = self._get_target(transform)
 
         # --- 3.  Privileged perception ---
@@ -347,8 +354,13 @@ class PrivilegedExpert:
 
         # --- 4.  Target speed & driving mode ---
         target_speed, mode = self._plan_speed(
-            speed_kmh, nav_command, tl_state, tl_distance,
-            lead_dist, ped_dist, base_target,
+            speed_kmh,
+            nav_command,
+            tl_state,
+            tl_distance,
+            lead_dist,
+            ped_dist,
+            base_target,
         )
         self.mode = mode
         self._apply_gain_blending()
@@ -366,24 +378,45 @@ class PrivilegedExpert:
         )
 
         # --- 6.  Privileged info ---
+        # Corridor diagnostics (Option D)
+        n_segs = len(self._corridor) if isinstance(self._corridor, list) else 0
+        # _corridor is the polygon (np.ndarray), segments are not stored
+        # separately — count via the corridor builder's output.  We
+        # re-derive n_segs from the number of vehicles that passed SAT.
+        # Actually, count from the corridor_segs stored on the instance.
+        buf_len = len(self._wp_buffer)
+        buf_head_dist = -1.0
+        if self._wp_buffer:
+            wp0_loc = self._wp_buffer[0][0].transform.location
+            buf_head_dist = transform.location.distance(wp0_loc)
+
+        sat_hits = sum(1 for v in nearby_vehicles if v.get("obb_in_lane", False))
+        lat_hits = sum(
+            1
+            for v in nearby_vehicles
+            if v["is_ahead"]
+            and v.get("same_direction", True)
+            and abs(v["lateral"]) < cfg.lane_half_width
+        )
+
         info = FrameInfo(
             nav_command=int(nav_command),
             route_completion=self.route_completion,
             target_speed=target_speed,
             current_speed=speed_kmh,
             driving_mode=int(mode),
-            position=(transform.location.x,
-                      transform.location.y,
-                      transform.location.z),
-            rotation=(transform.rotation.pitch,
-                      transform.rotation.yaw,
-                      transform.rotation.roll),
+            position=(transform.location.x, transform.location.y, transform.location.z),
+            rotation=(transform.rotation.pitch, transform.rotation.yaw, transform.rotation.roll),
             velocity=(velocity.x, velocity.y, velocity.z),
             traffic_light_state=self._encode_tl(tl_state),
-            traffic_light_distance=(tl_distance if tl_distance is not None
-                                    else -1.0),
+            traffic_light_distance=(tl_distance if tl_distance is not None else -1.0),
             nearby_vehicles=nearby_vehicles,
             nearby_pedestrians=nearby_pedestrians,
+            n_corridor_segments=self._n_corridor_segments,
+            wp_buffer_size=buf_len,
+            wp_buffer_head_dist=round(buf_head_dist, 2),
+            sat_detections=sat_hits,
+            lateral_detections=lat_hits,
         )
 
         return control, info
@@ -394,23 +427,35 @@ class PrivilegedExpert:
 
     def _fill_buffer(self) -> None:
         """Refill the waypoint look-ahead buffer from the route."""
-        while (len(self._wp_buffer) < self._wp_buffer.maxlen
-               and self._route_index < self._route_length):
+        while (
+            len(self._wp_buffer) < self._wp_buffer.maxlen and self._route_index < self._route_length
+        ):
             self._wp_buffer.append(self._route[self._route_index])
             self._route_index += 1
 
-    def _advance_route(self, location: "carla.Location") -> None:
-        """Pop consumed waypoints (closer than *min_follow_distance*)."""
+    def _advance_route(self, transform: "carla.Transform") -> None:
+        """Pop consumed waypoints (closer than *min_follow_distance* or behind ego)."""
+        location = transform.location
+        fwd = transform.get_forward_vector()
+
         while len(self._wp_buffer) > 1:
             wp, _ = self._wp_buffer[0]
-            if location.distance(wp.transform.location) < self.config.min_follow_distance:
+            wp_loc = wp.transform.location
+            dist = location.distance(wp_loc)
+
+            dx = wp_loc.x - location.x
+            dy = wp_loc.y - location.y
+            is_behind = (fwd.x * dx + fwd.y * dy) < 0
+
+            if dist < self.config.min_follow_distance or is_behind:
                 self._wp_buffer.popleft()
             else:
                 break
         self._fill_buffer()
 
     def _get_target(
-        self, transform: "carla.Transform",
+        self,
+        transform: "carla.Transform",
     ) -> Tuple["carla.Waypoint", RoadOption]:
         """Return the target waypoint and the current nav command.
 
@@ -430,8 +475,12 @@ class PrivilegedExpert:
         nav_command = RoadOption.LANEFOLLOW
         self._turn_distance = None
         for wp, cmd in self._wp_buffer:
-            if cmd in (RoadOption.LANEFOLLOW, RoadOption.VOID,
-                       RoadOption.CHANGELANELEFT, RoadOption.CHANGELANERIGHT):
+            if cmd in (
+                RoadOption.LANEFOLLOW,
+                RoadOption.VOID,
+                RoadOption.CHANGELANELEFT,
+                RoadOption.CHANGELANERIGHT,
+            ):
                 continue
             dist = ego_loc.distance(wp.transform.location)
             if dist < self.config.turn_anticipation_distance:
@@ -527,8 +576,7 @@ class PrivilegedExpert:
                     v_turn_ms = turn_target / 3.6
                     d = max(turn_dist, 0.0)
                     v_ms = math.sqrt(
-                        2.0 * cfg.turn_comfort_decel * d
-                        + v_turn_ms ** 2,
+                        2.0 * cfg.turn_comfort_decel * d + v_turn_ms**2,
                     )
                     target = min(target, v_ms * 3.6)
                 else:
@@ -536,8 +584,7 @@ class PrivilegedExpert:
 
         # --- Traffic light ---
         if tl_state is not None and tl_distance is not None:
-            if tl_state in (carla.TrafficLightState.Red,
-                            carla.TrafficLightState.Yellow):
+            if tl_state in (carla.TrafficLightState.Red, carla.TrafficLightState.Yellow):
                 if 0 < tl_distance < cfg.traffic_light_brake_distance:
                     mode = DrivingMode.TRAFFIC_LIGHT_STOP
                     if tl_distance < cfg.traffic_light_stop_distance:
@@ -635,7 +682,9 @@ class PrivilegedExpert:
         self.speed_pid.kd = _lerp(cfg.speed_kd, cfg.turn_speed_kd)
 
     def _lateral_control(
-        self, transform: "carla.Transform", target_wp: "carla.Waypoint",
+        self,
+        transform: "carla.Transform",
+        target_wp: "carla.Waypoint",
     ) -> float:
         """PID steering on the signed heading error to the target waypoint."""
         ego = transform.location
@@ -652,7 +701,10 @@ class PrivilegedExpert:
         return self.steer_pid.step(error / 90.0)
 
     def _longitudinal_control(
-        self, speed_kmh: float, target_speed: float, dt: float,
+        self,
+        speed_kmh: float,
+        target_speed: float,
+        dt: float,
     ) -> Tuple[float, float]:
         """PID throttle / brake on the speed error."""
         error = (target_speed - speed_kmh) / max(self.config.target_speed, 10.0)
@@ -686,7 +738,8 @@ class PrivilegedExpert:
     # ------------------------------------------------------------------
 
     def _check_traffic_light(
-        self, transform: "carla.Transform",
+        self,
+        transform: "carla.Transform",
     ) -> Tuple[Any, float | None]:
         """Return (state, distance-to-stop-line) of the relevant TL.
 
@@ -708,15 +761,32 @@ class PrivilegedExpert:
                 carla.TrafficLightState.Red,
                 carla.TrafficLightState.Yellow,
             ):
-                dist = ego_loc.distance(tl_actor.get_transform().location)
-                # Use stop-line distance if available
-                stop_dist = self._stop_line_distance(
-                    tl_actor, transform,
-                )
-                return tl_actor.state, (stop_dist if stop_dist is not None
-                                        else dist)
-            # Light turned green (or was destroyed) — clear memory.
-            self._tl_waiting = None
+                tl_loc = tl_actor.get_transform().location
+                dist = ego_loc.distance(tl_loc)
+
+                # Clear stale memory if:
+                #   (a) we drove far past the light (distance cutoff), OR
+                #   (b) the light is behind us (dot-product with forward).
+                # The behind-ego check clears within 1–2 frames of
+                # passing, avoiding the 100+ frame stale blocks that
+                # pollute traffic_light_state in the HDF5 data.
+                fwd = transform.get_forward_vector()
+                dx = tl_loc.x - ego_loc.x
+                dy = tl_loc.y - ego_loc.y
+                tl_behind = (fwd.x * dx + fwd.y * dy) < 0
+
+                if dist > self.config.traffic_light_brake_distance * 1.5 or tl_behind:
+                    self._tl_waiting = None
+                else:
+                    # Use stop-line distance if available
+                    stop_dist = self._stop_line_distance(
+                        tl_actor,
+                        transform,
+                    )
+                    return tl_actor.state, (stop_dist if stop_dist is not None else dist)
+            else:
+                # Light turned green or was destroyed — clear memory.
+                self._tl_waiting = None
 
         # ---- Tier 2: CARLA built-in (close range) ----
         if self.vehicle.is_at_traffic_light():
@@ -726,8 +796,11 @@ class PrivilegedExpert:
                     return None, None  # green → no action needed
                 self._tl_waiting = tl.id  # remember red/yellow
                 stop_dist = self._stop_line_distance(tl, transform)
-                dist = (stop_dist if stop_dist is not None
-                        else ego_loc.distance(tl.get_transform().location))
+                dist = (
+                    stop_dist
+                    if stop_dist is not None
+                    else ego_loc.distance(tl.get_transform().location)
+                )
                 return tl.state, dist
 
         # ---- Tier 3: junction-aware scan ----
@@ -762,10 +835,15 @@ class PrivilegedExpert:
             # ---- Lane matching via affected waypoints ----
             affects_us = False
             stop_dist: float | None = None
+
+            # Predict upcoming road ID via buffer to detect TL early
+            upcoming_road_id = self._wp_buffer[0][0].road_id if self._wp_buffer else ego_wp.road_id
+
             try:
                 for awp in tl.get_affected_lane_waypoints():
-                    if (awp.road_id == ego_wp.road_id
-                            and awp.lane_id == ego_wp.lane_id):
+                    if awp.lane_id == ego_wp.lane_id and (
+                        awp.road_id == ego_wp.road_id or awp.road_id == upcoming_road_id
+                    ):
                         affects_us = True
                         stop_dist = ego_loc.distance(
                             awp.transform.location,
@@ -774,7 +852,9 @@ class PrivilegedExpert:
             except (AttributeError, RuntimeError):
                 # Fallback for older CARLA builds.
                 tl_wp = self.map.get_waypoint(tl_loc)
-                if tl_wp is not None and tl_wp.road_id == ego_wp.road_id:
+                if tl_wp is not None and (
+                    tl_wp.road_id == ego_wp.road_id or tl_wp.road_id == upcoming_road_id
+                ):
                     affects_us = True
 
             if not affects_us:
@@ -808,8 +888,7 @@ class PrivilegedExpert:
         try:
             ego_wp = self.map.get_waypoint(transform.location)
             for awp in tl.get_affected_lane_waypoints():
-                if (awp.road_id == ego_wp.road_id
-                        and awp.lane_id == ego_wp.lane_id):
+                if awp.road_id == ego_wp.road_id and awp.lane_id == ego_wp.lane_id:
                     return transform.location.distance(
                         awp.transform.location,
                     )
@@ -867,37 +946,61 @@ class PrivilegedExpert:
             fwd = transform.get_forward_vector()
             fwd_2d = np.array([fwd.x, fwd.y])
             right_2d = np.array([-fwd_2d[1], fwd_2d[0]])
-            rect = np.array([
-                ego_xy - right_2d * half_lane,
-                ego_xy + right_2d * half_lane,
-                ego_xy + fwd_2d * cutoff + right_2d * half_lane,
-                ego_xy + fwd_2d * cutoff - right_2d * half_lane,
-            ])
+            rect = np.array(
+                [
+                    ego_xy - right_2d * half_lane,
+                    ego_xy + right_2d * half_lane,
+                    ego_xy + fwd_2d * cutoff + right_2d * half_lane,
+                    ego_xy + fwd_2d * cutoff - right_2d * half_lane,
+                ]
+            )
             return rect, [rect]
 
-        # Build corridor as individual convex quad segments + full polygon
-        prev_l = ego_xy - samples[0][1] * half_lane
-        prev_r = ego_xy + samples[0][1] * half_lane
-        left_boundary: list[np.ndarray] = [prev_l]
-        right_boundary: list[np.ndarray] = [prev_r]
+        # Build corridor as individual convex quad segments + full polygon.
+        # Each segment is a perfect rectangle aligned to the vector
+        # connecting consecutive centre-line samples.  This guarantees
+        # convexity even on very tight inner turns where per-waypoint
+        # normal offsets would create self-intersecting "bowtie" quads.
+        prev_center = ego_xy
+        left_boundary: list[np.ndarray] = []
+        right_boundary: list[np.ndarray] = []
         segments: list[np.ndarray] = []
 
-        for centre, right_2d in samples:
-            cur_l = centre - right_2d * half_lane
-            cur_r = centre + right_2d * half_lane
-            # Each segment is a thin convex quadrilateral — SAT-safe
+        for centre, _right_2d in samples:
+            seg_vec = centre - prev_center
+            seg_len = np.linalg.norm(seg_vec)
+            if seg_len < 1e-6:
+                continue
+            seg_dir = seg_vec / seg_len
+            seg_right = np.array([-seg_dir[1], seg_dir[0]])
+
+            prev_l = prev_center - seg_right * half_lane
+            prev_r = prev_center + seg_right * half_lane
+            cur_l = centre - seg_right * half_lane
+            cur_r = centre + seg_right * half_lane
+
+            # Perfectly convex rectangle aligned to segment direction
             segments.append(np.array([prev_l, prev_r, cur_r, cur_l]))
-            left_boundary.append(cur_l)
-            right_boundary.append(cur_r)
-            prev_l = cur_l
-            prev_r = cur_r
+            left_boundary.append(prev_l)
+            right_boundary.append(prev_r)
+            prev_center = centre
+
+        # Close out the last segment's far edge for the debug polygon
+        if segments:
+            last_seg = segments[-1]
+            left_boundary.append(last_seg[3])  # cur_l
+            right_boundary.append(last_seg[2])  # cur_r
 
         # Full polygon for debug visualisation only
-        polygon = np.array(left_boundary + right_boundary[::-1])
+        if left_boundary:
+            polygon = np.array(left_boundary + right_boundary[::-1])
+        else:
+            polygon = np.array([ego_xy])
         return polygon, segments
 
     def _detect_vehicles(
-        self, transform: "carla.Transform",
+        self,
+        transform: "carla.Transform",
     ) -> List[Dict[str, Any]]:
         """Return up to 10 nearest vehicles with privileged info.
 
@@ -927,9 +1030,12 @@ class PrivilegedExpert:
         # along the planned route.  This follows the actual path
         # through turns instead of projecting a straight rectangle.
         corridor_poly, corridor_segs = self._build_route_corridor(
-            ego_loc, cutoff, half_lane,
+            ego_loc,
+            cutoff,
+            half_lane,
         )
         self._corridor = corridor_poly  # expose for debug drawing
+        self._n_corridor_segments = len(corridor_segs)  # diagnostic
 
         nearby: list[dict[str, Any]] = []
         for v in self.world.get_actors().filter("*vehicle*"):
@@ -953,9 +1059,12 @@ class PrivilegedExpert:
             lateral = right.x * dx + right.y * dy  # positive = right
 
             v_vel = v.get_velocity()
-            v_speed = math.sqrt(v_vel.x ** 2 + v_vel.y ** 2 + v_vel.z ** 2) * 3.6
+            v_speed = math.sqrt(v_vel.x**2 + v_vel.y**2 + v_vel.z**2) * 3.6
 
-            # Heading similarity: positive = same direction
+            # Heading similarity — tolerate up to ~120° of heading
+            # difference so that vehicles completing a turn ahead of
+            # the ego are not falsely classified as oncoming traffic.
+            # True oncoming vehicles (opposite lane) have dot ≈ -1.0.
             v_fwd = v_transform.get_forward_vector()
             heading_dot = fwd.x * v_fwd.x + fwd.y * v_fwd.y
 
@@ -967,21 +1076,40 @@ class PrivilegedExpert:
             # segment individually (the full polygon is non-convex on
             # curved roads, which breaks SAT).
             v_corners = self._get_actor_obb_2d(v)
-            obb_in_lane = any(
-                self._sat_overlap(seg, v_corners)
-                for seg in corridor_segs
-            )
+            obb_in_lane = any(self._sat_overlap(seg, v_corners) for seg in corridor_segs)
 
-            nearby.append({
-                "distance": round(bumper_gap, 2),
-                "center_distance": round(center_dist, 2),
-                "longitudinal": round(longitudinal, 2),
-                "lateral": round(lateral, 2),
-                "speed_kmh": round(v_speed, 1),
-                "is_ahead": longitudinal > 0,
-                "same_direction": heading_dot > 0,
-                "obb_in_lane": obb_in_lane,
-            })
+            # Diagnostic: warn if SAT misses a vehicle that the
+            # lateral-distance heuristic would catch.
+            if (
+                not obb_in_lane
+                and longitudinal > 0
+                and heading_dot > 0
+                and abs(lateral) < half_lane
+                and bumper_gap < self.config.vehicle_hazard_distance
+            ):
+                logger.debug(
+                    "SAT miss: bumper=%.1fm long=%.1fm lat=%.1fm " "segs=%d obb=%s ego=(%.1f,%.1f)",
+                    bumper_gap,
+                    longitudinal,
+                    lateral,
+                    len(corridor_segs),
+                    v_corners.tolist(),
+                    ego_loc.x,
+                    ego_loc.y,
+                )
+
+            nearby.append(
+                {
+                    "distance": round(bumper_gap, 2),
+                    "center_distance": round(center_dist, 2),
+                    "longitudinal": round(longitudinal, 2),
+                    "lateral": round(lateral, 2),
+                    "speed_kmh": round(v_speed, 1),
+                    "is_ahead": longitudinal > 0,
+                    "same_direction": heading_dot > -0.5,
+                    "obb_in_lane": obb_in_lane,
+                }
+            )
 
         nearby.sort(key=lambda x: x["distance"])
         return nearby[:10]
@@ -995,22 +1123,25 @@ class PrivilegedExpert:
         Uses ``actor.bounding_box`` (half-extents in local frame) and
         the actor's world transform to produce a (4, 2) float array
         of world-space 2-D corner coordinates.
+
+        The corner offsets are relative to ``bounding_box.location``
+        (the centre of the bounding box in actor-local space), **not**
+        the actor origin.  For most CARLA vehicles the actor origin
+        sits at the rear axle, ~1–2 m behind the BB centre.
         """
         bb = actor.bounding_box
         ext = bb.extent  # half-extents (x=length/2, y=width/2)
+        cx, cy, cz = bb.location.x, bb.location.y, bb.location.z
         t = actor.get_transform()
 
-        # 4 corners in local frame (XY plane, Z ignored)
+        # 4 corners in local frame centred on BB location
         local_corners = [
-            carla.Location(x=+ext.x, y=+ext.y, z=0),
-            carla.Location(x=+ext.x, y=-ext.y, z=0),
-            carla.Location(x=-ext.x, y=-ext.y, z=0),
-            carla.Location(x=-ext.x, y=+ext.y, z=0),
+            carla.Location(x=cx + ext.x, y=cy + ext.y, z=cz),
+            carla.Location(x=cx + ext.x, y=cy - ext.y, z=cz),
+            carla.Location(x=cx - ext.x, y=cy - ext.y, z=cz),
+            carla.Location(x=cx - ext.x, y=cy + ext.y, z=cz),
         ]
-        world_corners = np.array([
-            [t.transform(c).x, t.transform(c).y]
-            for c in local_corners
-        ])
+        world_corners = np.array([[t.transform(c).x, t.transform(c).y] for c in local_corners])
         return world_corners
 
     @staticmethod
@@ -1020,6 +1151,7 @@ class PrivilegedExpert:
         Each polygon is a (N, 2) array of vertices in CCW or CW order.
         Returns ``True`` if the polygons overlap.
         """
+
         def _project(vertices: np.ndarray, axis: np.ndarray):
             dots = vertices @ axis
             return dots.min(), dots.max()
@@ -1043,7 +1175,8 @@ class PrivilegedExpert:
         return True
 
     def _detect_pedestrians(
-        self, transform: "carla.Transform",
+        self,
+        transform: "carla.Transform",
     ) -> List[Dict[str, Any]]:
         """Return up to 5 nearest pedestrians with privileged info.
 
@@ -1068,24 +1201,31 @@ class PrivilegedExpert:
             longitudinal = fwd.x * dx + fwd.y * dy
             lateral = right.x * dx + right.y * dy
 
-            nearby.append({
-                "distance": round(dist, 2),
-                "longitudinal": round(longitudinal, 2),
-                "lateral": round(lateral, 2),
-                "is_ahead": longitudinal > 0,
-            })
+            nearby.append(
+                {
+                    "distance": round(dist, 2),
+                    "longitudinal": round(longitudinal, 2),
+                    "lateral": round(lateral, 2),
+                    "is_ahead": longitudinal > 0,
+                }
+            )
 
         nearby.sort(key=lambda x: x["distance"])
         return nearby[:5]
 
     def _lead_vehicle_distance(
-        self, nearby: List[Dict[str, Any]],
+        self,
+        nearby: List[Dict[str, Any]],
     ) -> float | None:
         """Distance to the closest vehicle ahead in our lane.
 
-        Uses the OBB-based ``obb_in_lane`` flag when available (set by
-        ``_detect_vehicles``).  Falls back to centre-point lateral
-        check for backwards compatibility.
+        A vehicle is considered "in lane" if **either** the OBB/SAT
+        corridor overlap test says so, **or** its centre-point lateral
+        offset is within ``lane_half_width``.  Using both checks as a
+        union avoids false negatives from the SAT on road segments
+        where the corridor geometry is unreliable, while the SAT
+        still provides accurate detection on curved roads where the
+        lateral-only heuristic would miss offset vehicles.
 
         Oncoming vehicles (``same_direction == False``) are excluded
         so that head-on traffic on narrow roads or during turns does
@@ -1097,15 +1237,17 @@ class PrivilegedExpert:
             # Skip oncoming traffic
             if not v.get("same_direction", True):
                 continue
-            # Prefer OBB overlap flag if present
-            in_lane = v.get("obb_in_lane",
-                            abs(v["lateral"]) < self.config.lane_half_width)
-            if in_lane:
+            # Union of SAT overlap and lateral-distance check — either
+            # one is sufficient to flag the vehicle as in-lane.
+            obb_flag = v.get("obb_in_lane", False)
+            lateral_flag = abs(v["lateral"]) < self.config.lane_half_width
+            if obb_flag or lateral_flag:
                 return v["distance"]
         return None
 
     def _closest_pedestrian_distance(
-        self, nearby: List[Dict[str, Any]],
+        self,
+        nearby: List[Dict[str, Any]],
     ) -> float | None:
         """Distance to the closest pedestrian ahead **in our lane corridor**.
 

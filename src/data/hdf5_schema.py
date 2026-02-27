@@ -59,6 +59,16 @@ DRIVING_MODE = "driving_mode"  # (N,)    int32  DrivingMode enum
 NEARBY_VEHICLES = "nearby_vehicles"  # JSON string per frame
 NEARBY_PEDESTRIANS = "nearby_pedestrians"  # JSON string per frame
 
+# --- Corridor diagnostics (new in v3.1) ---
+# Lightweight per-frame metrics for verifying SAT corridor health.
+STATIONARY = "stationary"  # (N,) bool  speed < 0.5 km/h
+
+N_CORRIDOR_SEGMENTS = "n_corridor_segments"  # (N,) int32
+WP_BUFFER_SIZE = "wp_buffer_size"  # (N,) int32
+WP_BUFFER_HEAD_DIST = "wp_buffer_head_dist"  # (N,) float32 metres
+SAT_DETECTIONS = "sat_detections"  # (N,) int32
+LATERAL_DETECTIONS = "lateral_detections"  # (N,) int32
+
 # --- Metadata group and attribute names ---
 METADATA_GROUP = "metadata"
 META_TOWN = "town"

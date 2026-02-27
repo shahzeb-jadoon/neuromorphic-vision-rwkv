@@ -78,7 +78,7 @@ class EpisodeConfig:
     n_walkers: int = 30
     max_frames: int = 2000
     timeout_speed: float = 0.1  # m/s — below this for timeout_duration → discard
-    timeout_duration: float = 30.0  # seconds stuck before early termination
+    timeout_duration: float = 45.0  # seconds stuck before early termination
     fps: int = 20
 
     # 3-camera panoramic setup
@@ -354,14 +354,34 @@ class ExpertDataCollector:
                 )
 
         # 5. Nearby vehicle bounding boxes
-        #    Red = lead vehicle (in-lane, ahead, same direction)
+        #    Red    = lead vehicle (in-lane via SAT, ahead, braking target)
+        #    Orange = in corridor (in-lane via SAT, but not the closest braking target)
         #    Yellow = detected but not in lane / not ahead
         RED = carla.Color(255, 0, 0)
+        V_ORANGE = carla.Color(255, 140, 0)
         YELLOW = carla.Color(255, 255, 0)
+
         if info is not None:
-            for v_info in info.nearby_vehicles:
-                is_lead = v_info["obb_in_lane"] and v_info["is_ahead"] and v_info["same_direction"]
-                color = RED if is_lead else YELLOW
+            # Find closest vehicle in SAT corridor
+            closest_in_lane_idx = -1
+            for i, v_info in enumerate(info.nearby_vehicles):
+                obb_flag = v_info.get("obb_in_lane", False)
+                is_ahead_same = v_info.get("is_ahead", False) and v_info.get("same_direction", True)
+                if is_ahead_same and obb_flag:
+                    closest_in_lane_idx = i
+                    break  # already sorted by distance
+
+            for i, v_info in enumerate(info.nearby_vehicles):
+                obb_flag = v_info.get("obb_in_lane", False)
+                is_ahead_same = v_info.get("is_ahead", False) and v_info.get("same_direction", True)
+
+                color = YELLOW
+                if obb_flag:
+                    if is_ahead_same and i == closest_in_lane_idx:
+                        color = RED
+                    else:
+                        color = V_ORANGE
+
                 # Draw a marker at the vehicle's longitudinal/lateral
                 # offset relative to ego.  We approximate world position
                 # from ego transform + the offset vector.
@@ -392,11 +412,14 @@ class ExpertDataCollector:
         spd = info.current_speed if info is not None else 0.0
         tgt = info.target_speed if info is not None else 0.0
 
-        # Lead vehicle distance from nearby_vehicles
+        # Lead vehicle distance from nearby_vehicles (union check)
         lead_str = "--"
+        half_w = expert.config.lane_half_width
         if info is not None:
             for v_info in info.nearby_vehicles:
-                if v_info["obb_in_lane"] and v_info["is_ahead"] and v_info["same_direction"]:
+                is_ahead_same = v_info["is_ahead"] and v_info["same_direction"]
+                in_lane = v_info["obb_in_lane"] or abs(v_info["lateral"]) < half_w
+                if is_ahead_same and in_lane:
                     lead_str = f"{v_info['distance']:.0f}m"
                     break
 
@@ -521,6 +544,12 @@ class ExpertDataCollector:
         driving_mode_buf: list[int] = []
         nearby_vehicles_buf: list[str] = []  # JSON strings
         nearby_pedestrians_buf: list[str] = []  # JSON strings
+        # Corridor diagnostic buffers (Option D)
+        n_corridor_segments_buf: list[int] = []
+        wp_buffer_size_buf: list[int] = []
+        wp_buffer_head_dist_buf: list[float] = []
+        sat_detections_buf: list[int] = []
+        lateral_detections_buf: list[int] = []
         collision_frame: int | None = None
 
         try:
@@ -815,6 +844,12 @@ class ExpertDataCollector:
                 driving_mode_buf.append(info.driving_mode)
                 nearby_vehicles_buf.append(json.dumps(info.nearby_vehicles))
                 nearby_pedestrians_buf.append(json.dumps(info.nearby_pedestrians))
+                # Corridor diagnostics
+                n_corridor_segments_buf.append(info.n_corridor_segments)
+                wp_buffer_size_buf.append(info.wp_buffer_size)
+                wp_buffer_head_dist_buf.append(info.wp_buffer_head_dist)
+                sat_detections_buf.append(info.sat_detections)
+                lateral_detections_buf.append(info.lateral_detections)
 
                 # --- Distance tracking ---
                 cur_loc = vehicle.get_transform().location
@@ -886,6 +921,11 @@ class ExpertDataCollector:
                     driving_mode=np.array(driving_mode_buf, dtype=np.int32),
                     nearby_vehicles=nearby_vehicles_buf,
                     nearby_pedestrians=nearby_pedestrians_buf,
+                    n_corridor_segments=np.array(n_corridor_segments_buf, dtype=np.int32),
+                    wp_buffer_size=np.array(wp_buffer_size_buf, dtype=np.int32),
+                    wp_buffer_head_dist=np.array(wp_buffer_head_dist_buf, dtype=np.float32),
+                    sat_detections=np.array(sat_detections_buf, dtype=np.int32),
+                    lateral_detections=np.array(lateral_detections_buf, dtype=np.int32),
                     config=config,
                     status=status,
                     collision_frame=collision_frame,
@@ -920,6 +960,11 @@ class ExpertDataCollector:
                         driving_mode=np.array(driving_mode_buf, dtype=np.int32),
                         nearby_vehicles=nearby_vehicles_buf,
                         nearby_pedestrians=nearby_pedestrians_buf,
+                        n_corridor_segments=np.array(n_corridor_segments_buf, dtype=np.int32),
+                        wp_buffer_size=np.array(wp_buffer_size_buf, dtype=np.int32),
+                        wp_buffer_head_dist=np.array(wp_buffer_head_dist_buf, dtype=np.float32),
+                        sat_detections=np.array(sat_detections_buf, dtype=np.int32),
+                        lateral_detections=np.array(lateral_detections_buf, dtype=np.int32),
                         config=config,
                         status="crashed",
                         collision_frame=collision_frame,
@@ -1015,6 +1060,11 @@ class ExpertDataCollector:
         driving_mode: np.ndarray,
         nearby_vehicles: list[str],
         nearby_pedestrians: list[str],
+        n_corridor_segments: np.ndarray,
+        wp_buffer_size: np.ndarray,
+        wp_buffer_head_dist: np.ndarray,
+        sat_detections: np.ndarray,
+        lateral_detections: np.ndarray,
         config: EpisodeConfig,
         status: str,
         collision_frame: int | None,
@@ -1069,6 +1119,17 @@ class ExpertDataCollector:
                 data=np.array(nearby_pedestrians, dtype=object),
                 dtype=dt_str,
             )
+
+            # --- Stationary flag (derived from velocity) ---
+            speed_ms = np.sqrt(velocity[:, 0] ** 2 + velocity[:, 1] ** 2 + velocity[:, 2] ** 2)
+            f.create_dataset(S.STATIONARY, data=(speed_ms * 3.6 < 0.5))
+
+            # --- Corridor diagnostics ---
+            f.create_dataset(S.N_CORRIDOR_SEGMENTS, data=n_corridor_segments)
+            f.create_dataset(S.WP_BUFFER_SIZE, data=wp_buffer_size)
+            f.create_dataset(S.WP_BUFFER_HEAD_DIST, data=wp_buffer_head_dist)
+            f.create_dataset(S.SAT_DETECTIONS, data=sat_detections)
+            f.create_dataset(S.LATERAL_DETECTIONS, data=lateral_detections)
 
             # --- Metadata ---
             meta = f.create_group(S.METADATA_GROUP)
