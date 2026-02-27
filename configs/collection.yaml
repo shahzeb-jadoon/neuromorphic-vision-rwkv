@@ -75,9 +75,9 @@ routes:
 
 # Episode settings
 episode:
-  max_frames: 2000             # ~100 seconds at 20 FPS
+  max_frames: 4000             # ~200 seconds at 20 FPS
   timeout_speed: 0.1           # m/s — below this for timeout_duration → discard
-  timeout_duration: 30         # seconds stuck before timeout
+  timeout_duration: 45         # seconds stuck before timeout
   crash_retries: 3             # CARLA reconnection attempts
   crash_wait: 30               # seconds to wait between retries
 

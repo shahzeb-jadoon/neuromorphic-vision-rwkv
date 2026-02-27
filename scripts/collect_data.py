@@ -149,6 +149,12 @@ def main() -> None:
     parser.add_argument("--target-left", type=float, default=0.15)
     parser.add_argument("--target-right", type=float, default=0.15)
     parser.add_argument(
+        "--max-frames",
+        type=int,
+        default=None,
+        help="Override max frames per episode (default: from YAML config)",
+    )
+    parser.add_argument(
         "--spectator",
         action="store_true",
         help="Follow ego vehicle with CARLA spectator camera (real-time view)",
@@ -173,6 +179,8 @@ def main() -> None:
         cfg["towns"] = args.town
     if args.weather:
         cfg["weathers"] = args.weather
+    if args.max_frames:
+        cfg.setdefault("episode", {})["max_frames"] = args.max_frames
 
     output_dir = args.output or cfg.get("output", {}).get("directory", "data/collected")
     manifest_name = cfg.get("output", {}).get("manifest", "collection_manifest.json")

@@ -7,9 +7,9 @@
 #   conda activate rwkv
 #   bash scripts/overnight_collection.sh
 #
-# Expected runtime: ~6-10 hours
-# Expected output:  ~10+ hours of driving data (720K+ frames)
-# Expected storage: ~200-300 GB at 512×512 (gzip-1, ~270 KB/frame)
+# Expected runtime: ~8-12 hours
+# Expected output:  ~20+ hours of driving data (1.4M+ frames)
+# Expected storage: ~1-2 TB at 1920×320 panoramic (gzip-1)
 #
 # Storage estimates (50 hrs driving):
 #   224×224:  ~34 GB    (measured ~68 KB/frame)
@@ -84,6 +84,7 @@ for town in "${TOWNS[@]}"; do
         --output "${OUTPUT_DIR}" \
         --town "${town}" \
         --episodes "${EPISODES_PER_CONFIG}" \
+        --max-frames "${MAX_FRAMES}" \
         --route-strategy "${ROUTE_STRATEGY}" \
         --target-left "${TARGET_LEFT}" \
         --target-right "${TARGET_RIGHT}" \
