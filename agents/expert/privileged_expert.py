@@ -795,8 +795,10 @@ class PrivilegedExpert:
             throttle = 0.0
             if speed_kmh > 5.0:
                 brake = 1.0
+            elif speed_kmh < 0.5:
+                brake = 0.5           # firm hold when already stopped
             else:
-                brake = max(speed_kmh / 5.0, 0.15)
+                brake = speed_kmh / 5.0  # gradient in 0.5–5 km/h transition
 
         # --- Override 2: large overshoot safety net ---
         # Threshold kept at 10 km/h (original value).  Proportional
