@@ -144,9 +144,14 @@ for f in files:
             all_ok = False
 
         # Check privileged metadata
-        for key in ['position', 'rotation', 'velocity', 'traffic_light_state']:
+        for key in ['position', 'rotation', 'velocity', 'traffic_light_state',
+                     'stop_sign_distance', 'driving_mode', 'target_speed',
+                     'stationary', 'n_corridor_segments', 'wp_buffer_size',
+                     'wp_buffer_head_dist', 'sat_detections', 'lateral_detections']:
             status = '✓' if key in h else 'MISSING!'
             print(f'  {key}: {status}')
+            if key not in h:
+                all_ok = False
 
         print()
 
