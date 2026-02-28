@@ -111,6 +111,12 @@ class ExpertConfig:
     lane_half_width: float = 2.5  # metres — lateral check for "in-lane"
     pedestrian_lane_half_width: float = 3.0  # metres — wider lateral band for pedestrians
 
+    # --- Stop signs ---
+    stop_sign_brake_distance: float = 30.0  # metres — start braking
+    stop_sign_stop_distance: float = 4.0  # metres — full stop
+    stop_sign_comfort_decel: float = 3.0  # m/s² — comfortable deceleration
+    stop_sign_wait_ticks: int = 40  # ~2 s at 20 Hz — minimum pause
+
     # --- Turn behaviour ---
     turn_speed_factor: float = 0.45  # reduce speed to 45% at turns
     junction_turn_factor: float = 0.65  # additional reduction inside junctions
@@ -136,6 +142,7 @@ class DrivingMode(IntEnum):
     VEHICLE_FOLLOWING = auto()
     PEDESTRIAN_STOP = auto()
     EMERGENCY_STOP = auto()
+    STOP_SIGN_STOP = auto()
 
 
 @dataclass
@@ -163,6 +170,7 @@ class FrameInfo:
     # Traffic
     traffic_light_state: int  # 0=None, 1=Green, 2=Yellow, 3=Red
     traffic_light_distance: float  # metres (−1 if none)
+    stop_sign_distance: float = -1.0  # metres (−1 if none)
 
     # Nearby actors (serialisable lists of dicts)
     nearby_vehicles: List[Dict[str, Any]] = field(default_factory=list)
@@ -279,6 +287,11 @@ class PrivilegedExpert:
         # Distance to the upcoming turn waypoint (set by _get_target)
         self._turn_distance: float | None = None
 
+        # Stop sign state
+        self._cleared_stop_signs: set[int] = set()
+        self._stop_sign_wait_counter: int = 0
+        self._stop_sign_active: int | None = None  # actor ID
+
     # ------------------------------------------------------------------
     # Route management
     # ------------------------------------------------------------------
@@ -294,6 +307,9 @@ class PrivilegedExpert:
         self.steer_pid.reset()
         self.mode = DrivingMode.FOLLOW_LANE
         self._tl_waiting = None
+        self._cleared_stop_signs.clear()
+        self._stop_sign_wait_counter = 0
+        self._stop_sign_active = None
 
     def set_destination(self, start: "carla.Location", end: "carla.Location") -> None:
         """Plan and load a route from *start* to *end*."""
@@ -347,6 +363,7 @@ class PrivilegedExpert:
 
         # --- 3.  Privileged perception ---
         tl_state, tl_distance = self._check_traffic_light(transform)
+        ss_distance = self._check_stop_signs(transform, speed_kmh)
         nearby_vehicles = self._detect_vehicles(transform)
         nearby_pedestrians = self._detect_pedestrians(transform)
         lead_dist = self._lead_vehicle_distance(nearby_vehicles)
@@ -358,6 +375,7 @@ class PrivilegedExpert:
             nav_command,
             tl_state,
             tl_distance,
+            ss_distance,
             lead_dist,
             ped_dist,
             base_target,
@@ -410,6 +428,7 @@ class PrivilegedExpert:
             velocity=(velocity.x, velocity.y, velocity.z),
             traffic_light_state=self._encode_tl(tl_state),
             traffic_light_distance=(tl_distance if tl_distance is not None else -1.0),
+            stop_sign_distance=(ss_distance if ss_distance is not None else -1.0),
             nearby_vehicles=nearby_vehicles,
             nearby_pedestrians=nearby_pedestrians,
             n_corridor_segments=self._n_corridor_segments,
@@ -553,6 +572,7 @@ class PrivilegedExpert:
         nav_command: RoadOption,
         tl_state: Any,
         tl_distance: float | None,
+        ss_distance: float | None,
         lead_dist: float | None,
         ped_dist: float | None,
         base_target: float | None = None,
@@ -623,6 +643,16 @@ class PrivilegedExpert:
                         d = max(tl_distance - cfg.traffic_light_stop_distance, 0.0)
                         v_ms = math.sqrt(2.0 * cfg.tl_comfort_decel * d)
                         target = min(target, v_ms * 3.6)  # m/s → km/h
+
+        # --- Stop sign ---
+        if ss_distance is not None and 0 < ss_distance < cfg.stop_sign_brake_distance:
+            mode = DrivingMode.STOP_SIGN_STOP
+            if ss_distance < cfg.stop_sign_stop_distance:
+                target = 0.0
+            else:
+                d = max(ss_distance - cfg.stop_sign_stop_distance, 0.0)
+                v_ms = math.sqrt(2.0 * cfg.stop_sign_comfort_decel * d)
+                target = min(target, v_ms * 3.6)
 
         # --- Lead vehicle ---
         # Scale safety distances with current speed (kinematic braking
@@ -923,6 +953,110 @@ class PrivilegedExpert:
             pass
         return None
 
+    # --- Stop sign detection --------------------------------------------
+
+    def _check_stop_signs(
+        self,
+        transform: "carla.Transform",
+        speed_kmh: float,
+    ) -> float | None:
+        """Return distance to the nearest uncleared stop sign, or ``None``.
+
+        Uses a three-stage approach inspired by TransFuser:
+
+        1. **Lane matching** — only react to stop signs whose trigger
+           volume waypoint matches the ego's road and lane.
+        2. **Ahead check** — ignore signs that are behind the ego.
+        3. **Distance gating** — only return signs within
+           ``stop_sign_brake_distance``.
+
+        A stop sign is "cleared" once the ego has come to a full stop
+        within ``stop_sign_stop_distance`` for at least
+        ``stop_sign_wait_ticks`` consecutive ticks.  Once cleared, the
+        sign is remembered so the ego doesn't brake for it again.
+        """
+        cfg = self.config
+        ego_loc = transform.location
+        ego_wp = self.map.get_waypoint(ego_loc)
+        if ego_wp is None:
+            return None
+
+        fwd = transform.get_forward_vector()
+
+        # ---- Active stop sign: waiting at it ----
+        if self._stop_sign_active is not None:
+            ss_actor = self.world.get_actor(self._stop_sign_active)
+            if ss_actor is None:
+                # Sign was destroyed — clear
+                self._stop_sign_active = None
+                self._stop_sign_wait_counter = 0
+            else:
+                ss_loc = ss_actor.get_transform().location
+                dist = ego_loc.distance(ss_loc)
+
+                # Check if behind us (we've driven past)
+                dx = ss_loc.x - ego_loc.x
+                dy = ss_loc.y - ego_loc.y
+                behind = (fwd.x * dx + fwd.y * dy) < 0
+
+                if behind or dist > cfg.stop_sign_brake_distance * 1.5:
+                    # Drove past it — add to cleared
+                    self._cleared_stop_signs.add(self._stop_sign_active)
+                    self._stop_sign_active = None
+                    self._stop_sign_wait_counter = 0
+                elif speed_kmh < 0.5 and dist < cfg.stop_sign_stop_distance * 2:
+                    self._stop_sign_wait_counter += 1
+                    if self._stop_sign_wait_counter >= cfg.stop_sign_wait_ticks:
+                        # Waited long enough — clear the sign
+                        self._cleared_stop_signs.add(self._stop_sign_active)
+                        self._stop_sign_active = None
+                        self._stop_sign_wait_counter = 0
+                        return None
+                    return dist
+                else:
+                    self._stop_sign_wait_counter = 0
+                    return dist
+
+        # ---- Scan for new stop signs ----
+        upcoming_road_id = (
+            self._wp_buffer[0][0].road_id if self._wp_buffer else ego_wp.road_id
+        )
+
+        best_dist: float | None = None
+        best_id: int | None = None
+
+        for ss in self.world.get_actors().filter("*stop*"):
+            if ss.id in self._cleared_stop_signs:
+                continue
+
+            ss_loc = ss.get_transform().location
+            dist = ego_loc.distance(ss_loc)
+            if dist > cfg.stop_sign_brake_distance:
+                continue
+
+            # Ahead check
+            dx = ss_loc.x - ego_loc.x
+            dy = ss_loc.y - ego_loc.y
+            if fwd.x * dx + fwd.y * dy <= 0:
+                continue
+
+            # Lane matching — stop sign should be on our road
+            ss_wp = self.map.get_waypoint(ss_loc)
+            if ss_wp is None:
+                continue
+            if ss_wp.road_id != ego_wp.road_id and ss_wp.road_id != upcoming_road_id:
+                continue
+
+            if best_dist is None or dist < best_dist:
+                best_dist = dist
+                best_id = ss.id
+
+        if best_id is not None:
+            self._stop_sign_active = best_id
+            self._stop_sign_wait_counter = 0
+
+        return best_dist
+
     # --- Curve-aware corridor -------------------------------------------
 
     def _build_route_corridor(
@@ -935,7 +1069,7 @@ class PrivilegedExpert:
 
         Instead of projecting a straight rectangle ahead of the ego,
         this samples waypoints from ``_wp_buffer`` up to *cutoff*
-        metres and offsets each by ±\ *half_lane* perpendicular to the
+        metres and offsets each by ± *half_lane* perpendicular to the
         waypoint's heading.
 
         Returns ``(polygon, segments)``:

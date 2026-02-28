@@ -147,6 +147,7 @@ class TestSaveEpisode:
             "rotation": np.random.uniform(-180, 180, (n, 3)).astype(np.float32),
             "velocity": np.random.uniform(0, 10, (n, 3)).astype(np.float32),
             "traffic_light_state": np.zeros(n, dtype=np.int32),
+            "stop_sign_distance": np.full(n, -1.0, dtype=np.float32),
             "target_speed": np.full(n, 8.33, dtype=np.float32),
             "driving_mode": np.zeros(n, dtype=np.int32),
             "nearby_vehicles": [json.dumps([]) for _ in range(n)],
@@ -191,6 +192,7 @@ class TestSaveEpisode:
             assert S.POSITION in f
             assert S.ROTATION in f
             assert S.TRAFFIC_LIGHT_STATE in f
+            assert S.STOP_SIGN_DISTANCE in f
             assert S.TARGET_SPEED in f
             assert S.DRIVING_MODE in f
             assert S.NEARBY_VEHICLES in f
@@ -299,6 +301,7 @@ class TestHDF5Schema:
             S.POSITION,
             S.ROTATION,
             S.TRAFFIC_LIGHT_STATE,
+            S.STOP_SIGN_DISTANCE,
             S.TARGET_SPEED,
             S.DRIVING_MODE,
             S.NEARBY_VEHICLES,

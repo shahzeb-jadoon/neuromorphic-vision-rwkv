@@ -540,6 +540,7 @@ class ExpertDataCollector:
         rotation_buf: list[np.ndarray] = []
         velocity_buf: list[np.ndarray] = []
         traffic_light_buf: list[int] = []
+        stop_sign_distance_buf: list[float] = []
         target_speed_buf: list[float] = []
         driving_mode_buf: list[int] = []
         nearby_vehicles_buf: list[str] = []  # JSON strings
@@ -840,6 +841,7 @@ class ExpertDataCollector:
 
                 # --- Privileged data ---
                 traffic_light_buf.append(info.traffic_light_state)
+                stop_sign_distance_buf.append(info.stop_sign_distance)
                 target_speed_buf.append(info.target_speed)
                 driving_mode_buf.append(info.driving_mode)
                 nearby_vehicles_buf.append(json.dumps(info.nearby_vehicles))
@@ -917,6 +919,7 @@ class ExpertDataCollector:
                     rotation=np.stack(rotation_buf),
                     velocity=np.stack(velocity_buf),
                     traffic_light_state=np.array(traffic_light_buf, dtype=np.int32),
+                    stop_sign_distance=np.array(stop_sign_distance_buf, dtype=np.float32),
                     target_speed=np.array(target_speed_buf, dtype=np.float32),
                     driving_mode=np.array(driving_mode_buf, dtype=np.int32),
                     nearby_vehicles=nearby_vehicles_buf,
@@ -956,6 +959,7 @@ class ExpertDataCollector:
                         rotation=np.stack(rotation_buf),
                         velocity=np.stack(velocity_buf),
                         traffic_light_state=np.array(traffic_light_buf, dtype=np.int32),
+                        stop_sign_distance=np.array(stop_sign_distance_buf, dtype=np.float32),
                         target_speed=np.array(target_speed_buf, dtype=np.float32),
                         driving_mode=np.array(driving_mode_buf, dtype=np.int32),
                         nearby_vehicles=nearby_vehicles_buf,
@@ -1056,6 +1060,7 @@ class ExpertDataCollector:
         rotation: np.ndarray,
         velocity: np.ndarray,
         traffic_light_state: np.ndarray,
+        stop_sign_distance: np.ndarray,
         target_speed: np.ndarray,
         driving_mode: np.ndarray,
         nearby_vehicles: list[str],
@@ -1104,6 +1109,7 @@ class ExpertDataCollector:
 
             # --- Privileged data ---
             f.create_dataset(S.TRAFFIC_LIGHT_STATE, data=traffic_light_state)
+            f.create_dataset(S.STOP_SIGN_DISTANCE, data=stop_sign_distance)
             f.create_dataset(S.TARGET_SPEED, data=target_speed)
             f.create_dataset(S.DRIVING_MODE, data=driving_mode)
 
