@@ -37,12 +37,21 @@ expert:
   pedestrian_hazard_distance: 15.0
   turn_speed_factor: 0.45
 
-# Towns for data collection (Town02 reserved for evaluation)
+# Towns for training data collection
 towns:
   - Town01
   - Town03
   - Town04
   - Town05
+  - Town06
+  - Town07
+  - Town10
+  - Town12
+  - Town15
+
+# Towns reserved for closed-loop evaluation only (never collected for training)
+eval_towns:
+  - Town02
 
 # Weather presets to cycle through
 weathers:
