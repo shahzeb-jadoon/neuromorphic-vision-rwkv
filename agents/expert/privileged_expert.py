@@ -770,7 +770,14 @@ class PrivilegedExpert:
         target_speed: float,
         dt: float,
     ) -> Tuple[float, float]:
-        """PID throttle / brake on the speed error."""
+        """PID throttle / brake on the speed error.
+
+        Produces proportional brake in the final 0-5 km/h before a
+        full stop, giving the training signal a smooth gradient
+        instead of a binary 0/1 cliff.  Above 5 km/h (and for
+        overshoot situations) the behaviour is identical to the
+        original binary overrides to preserve braking authority.
+        """
         error = (target_speed - speed_kmh) / max(self.config.target_speed, 10.0)
         output = self.speed_pid.step(error, dt)
 
@@ -781,19 +788,24 @@ class PrivilegedExpert:
             throttle = 0.0
             brake = min(abs(output), 1.0)
 
-        # When target ≈ 0 (red light, emergency), always full-brake
-        # and zero throttle.  This prevents the PID integral from
-        # producing tiny positive outputs that cause creeping.
+        # --- Override 1: target ≈ 0 (red light, stop sign, emergency) ---
+        # Above 5 km/h: full brake (same as original, decisive stop).
+        # Below 5 km/h: linear ramp so training data gets a gradient.
         if target_speed < 1.0:
             throttle = 0.0
-            brake = 1.0
+            if speed_kmh > 5.0:
+                brake = 1.0
+            else:
+                brake = max(speed_kmh / 5.0, 0.15)
 
-        # Hard brake when well above target — safety net for normal
-        # driving.  The threshold is 10 km/h (not 15) to avoid
-        # oscillation during gradual deceleration profiles.
+        # --- Override 2: large overshoot safety net ---
+        # Threshold kept at 10 km/h (original value).  Proportional
+        # response so training data is not pure binary; full brake
+        # at 15+ km/h over target.
         elif speed_kmh > target_speed + 10.0:
+            overshoot = speed_kmh - target_speed
             throttle = 0.0
-            brake = 1.0
+            brake = min(overshoot / 15.0, 1.0)
 
         return throttle, brake
 
