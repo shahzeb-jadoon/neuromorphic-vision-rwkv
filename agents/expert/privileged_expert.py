@@ -100,6 +100,7 @@ class ExpertConfig:
     traffic_light_brake_distance: float = 60.0  # metres — start braking
     traffic_light_stop_distance: float = 4.0  # metres — full stop
     tl_comfort_decel: float = 3.0  # m/s² — comfortable deceleration for TL
+    tl_turn_comfort_decel: float = 1.5  # m/s² — TL decel when already turning
     turn_comfort_decel: float = 1.5  # m/s² — gentler braking for turn approach
     vehicle_hazard_distance: float = 25.0  # metres — start slowing (min)
     vehicle_emergency_distance: float = 5.0  # metres — emergency (min)
@@ -662,8 +663,16 @@ class PrivilegedExpert:
                         target = 0.0
                     else:
                         # Kinematic profile: v = sqrt(2 * a * d)
+                        # Use gentler decel when already turning so
+                        # the ramp engages earlier (~12 m instead of
+                        # ~6 m) and the stop feels smooth.
                         d = max(tl_distance - cfg.traffic_light_stop_distance, 0.0)
-                        v_ms = math.sqrt(2.0 * cfg.tl_comfort_decel * d)
+                        decel = (
+                            cfg.tl_turn_comfort_decel
+                            if mode in (DrivingMode.TURNING, DrivingMode.APPROACHING_TURN)
+                            else cfg.tl_comfort_decel
+                        )
+                        v_ms = math.sqrt(2.0 * decel * d)
                         tl_target = v_ms * 3.6  # m/s → km/h
                         if tl_target < target:
                             mode = DrivingMode.TRAFFIC_LIGHT_STOP
