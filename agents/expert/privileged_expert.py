@@ -1049,9 +1049,14 @@ class PrivilegedExpert:
         cutoff = self.config.vehicle_hazard_distance * 2
         half_lane = self.config.lane_half_width
 
-        # Ego bounding-box centroid in world space
-        ego_bb_center = transform.transform(self.vehicle.bounding_box.location)
-        ego_half_len = self.vehicle.bounding_box.extent.x
+        # Ego bounding-box centroid in world space.
+        # IMPORTANT: carla.Transform.transform() mutates the input
+        # Location in-place, which corrupts actor.bounding_box.location
+        # for subsequent reads.  Always copy before transforming.
+        ego_bb = self.vehicle.bounding_box
+        ego_bb_loc = carla.Location(ego_bb.location.x, ego_bb.location.y, ego_bb.location.z)
+        ego_bb_center = transform.transform(ego_bb_loc)
+        ego_half_len = ego_bb.extent.x
 
         # Build a curve-aware lane corridor by sampling waypoints
         # along the planned route.  This follows the actual path
@@ -1076,8 +1081,11 @@ class PrivilegedExpert:
             if ego_loc.distance(v_loc) > cutoff:
                 continue
 
-            # Bounding-box centroid in world space
-            v_bb_center = v_transform.transform(v.bounding_box.location)
+            # Bounding-box centroid in world space.
+            # Copy location to avoid in-place mutation by transform().
+            v_bb = v.bounding_box
+            v_bb_loc = carla.Location(v_bb.location.x, v_bb.location.y, v_bb.location.z)
+            v_bb_center = v_transform.transform(v_bb_loc)
             center_dist = ego_bb_center.distance(v_bb_center)
 
             dx = v_bb_center.x - ego_bb_center.x
@@ -1155,21 +1163,47 @@ class PrivilegedExpert:
         (the centre of the bounding box in actor-local space), **not**
         the actor origin.  For most CARLA vehicles the actor origin
         sits at the rear axle, ~1–2 m behind the BB centre.
+
+        .. note::
+
+           Uses pure-Python rotation instead of
+           ``carla.Transform.transform()`` because the CARLA API
+           mutates the input ``carla.Location`` **in-place**, which
+           silently corrupts ``bounding_box.location`` for any
+           subsequent access on the same actor.
         """
         bb = actor.bounding_box
         ext = bb.extent  # half-extents (x=length/2, y=width/2)
-        cx, cy, cz = bb.location.x, bb.location.y, bb.location.z
-        t = actor.get_transform()
+        # Read local-space values as Python floats immediately so
+        # they are immune to any in-place mutation by CARLA.
+        cx = float(bb.location.x)
+        cy = float(bb.location.y)
+        ex = float(ext.x)
+        ey = float(ext.y)
 
-        # 4 corners in local frame centred on BB location
-        local_corners = [
-            carla.Location(x=cx + ext.x, y=cy + ext.y, z=cz),
-            carla.Location(x=cx + ext.x, y=cy - ext.y, z=cz),
-            carla.Location(x=cx - ext.x, y=cy - ext.y, z=cz),
-            carla.Location(x=cx - ext.x, y=cy + ext.y, z=cz),
+        t = actor.get_transform()
+        yaw = math.radians(t.rotation.yaw)
+        cos_y = math.cos(yaw)
+        sin_y = math.sin(yaw)
+        tx = t.location.x
+        ty = t.location.y
+
+        # 4 local-frame corners relative to actor origin,
+        # centred on BB location (cx, cy).
+        local_offsets = [
+            (cx + ex, cy + ey),
+            (cx + ex, cy - ey),
+            (cx - ex, cy - ey),
+            (cx - ex, cy + ey),
         ]
-        world_corners = np.array([[t.transform(c).x, t.transform(c).y] for c in local_corners])
-        return world_corners
+
+        # Rotate by yaw and translate to world space.
+        corners = np.empty((4, 2), dtype=np.float64)
+        for i, (lx, ly) in enumerate(local_offsets):
+            corners[i, 0] = cos_y * lx - sin_y * ly + tx
+            corners[i, 1] = sin_y * lx + cos_y * ly + ty
+
+        return corners
 
     @staticmethod
     def _sat_overlap(poly_a: np.ndarray, poly_b: np.ndarray) -> bool:
