@@ -97,7 +97,7 @@ class ExpertConfig:
     waypoint_buffer_size: int = 40
 
     # --- Safety thresholds ---
-    traffic_light_brake_distance: float = 35.0  # metres — start braking
+    traffic_light_brake_distance: float = 60.0  # metres — start braking
     traffic_light_stop_distance: float = 4.0  # metres — full stop
     tl_comfort_decel: float = 3.0  # m/s² — comfortable deceleration for TL
     turn_comfort_decel: float = 1.5  # m/s² — gentler braking for turn approach
@@ -616,9 +616,21 @@ class PrivilegedExpert:
             at_junction = ego_wp is not None and ego_wp.is_junction
 
             if at_junction:
-                # Inside junction — hold turn speed, don't reduce further
+                # Inside junction — use kinematic ramp from remaining
+                # turn distance so target transitions smoothly from
+                # the APPROACHING_TURN speed to turn_target instead
+                # of a cliff-drop to turn_target in a single frame.
                 mode = DrivingMode.TURNING
-                target = min(target, turn_target)
+                turn_dist = self._turn_distance
+                if turn_dist is not None and turn_dist > 0:
+                    v_turn_ms = turn_target / 3.6
+                    d = max(turn_dist, 0.0)
+                    v_ms = math.sqrt(
+                        2.0 * cfg.turn_comfort_decel * d + v_turn_ms**2,
+                    )
+                    target = min(target, v_ms * 3.6)
+                else:
+                    target = min(target, turn_target)
             else:
                 # Approaching — kinematic ramp to arrive at turn_target
                 mode = DrivingMode.APPROACHING_TURN
@@ -922,10 +934,17 @@ class PrivilegedExpert:
                     if awp.lane_id == ego_wp.lane_id and (
                         awp.road_id == ego_wp.road_id or awp.road_id == upcoming_road_id
                     ):
+                        # Verify the stop line is AHEAD of us, not behind.
+                        # Without this check, a cross-street TL whose stop
+                        # line shares a lane_id at the junction boundary
+                        # can be falsely matched, causing braking at green.
+                        awp_loc = awp.transform.location
+                        sdx = awp_loc.x - ego_loc.x
+                        sdy = awp_loc.y - ego_loc.y
+                        if fwd.x * sdx + fwd.y * sdy <= 0:
+                            continue  # stop line is behind us
                         affects_us = True
-                        stop_dist = ego_loc.distance(
-                            awp.transform.location,
-                        )
+                        stop_dist = ego_loc.distance(awp_loc)
                         break
             except (AttributeError, RuntimeError):
                 # Fallback for older CARLA builds.
