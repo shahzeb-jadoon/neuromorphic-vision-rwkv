@@ -426,12 +426,39 @@ class PrivilegedExpert:
     # ------------------------------------------------------------------
 
     def _fill_buffer(self) -> None:
-        """Refill the waypoint look-ahead buffer from the route."""
+        """Refill the waypoint look-ahead buffer from the route.
+
+        When the planned route is exhausted but the buffer is below
+        half capacity, extend it by querying the map for waypoints
+        ahead of the last buffered waypoint.  This prevents corridor
+        degeneration in the final ~200 frames of an episode where the
+        buffer would otherwise shrink to 1–2 entries.
+        """
         while (
             len(self._wp_buffer) < self._wp_buffer.maxlen and self._route_index < self._route_length
         ):
             self._wp_buffer.append(self._route[self._route_index])
             self._route_index += 1
+
+        # --- Route-end extension ---
+        # If the planned route is consumed and the buffer is running
+        # low, synthesise continuation waypoints from the map so that
+        # the SAT corridor stays healthy until the episode ends.
+        half_cap = (self._wp_buffer.maxlen or 40) // 2
+        if (
+            self._route_index >= self._route_length
+            and len(self._wp_buffer) < half_cap
+            and self._wp_buffer
+        ):
+            last_wp, _ = self._wp_buffer[-1]
+            try:
+                nexts = last_wp.next(2.0)  # 2 m step
+                while nexts and len(self._wp_buffer) < self._wp_buffer.maxlen:
+                    nxt = nexts[0]  # follow the first (keep-lane) option
+                    self._wp_buffer.append((nxt, RoadOption.LANEFOLLOW))
+                    nexts = nxt.next(2.0)
+            except (AttributeError, RuntimeError):
+                pass  # graceful degradation if map query fails
 
     def _advance_route(self, transform: "carla.Transform") -> None:
         """Pop consumed waypoints (closer than *min_follow_distance* or behind ego)."""
