@@ -649,19 +649,25 @@ class PrivilegedExpert:
                     target = min(target, turn_target)
 
         # --- Traffic light ---
+        # TL stop takes priority when the ramp demands a speed lower
+        # than whatever the turn section already set.  Without this,
+        # a turn target of ~15 km/h masks the TL ramp (which is still
+        # above 15 km/h at 20-40 m distance), so the car approaches
+        # a red TL at turn speed and has to slam at the last moment.
         if tl_state is not None and tl_distance is not None:
             if tl_state in (carla.TrafficLightState.Red, carla.TrafficLightState.Yellow):
                 if 0 < tl_distance < cfg.traffic_light_brake_distance:
-                    mode = DrivingMode.TRAFFIC_LIGHT_STOP
                     if tl_distance < cfg.traffic_light_stop_distance:
+                        mode = DrivingMode.TRAFFIC_LIGHT_STOP
                         target = 0.0
                     else:
                         # Kinematic profile: v = sqrt(2 * a * d)
-                        # Produces a smooth, constant-deceleration stop
-                        # at the stop line — no oscillation.
                         d = max(tl_distance - cfg.traffic_light_stop_distance, 0.0)
                         v_ms = math.sqrt(2.0 * cfg.tl_comfort_decel * d)
-                        target = min(target, v_ms * 3.6)  # m/s → km/h
+                        tl_target = v_ms * 3.6  # m/s → km/h
+                        if tl_target < target:
+                            mode = DrivingMode.TRAFFIC_LIGHT_STOP
+                            target = tl_target
 
         # --- Stop sign ---
         if ss_distance is not None and 0 < ss_distance < cfg.stop_sign_brake_distance:
