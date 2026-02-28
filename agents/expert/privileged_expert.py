@@ -126,6 +126,9 @@ class ExpertConfig:
     curvature_speed_factor: float = 0.7  # reduce by 30% on curves
     curvature_threshold_deg: float = 20.0  # angle change between successive wps
 
+    # --- Noise injection (for training data diversity) ---
+    steering_noise_sigma: float = 1e-3  # Gaussian noise std on steering
+
 
 # ---------------------------------------------------------------------------
 # Data structures
@@ -385,6 +388,10 @@ class PrivilegedExpert:
 
         # --- 5.  Control ---
         steer = self._lateral_control(transform, target_wp)
+        # Inject small Gaussian noise to prevent overfitting to
+        # pixel-perfect expert trajectories (D7).
+        if cfg.steering_noise_sigma > 0:
+            steer += float(np.random.normal(0.0, cfg.steering_noise_sigma))
         throttle, brake = self._longitudinal_control(speed_kmh, target_speed, dt)
 
         control = carla.VehicleControl(
