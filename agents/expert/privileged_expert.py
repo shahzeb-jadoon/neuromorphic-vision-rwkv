@@ -1375,18 +1375,25 @@ class PrivilegedExpert:
     ) -> List[Dict[str, Any]]:
         """Return up to 5 nearest pedestrians with privileged info.
 
-        Each entry now includes ``lateral`` offset so that
-        ``_closest_pedestrian_distance`` can ignore pedestrians that
-        are on the pavement and not in the vehicle's lane corridor.
+        Each entry includes:
+        - ``lateral``: offset so ``_closest_pedestrian_distance`` can
+          ignore pavement walkers.
+        - ``predicted_lateral``: lateral offset of the pedestrian's
+          predicted position (velocity-extrapolated 1.0 s ahead).
+          Enables early braking for pedestrians about to step into
+          the lane.
+        - ``predicted_distance``: distance to the predicted position.
         """
         ego_loc = transform.location
         fwd = transform.get_forward_vector()
         right = carla.Vector3D(-fwd.y, fwd.x, 0)
         cutoff = self.config.pedestrian_hazard_distance * 2
+        predict_horizon = 1.0  # seconds
 
         nearby: list[dict[str, Any]] = []
         for w in self.world.get_actors().filter("*walker*"):
-            w_loc = w.get_transform().location
+            w_transform = w.get_transform()
+            w_loc = w_transform.location
             dist = ego_loc.distance(w_loc)
             if dist > cutoff:
                 continue
@@ -1396,12 +1403,25 @@ class PrivilegedExpert:
             longitudinal = fwd.x * dx + fwd.y * dy
             lateral = right.x * dx + right.y * dy
 
+            # Velocity extrapolation for path prediction
+            w_vel = w.get_velocity()
+            pred_x = w_loc.x + w_vel.x * predict_horizon
+            pred_y = w_loc.y + w_vel.y * predict_horizon
+            pred_dx = pred_x - ego_loc.x
+            pred_dy = pred_y - ego_loc.y
+            pred_longitudinal = fwd.x * pred_dx + fwd.y * pred_dy
+            pred_lateral = right.x * pred_dx + right.y * pred_dy
+            pred_dist = math.sqrt(pred_dx**2 + pred_dy**2)
+
             nearby.append(
                 {
                     "distance": round(dist, 2),
                     "longitudinal": round(longitudinal, 2),
                     "lateral": round(lateral, 2),
                     "is_ahead": longitudinal > 0,
+                    "predicted_distance": round(pred_dist, 2),
+                    "predicted_lateral": round(pred_lateral, 2),
+                    "predicted_ahead": pred_longitudinal > 0,
                 }
             )
 
@@ -1444,15 +1464,26 @@ class PrivilegedExpert:
         self,
         nearby: List[Dict[str, Any]],
     ) -> float | None:
-        """Distance to the closest pedestrian ahead **in our lane corridor**.
+        """Distance to the closest pedestrian hazard ahead **in our lane corridor**.
 
-        Uses ``pedestrian_lane_half_width`` (default 3.0 m) to ignore
-        pedestrians on the pavement who are not an imminent hazard.
+        A pedestrian is considered a hazard if:
+        - They are currently in the lane (lateral < pedestrian_lane_half_width), **or**
+        - Their predicted position (1s ahead via velocity extrapolation)
+          will be in the lane (``predicted_lateral`` < half-width).
+
+        This enables early braking for pedestrians about to step off
+        the pavement into the vehicle's path.
         """
         half_w = self.config.pedestrian_lane_half_width
         for p in nearby:
-            if p["is_ahead"] and abs(p["lateral"]) < half_w:
-                return p["distance"]
+            current_in_lane = p["is_ahead"] and abs(p["lateral"]) < half_w
+            predicted_in_lane = p.get("predicted_ahead", False) and abs(
+                p.get("predicted_lateral", 999.0)
+            ) < half_w
+            if current_in_lane or predicted_in_lane:
+                # Use whichever distance is shorter (current or predicted)
+                pred_dist = p.get("predicted_distance", p["distance"])
+                return min(p["distance"], pred_dist)
         return None
 
     @staticmethod
