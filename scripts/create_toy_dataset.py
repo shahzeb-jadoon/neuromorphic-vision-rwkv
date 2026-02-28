@@ -132,6 +132,25 @@ def generate_episode(
     driving_mode[traffic_light_state == 2] = 3  # TRAFFIC_LIGHT_STOP
     driving_mode[np.abs(steering) > 0.2] = 2  # TURNING
 
+    # Stop sign distance: -1 means no stop sign nearby
+    stop_sign_distance = np.full(n_frames, -1.0, dtype=np.float32)
+    # Simulate a few stop sign encounters
+    ss_starts = rng.choice(max(1, n_frames - 30), size=max(1, n_frames // 80), replace=False)
+    for ss in ss_starts:
+        for dt in range(min(30, n_frames - ss)):
+            stop_sign_distance[ss + dt] = max(0.0, 25.0 - dt * 0.8)
+
+    # Stationary flag: speed < 0.5 km/h
+    speed_kmh = np.linalg.norm(velocity, axis=1) * 3.6
+    stationary = speed_kmh < 0.5
+
+    # Corridor diagnostics (synthetic but plausible)
+    n_corridor_segments = np.full(n_frames, 20, dtype=np.int32)
+    wp_buffer_size = np.full(n_frames, 40, dtype=np.int32)
+    wp_buffer_head_dist = rng.uniform(2.0, 6.0, size=n_frames).astype(np.float32)
+    sat_detections = rng.integers(0, 3, size=n_frames).astype(np.int32)
+    lateral_detections = rng.integers(0, 4, size=n_frames).astype(np.int32)
+
     # Nearby vehicles/pedestrians as JSON strings
     nearby_vehicles = []
     nearby_pedestrians = []
@@ -162,8 +181,15 @@ def generate_episode(
         "position": position,
         "rotation": rotation,
         "traffic_light_state": traffic_light_state,
+        "stop_sign_distance": stop_sign_distance,
         "target_speed": target_speed,
         "driving_mode": driving_mode,
+        "stationary": stationary,
+        "n_corridor_segments": n_corridor_segments,
+        "wp_buffer_size": wp_buffer_size,
+        "wp_buffer_head_dist": wp_buffer_head_dist,
+        "sat_detections": sat_detections,
+        "lateral_detections": lateral_detections,
         "nearby_vehicles": nearby_vehicles,
         "nearby_pedestrians": nearby_pedestrians,
         "metadata": {
@@ -215,6 +241,15 @@ def save_episode_hdf5(
         f.create_dataset(S.TRAFFIC_LIGHT_STATE, data=episode_data["traffic_light_state"])
         f.create_dataset(S.TARGET_SPEED, data=episode_data["target_speed"])
         f.create_dataset(S.DRIVING_MODE, data=episode_data["driving_mode"])
+
+        # Schema v3.1 fields
+        f.create_dataset(S.STOP_SIGN_DISTANCE, data=episode_data["stop_sign_distance"])
+        f.create_dataset(S.STATIONARY, data=episode_data["stationary"])
+        f.create_dataset(S.N_CORRIDOR_SEGMENTS, data=episode_data["n_corridor_segments"])
+        f.create_dataset(S.WP_BUFFER_SIZE, data=episode_data["wp_buffer_size"])
+        f.create_dataset(S.WP_BUFFER_HEAD_DIST, data=episode_data["wp_buffer_head_dist"])
+        f.create_dataset(S.SAT_DETECTIONS, data=episode_data["sat_detections"])
+        f.create_dataset(S.LATERAL_DETECTIONS, data=episode_data["lateral_detections"])
 
         # Variable-length string datasets for JSON blobs
         str_dt = h5py.string_dtype()

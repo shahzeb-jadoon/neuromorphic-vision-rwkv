@@ -40,13 +40,14 @@ echo "Log:     ${LOG_FILE}"
 echo "============================================================"
 
 # --- Configuration ---
-# Towns to collect from (Town02 is held out for evaluation)
-TOWNS=("Town01" "Town03" "Town04" "Town05")
+# Towns to collect from (must match configs/collection.yaml towns list)
+# Town02 is held out for evaluation — do NOT add it here.
+TOWNS=("Town01" "Town03" "Town04" "Town05" "Town06" "Town07" "Town10" "Town12" "Town15")
 
 # Weather conditions
 WEATHERS=("ClearNoon" "CloudyNoon" "WetNoon" "SoftRainNoon" "HardRainNoon" "ClearSunset")
 
-# Episodes per (town, weather) combination = 4×6×6 = 144 episodes
+# Episodes per (town, weather) combination = 9×6×6 = 324 episodes
 EPISODES_PER_CONFIG=6
 
 # Each episode = 4000 frames (200 seconds at 20 FPS)
@@ -61,8 +62,8 @@ ROUTE_STRATEGY="balanced"
 TARGET_LEFT=0.15
 TARGET_RIGHT=0.15
 
-# Total expected: 144 episodes × 4000 frames = 576,000 frames (≈8 hours)
-# At 512×512: ~156 GB (576K × 270 KB/frame)
+# Total expected: 324 episodes × 4000 frames = 1,296,000 frames (≈18 hours driving)
+# At 1920×320 panoramic: ~350 GB (1.3M × 270 KB/frame)
 echo ""
 echo "Plan: ${#TOWNS[@]} towns × ${#WEATHERS[@]} weathers × ${EPISODES_PER_CONFIG} episodes"
 echo "Total: $(( ${#TOWNS[@]} * ${#WEATHERS[@]} * ${EPISODES_PER_CONFIG} )) episodes"
