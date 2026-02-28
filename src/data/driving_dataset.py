@@ -31,10 +31,11 @@ IMAGENET_MEAN = torch.tensor([0.485, 0.456, 0.406]).view(3, 1, 1)
 IMAGENET_STD = torch.tensor([0.229, 0.224, 0.225]).view(3, 1, 1)
 
 # Velocity z-score normalisation constants.
-# TODO: Recompute from real collection data and update.
-VELOCITY_STATS_VERSION = "placeholder_v0"
-VELOCITY_MEAN = torch.tensor([5.0, 0.0, 0.0])
-VELOCITY_STD = torch.tensor([4.0, 0.5, 0.1])
+# Computed from 720 overnight episodes (1,190,641 frames) via Welford's algorithm.
+# World-frame (vx, vy, vz) in m/s.  Will be recomputed after Phase-1b re-collection.
+VELOCITY_STATS_VERSION = "overnight_v1"
+VELOCITY_MEAN = torch.tensor([-0.183039, 0.017519, 0.004639])
+VELOCITY_STD = torch.tensor([4.115619, 3.930360, 0.131611])
 
 
 class DrivingSequenceDataset(Dataset):
