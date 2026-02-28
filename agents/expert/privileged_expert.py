@@ -100,7 +100,6 @@ class ExpertConfig:
     traffic_light_brake_distance: float = 60.0  # metres — start braking
     traffic_light_stop_distance: float = 4.0  # metres — full stop
     tl_comfort_decel: float = 3.0  # m/s² — comfortable deceleration for TL
-    tl_turn_comfort_decel: float = 1.5  # m/s² — TL decel when already turning
     turn_comfort_decel: float = 1.5  # m/s² — gentler braking for turn approach
     vehicle_hazard_distance: float = 25.0  # metres — start slowing (min)
     vehicle_emergency_distance: float = 5.0  # metres — emergency (min)
@@ -129,6 +128,9 @@ class ExpertConfig:
 
     # --- Noise injection (for training data diversity) ---
     steering_noise_sigma: float = 1e-3  # Gaussian noise std on steering
+
+    # --- Rate limiter ---
+    max_target_drop_per_frame: float = 2.0  # km/h — prevents target jumps
 
 
 # ---------------------------------------------------------------------------
@@ -295,6 +297,9 @@ class PrivilegedExpert:
         self._cleared_stop_signs: set[int] = set()
         self._stop_sign_wait_counter: int = 0
         self._stop_sign_active: int | None = None  # actor ID
+
+        # Rate limiter — previous target for smooth transitions
+        self._prev_target: float = self.config.target_speed
 
     # ------------------------------------------------------------------
     # Route management
@@ -663,16 +668,8 @@ class PrivilegedExpert:
                         target = 0.0
                     else:
                         # Kinematic profile: v = sqrt(2 * a * d)
-                        # Use gentler decel when already turning so
-                        # the ramp engages earlier (~12 m instead of
-                        # ~6 m) and the stop feels smooth.
                         d = max(tl_distance - cfg.traffic_light_stop_distance, 0.0)
-                        decel = (
-                            cfg.tl_turn_comfort_decel
-                            if mode in (DrivingMode.TURNING, DrivingMode.APPROACHING_TURN)
-                            else cfg.tl_comfort_decel
-                        )
-                        v_ms = math.sqrt(2.0 * decel * d)
+                        v_ms = math.sqrt(2.0 * cfg.tl_comfort_decel * d)
                         tl_target = v_ms * 3.6  # m/s → km/h
                         if tl_target < target:
                             mode = DrivingMode.TRAFFIC_LIGHT_STOP
@@ -724,6 +721,16 @@ class PrivilegedExpert:
             elif ped_dist < cfg.pedestrian_hazard_distance:
                 mode = DrivingMode.PEDESTRIAN_STOP
                 target = min(target, 8.0)  # creep at 8 km/h
+
+        # --- Rate limiter ---
+        # Prevent target from dropping more than max_target_drop_per_frame
+        # per tick.  This smooths mode-transition jumps (e.g. APPR→TL)
+        # so the overshoot override never fires during normal driving.
+        # Emergency stops (target ≈ 0) bypass the limiter entirely.
+        if target > 0.0:
+            max_drop = cfg.max_target_drop_per_frame
+            target = max(target, self._prev_target - max_drop)
+        self._prev_target = target
 
         return max(target, 0.0), mode
 
