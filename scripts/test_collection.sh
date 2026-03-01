@@ -3,7 +3,8 @@
 # Quick Smoke-Test Collection (Schema v3)
 # ==============================================================================
 #
-# Runs a minimal collection (1 town, 1 weather, 2 episodes) to verify:
+# Runs a minimal collection across 2 towns (1 episode per traffic config)
+# to verify:
 #   1. CARLA connection works
 #   2. 3-camera panoramic captures at 1920×320 (3×640×320)
 #   3. RoadOption nav commands saved (1=Left, 2=Right, 3=Straight, 4=LaneFollow)
@@ -37,13 +38,16 @@ echo "Output:  ${OUTPUT_DIR}"
 echo "=================================================================="
 echo ""
 
-# --- Run a small collection: 1 town, 1 weather, 2 episodes ---
+# --- Run a small collection: 2 towns, 1 weather, 1 episode per traffic config ---
+# collect_data.py iterates towns × weathers × traffic_configs × episodes,
+# so 2 towns × 1 weather × 3 traffic densities × 1 episode = 6 episodes total
+# (same total as the previous 1 town × 3 traffic × 2 episodes setup).
 python scripts/collect_data.py \
     --config configs/collection.yaml \
     --output "${OUTPUT_DIR}" \
-    --town Town01 \
+    --town Town01 Town03 \
     --weather ClearNoon \
-    --episodes 2 \
+    --episodes 1 \
     --spectator \
     --debug-draw \
     --route-strategy balanced \
