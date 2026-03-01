@@ -7,14 +7,13 @@
 #   conda activate rwkv
 #   bash scripts/overnight_collection.sh
 #
-# Expected runtime: ~8-12 hours
-# Expected output:  ~20+ hours of driving data (1.4M+ frames)
-# Expected storage: ~1-2 TB at 1920×320 panoramic (gzip-1)
+# Campaign layout (derived from configs/collection.yaml):
+#   9 towns × 10 weathers × 3 traffic densities × 6 episodes = 1,620 episodes
+#   Each episode: 4000 frames (200 s at 20 FPS)
+#   Total: ~90 hours of driving data (~11.7 M frames)
 #
-# Storage estimates (50 hrs driving):
-#   224×224:  ~34 GB    (measured ~68 KB/frame)
-#   512×512:  ~1.22 TB  (estimated ~270 KB/frame)
-#   1024×1024: ~4.9 TB  (estimated ~1.08 MB/frame)
+# Expected runtime: ~24-48 hours (depends on CARLA frame rate)
+# Expected storage: ~1-2 TB at 1920×320 panoramic (gzip-1)
 #
 # Monitor progress: tail -f data/collected/collection.log
 # Resume after interruption: just re-run the script (manifest-based resume)
@@ -40,35 +39,32 @@ echo "Log:     ${LOG_FILE}"
 echo "============================================================"
 
 # --- Configuration ---
-# Towns to collect from (must match configs/collection.yaml towns list)
+# Towns to collect from (must match configs/collection.yaml towns list).
 # Town02 is held out for evaluation — do NOT add it here.
 TOWNS=("Town01" "Town03" "Town04" "Town05" "Town06" "Town07" "Town10" "Town12" "Town15")
 
-# Weather conditions
-WEATHERS=("ClearNoon" "CloudyNoon" "WetNoon" "SoftRainNoon" "HardRainNoon" "ClearSunset")
-
-# Episodes per (town, weather) combination = 9×6×6 = 324 episodes
+# Episodes per (town, weather, traffic-density) combination.
+# Weathers (10) and traffic densities (3) come from collection.yaml
+# and are NOT overridden here.
+# Total: 9 towns × 10 weathers × 3 densities × 6 episodes = 1,620 episodes (~90 hrs)
 EPISODES_PER_CONFIG=6
 
 # Each episode = 4000 frames (200 seconds at 20 FPS)
 MAX_FRAMES=4000
-
-# Traffic
-N_VEHICLES=40
-N_WALKERS=0
 
 # Route generation strategy: balanced turns
 ROUTE_STRATEGY="balanced"
 TARGET_LEFT=0.15
 TARGET_RIGHT=0.15
 
-# Total expected: 324 episodes × 4000 frames = 1,296,000 frames (≈18 hours driving)
-# At 1920×320 panoramic: ~350 GB (1.3M × 270 KB/frame)
+N_WEATHERS=10   # from collection.yaml (for display only)
+N_DENSITIES=3   # from collection.yaml (for display only)
+TOTAL_EPISODES=$(( ${#TOWNS[@]} * N_WEATHERS * N_DENSITIES * EPISODES_PER_CONFIG ))
 echo ""
-echo "Plan: ${#TOWNS[@]} towns × ${#WEATHERS[@]} weathers × ${EPISODES_PER_CONFIG} episodes"
-echo "Total: $(( ${#TOWNS[@]} * ${#WEATHERS[@]} * ${EPISODES_PER_CONFIG} )) episodes"
+echo "Plan: ${#TOWNS[@]} towns × ${N_WEATHERS} weathers × ${N_DENSITIES} densities × ${EPISODES_PER_CONFIG} episodes"
+echo "Total: ${TOTAL_EPISODES} episodes"
 echo "Frames per episode: ${MAX_FRAMES} ($(( MAX_FRAMES / 20 ))s at 20 FPS)"
-echo "Expected total: $(( ${#TOWNS[@]} * ${#WEATHERS[@]} * ${EPISODES_PER_CONFIG} * MAX_FRAMES )) frames"
+echo "Expected total: $(( TOTAL_EPISODES * MAX_FRAMES )) frames (~$(( TOTAL_EPISODES * MAX_FRAMES / 20 / 3600 )) hrs)"
 echo "Route strategy: ${ROUTE_STRATEGY} (left=${TARGET_LEFT}, right=${TARGET_RIGHT})"
 echo ""
 
@@ -78,7 +74,7 @@ echo ""
 # Resume is automatic: manifest tracks completed episodes.
 FAILED_TOWNS=()
 for town in "${TOWNS[@]}"; do
-    echo "[$(date +%H:%M:%S)] Starting: ${town} (${EPISODES_PER_CONFIG} episodes per weather)" | tee -a "${LOG_FILE}"
+    echo "[$(date +%H:%M:%S)] Starting: ${town} (${EPISODES_PER_CONFIG} episodes per weather×density)" | tee -a "${LOG_FILE}"
 
     if python scripts/collect_data.py \
         --config configs/collection.yaml \
