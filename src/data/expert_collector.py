@@ -78,7 +78,7 @@ class EpisodeConfig:
     n_walkers: int = 30
     max_frames: int = 2000
     timeout_speed: float = 0.1  # m/s — below this for timeout_duration → discard
-    timeout_duration: float = 45.0  # seconds stuck before early termination
+    timeout_duration: float = 60.0  # seconds stuck before early termination
     fps: int = 20
 
     # 3-camera panoramic setup
