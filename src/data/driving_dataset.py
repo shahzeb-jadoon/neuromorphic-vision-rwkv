@@ -268,6 +268,9 @@ class DrivingSequenceDataset(Dataset):
         controls = torch.stack([steering, acceleration], dim=-1)
 
         nav_cmd = torch.from_numpy(nav_cmd.copy()).long()
+        # Remap RoadOption values 1-4 → 0-3 for nn.Embedding(4, dim).
+        # Schema v3 guarantees values ∈ {1,2,3,4} (LEFT..LANEFOLLOW).
+        nav_cmd = nav_cmd - 1
         velocity = torch.from_numpy(velocity.copy())
 
         # Per-frame loss weight: down-weight stationary frames.

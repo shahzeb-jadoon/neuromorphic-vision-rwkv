@@ -54,7 +54,9 @@ class FusionConfig:
 
     visual_dim: int = 384
     nav_embed_dim: int = 64
-    n_nav_commands: int = 5  # RoadOption: VOID=0, LEFT=1, RIGHT=2, STRAIGHT=3, LANEFOLLOW=4
+    n_nav_commands: int = (
+        4  # LEFT=0, RIGHT=1, STRAIGHT=2, LANEFOLLOW=3 (remapped from RoadOption 1-4)
+    )
     fused_dim: int = 384
     dropout: float = 0.1
 
