@@ -227,6 +227,12 @@ class DrivingSequenceDataset(Dataset):
     def __len__(self) -> int:
         return len(self.clips)
 
+    # Stationary-frame loss down-weight.
+    # Frames with speed < this threshold (m/s) get reduced loss weight
+    # to prevent the 42% stationary majority from dominating gradients.
+    STATIONARY_SPEED_THRESH: float = 0.14  # ~0.5 km/h
+    STATIONARY_LOSS_WEIGHT: float = 0.1
+
     def __getitem__(self, idx: int) -> dict[str, torch.Tensor]:
         """Load a single clip.
 
@@ -238,6 +244,8 @@ class DrivingSequenceDataset(Dataset):
                     acceleration = throttle - brake  ∈ [-1, 1]
                 nav_command: (seq_len,) int64  (RoadOption values)
                 velocity: (seq_len, 3) float32
+                loss_weight: (seq_len,) float32 — per-frame weight
+                    (1.0 for moving frames, 0.1 for stationary)
         """
         ep_idx, start = self.clips[idx]
         end = start + self.seq_len
@@ -262,6 +270,15 @@ class DrivingSequenceDataset(Dataset):
         nav_cmd = torch.from_numpy(nav_cmd.copy()).long()
         velocity = torch.from_numpy(velocity.copy())
 
+        # Per-frame loss weight: down-weight stationary frames.
+        # Compute speed from raw velocity BEFORE z-score normalisation.
+        speed = velocity[:, :2].norm(dim=-1)  # horizontal speed (m/s)
+        loss_weight = torch.where(
+            speed < self.STATIONARY_SPEED_THRESH,
+            torch.tensor(self.STATIONARY_LOSS_WEIGHT),
+            torch.tensor(1.0),
+        )
+
         # Z-score normalise velocity
         velocity = (velocity - VELOCITY_MEAN) / VELOCITY_STD.clamp(min=1e-6)
 
@@ -277,6 +294,7 @@ class DrivingSequenceDataset(Dataset):
             "controls": controls,
             "nav_command": nav_cmd,
             "velocity": velocity,
+            "loss_weight": loss_weight,
         }
 
     def _augment(
