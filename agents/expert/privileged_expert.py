@@ -126,6 +126,9 @@ class ExpertConfig:
     curvature_speed_factor: float = 0.7  # reduce by 30% on curves
     curvature_threshold_deg: float = 20.0  # angle change between successive wps
 
+    # --- Cross-track correction ---
+    cross_track_gain: float = 0.3  # weight of lateral offset in steering
+
     # --- Noise injection (for training data diversity) ---
     steering_noise_sigma: float = 1e-3  # Gaussian noise std on steering
 
@@ -409,6 +412,12 @@ class PrivilegedExpert:
         # (e.g. red lights) from causing overshoot on resumption.
         if self._prev_mode in self._RESET_FROM_MODES and mode not in self._RESET_FROM_MODES:
             self.speed_pid.reset()
+
+        # Reset steer PID when exiting a turn so the integral wound up
+        # during the turn does not bias the post-turn straight.
+        if self._prev_mode == DrivingMode.TURNING and mode != DrivingMode.TURNING:
+            self.steer_pid.reset()
+
         self._prev_mode = mode
 
         self.mode = mode
@@ -870,7 +879,15 @@ class PrivilegedExpert:
         transform: "carla.Transform",
         target_wp: "carla.Waypoint",
     ) -> float:
-        """PID steering on the signed heading error to the target waypoint."""
+        """PID steering on heading error + cross-track correction.
+
+        The heading-only controller centres slowly after turns because
+        the small angular offset (arctan(offset / look-ahead) ≈ 11°)
+        produces weak corrections.  Adding a perpendicular-distance
+        term proportional to ``cross_track_gain`` gives the PID a
+        direct lane-centering signal, cutting post-turn settle time
+        roughly in half.
+        """
         ego = transform.location
         tgt = target_wp.transform.location
 
@@ -881,8 +898,18 @@ class PrivilegedExpert:
         error = target_yaw - transform.rotation.yaw
         error = (error + 180) % 360 - 180
 
-        # Normalise so ±90° → ±1.0
-        return self.steer_pid.step(error / 90.0)
+        # Cross-track (perpendicular) error — signed distance from ego
+        # to the waypoint's centre-line.  Positive = ego is to the right
+        # of the desired path → need to steer left (negative correction).
+        wp_fwd = target_wp.transform.get_forward_vector()
+        dx = ego.x - target_wp.transform.location.x
+        dy = ego.y - target_wp.transform.location.y
+        cross_track = dx * wp_fwd.y - dy * wp_fwd.x  # 2-D cross product
+
+        # Normalise so ±90° → ±1.0, then add cross-track term
+        steer = self.steer_pid.step(error / 90.0)
+        steer -= self.config.cross_track_gain * cross_track
+        return max(-1.0, min(1.0, steer))
 
     def _longitudinal_control(
         self,
