@@ -264,6 +264,7 @@ class PrivilegedExpert:
             self.config.speed_kp,
             self.config.speed_ki,
             self.config.speed_kd,
+            integral_limit=2.0,
         )
         self.steer_pid = PIDController(
             self.config.steer_kp,
@@ -300,6 +301,19 @@ class PrivilegedExpert:
 
         # Rate limiter — previous target for smooth transitions
         self._prev_target: float = self.config.target_speed
+
+        # Mode-transition PID reset — track previous mode so we can
+        # reset the speed PID integral when transitioning out of a
+        # stop/hold mode.  Prevents stale integral from causing
+        # overshoot on resumption.
+        self._prev_mode: DrivingMode = DrivingMode.FOLLOW_LANE
+        self._RESET_FROM_MODES: frozenset = frozenset({
+            DrivingMode.TRAFFIC_LIGHT_STOP,
+            DrivingMode.VEHICLE_FOLLOWING,
+            DrivingMode.PEDESTRIAN_STOP,
+            DrivingMode.EMERGENCY_STOP,
+            DrivingMode.STOP_SIGN_STOP,
+        })
 
     # ------------------------------------------------------------------
     # Route management
@@ -389,6 +403,14 @@ class PrivilegedExpert:
             ped_dist,
             base_target,
         )
+
+        # Reset speed PID integral when leaving a stop/hold mode.
+        # This prevents stale integral accumulated during long stops
+        # (e.g. red lights) from causing overshoot on resumption.
+        if self._prev_mode in self._RESET_FROM_MODES and mode not in self._RESET_FROM_MODES:
+            self.speed_pid.reset()
+        self._prev_mode = mode
+
         self.mode = mode
         self._apply_gain_blending()
 
@@ -472,6 +494,16 @@ class PrivilegedExpert:
             self._wp_buffer.append(self._route[self._route_index])
             self._route_index += 1
 
+        # --- Junction gap fill ---
+        # The GlobalRoutePlanner emits only two waypoints for junction
+        # (turn) edges — the last approach waypoint and a point ~10 m
+        # past the junction exit.  This creates a single ~17 m chord
+        # segment in the corridor that produces a visible ±45° spike
+        # and degrades SAT coverage, curvature estimation, and follow-
+        # distance adaptation.  Detect these large gaps and fill them
+        # with intermediate waypoints queried from the HD map.
+        self._fill_junction_gaps()
+
         # --- Route-end extension ---
         # If the planned route is consumed and the buffer is running
         # low, synthesise continuation waypoints from the map so that
@@ -491,6 +523,60 @@ class PrivilegedExpert:
                     nexts = nxt.next(2.0)
             except (AttributeError, RuntimeError):
                 pass  # graceful degradation if map query fails
+
+    def _fill_junction_gaps(self) -> None:
+        """Insert intermediate waypoints where the buffer has large gaps.
+
+        The ``GlobalRoutePlanner`` emits only two waypoints for
+        junction (turn) edges — the last approach waypoint and a
+        point ~10 m past the junction exit.  The resulting ~15–20 m
+        chord degrades the corridor (±45° spike), curvature
+        estimation, and adaptive follow-distance.
+
+        This method scans consecutive waypoint pairs in the buffer.
+        When a gap exceeds ``_GAP_THRESHOLD`` metres, it queries the
+        HD map (``wp.next(step)``) to produce intermediate waypoints
+        at ~2 m spacing, preserving the nav command of the gap's
+        start waypoint.
+
+        The buffer's ``maxlen`` is respected — filling stops when
+        full, and the deque naturally evicts the oldest entries.
+        """
+        _GAP_THRESHOLD = 4.0  # metres — normal spacing is ~2 m
+        _FILL_STEP = 2.0  # metres — interpolation step
+        if len(self._wp_buffer) < 2:
+            return
+
+        # Work on a snapshot; rebuild with fills inserted.
+        items = list(self._wp_buffer)
+        rebuilt: list[tuple] = [items[0]]
+
+        for j in range(1, len(items)):
+            wp_prev, _ = items[j - 1]
+            wp_next, cmd_next = items[j]
+            gap = wp_prev.transform.location.distance(wp_next.transform.location)
+
+            if gap > _GAP_THRESHOLD:
+                # Fill the gap with intermediate map waypoints.
+                try:
+                    nexts = wp_prev.next(_FILL_STEP)
+                    while nexts:
+                        nxt = nexts[0]
+                        if nxt.transform.location.distance(wp_next.transform.location) < _FILL_STEP:
+                            break  # close enough to the next original wp
+                        rebuilt.append((nxt, cmd_next))
+                        nexts = nxt.next(_FILL_STEP)
+                except (AttributeError, RuntimeError):
+                    pass  # graceful degradation
+
+            rebuilt.append((wp_next, cmd_next))
+
+        # Only rebuild if we actually inserted anything.
+        if len(rebuilt) != len(items):
+            self._wp_buffer.clear()
+            maxlen = self._wp_buffer.maxlen or 40
+            for entry in rebuilt[:maxlen]:
+                self._wp_buffer.append(entry)
 
     def _advance_route(self, transform: "carla.Transform") -> None:
         """Pop consumed waypoints (closer than *min_follow_distance* or behind ego)."""
