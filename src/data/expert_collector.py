@@ -23,6 +23,7 @@ from __future__ import annotations
 
 from src.data import hdf5_schema as S
 
+import gc
 import hashlib
 import json
 import logging
@@ -116,6 +117,260 @@ class EpisodeResult:
     error_message: str | None = None
     duration_seconds: float = 0.0
     recording_path: str | None = None
+
+
+# ---------------------------------------------------------------------------
+# Streaming HDF5 writer — writes one frame at a time to avoid peak memory
+# ---------------------------------------------------------------------------
+
+
+class _StreamingEpisodeWriter:
+    """Incrementally writes episode data to an HDF5 file.
+
+    Instead of accumulating every frame in Python lists and calling
+    ``np.stack`` at the end (which doubles peak memory to ~14 GB for a
+    4000-frame panoramic episode), this writer pre-allocates resizable
+    HDF5 datasets and appends each frame directly.
+
+    Peak image memory: **1 frame** (~1.76 MB) instead of **N frames**.
+    """
+
+    def __init__(
+        self,
+        filepath: Path,
+        config: EpisodeConfig,
+        max_frames: int,
+    ) -> None:
+        self.filepath = filepath
+        self.config = config
+        self.n_written = 0
+
+        pano_w = config.camera_width * len(config.camera_yaws)
+        h, w, c = config.camera_height, pano_w, 3
+
+        self._h5 = h5py.File(filepath, "w")
+
+        # Pre-allocate with maxshape=(None, ...) for extensibility.
+        # Initial shape is (max_frames, ...) — we resize down at finalize.
+        self._ds_images = self._h5.create_dataset(
+            S.IMAGES,
+            shape=(max_frames, h, w, c),
+            dtype=np.uint8,
+            maxshape=(None, h, w, c),
+            chunks=(1, h, w, c),
+            compression="gzip",
+            compression_opts=1,
+        )
+        self._ds_steering = self._h5.create_dataset(
+            S.STEERING, shape=(max_frames,), dtype=np.float32, maxshape=(None,)
+        )
+        self._ds_throttle = self._h5.create_dataset(
+            S.THROTTLE, shape=(max_frames,), dtype=np.float32, maxshape=(None,)
+        )
+        self._ds_brake = self._h5.create_dataset(
+            S.BRAKE, shape=(max_frames,), dtype=np.float32, maxshape=(None,)
+        )
+        self._ds_nav = self._h5.create_dataset(
+            S.NAV_COMMAND, shape=(max_frames,), dtype=np.int32, maxshape=(None,)
+        )
+        self._ds_pos = self._h5.create_dataset(
+            S.POSITION, shape=(max_frames, 3), dtype=np.float32, maxshape=(None, 3)
+        )
+        self._ds_rot = self._h5.create_dataset(
+            S.ROTATION, shape=(max_frames, 3), dtype=np.float32, maxshape=(None, 3)
+        )
+        self._ds_vel = self._h5.create_dataset(
+            S.VELOCITY, shape=(max_frames, 3), dtype=np.float32, maxshape=(None, 3)
+        )
+        self._ds_tl = self._h5.create_dataset(
+            S.TRAFFIC_LIGHT_STATE, shape=(max_frames,), dtype=np.int32, maxshape=(None,)
+        )
+        self._ds_ss = self._h5.create_dataset(
+            S.STOP_SIGN_DISTANCE, shape=(max_frames,), dtype=np.float32, maxshape=(None,)
+        )
+        self._ds_ts = self._h5.create_dataset(
+            S.TARGET_SPEED, shape=(max_frames,), dtype=np.float32, maxshape=(None,)
+        )
+        self._ds_dm = self._h5.create_dataset(
+            S.DRIVING_MODE, shape=(max_frames,), dtype=np.int32, maxshape=(None,)
+        )
+        self._ds_ncorr = self._h5.create_dataset(
+            S.N_CORRIDOR_SEGMENTS, shape=(max_frames,), dtype=np.int32, maxshape=(None,)
+        )
+        self._ds_wpbs = self._h5.create_dataset(
+            S.WP_BUFFER_SIZE, shape=(max_frames,), dtype=np.int32, maxshape=(None,)
+        )
+        self._ds_wpbh = self._h5.create_dataset(
+            S.WP_BUFFER_HEAD_DIST, shape=(max_frames,), dtype=np.float32, maxshape=(None,)
+        )
+        self._ds_sat = self._h5.create_dataset(
+            S.SAT_DETECTIONS, shape=(max_frames,), dtype=np.int32, maxshape=(None,)
+        )
+        self._ds_lat = self._h5.create_dataset(
+            S.LATERAL_DETECTIONS, shape=(max_frames,), dtype=np.int32, maxshape=(None,)
+        )
+
+        # Variable-length string datasets for actor JSON
+        dt_str = h5py.string_dtype()
+        self._ds_nveh = self._h5.create_dataset(
+            S.NEARBY_VEHICLES, shape=(max_frames,), dtype=dt_str, maxshape=(None,)
+        )
+        self._ds_nped = self._h5.create_dataset(
+            S.NEARBY_PEDESTRIANS, shape=(max_frames,), dtype=dt_str, maxshape=(None,)
+        )
+
+    # -- Per-frame append --------------------------------------------------
+
+    def append_frame(
+        self,
+        panoramic: np.ndarray,
+        control: Any,
+        info: Any,
+    ) -> None:
+        """Write one frame of data directly to the HDF5 datasets."""
+        i = self.n_written
+
+        self._ds_images[i] = panoramic
+        self._ds_steering[i] = float(control.steer)
+        self._ds_throttle[i] = float(control.throttle)
+        self._ds_brake[i] = float(control.brake)
+        self._ds_nav[i] = info.nav_command
+        self._ds_pos[i] = np.array(info.position, dtype=np.float32)
+        self._ds_rot[i] = np.array(info.rotation, dtype=np.float32)
+        self._ds_vel[i] = np.array(info.velocity, dtype=np.float32)
+        self._ds_tl[i] = info.traffic_light_state
+        self._ds_ss[i] = info.stop_sign_distance
+        self._ds_ts[i] = info.target_speed
+        self._ds_dm[i] = info.driving_mode
+        self._ds_ncorr[i] = info.n_corridor_segments
+        self._ds_wpbs[i] = info.wp_buffer_size
+        self._ds_wpbh[i] = info.wp_buffer_head_dist
+        self._ds_sat[i] = info.sat_detections
+        self._ds_lat[i] = info.lateral_detections
+        self._ds_nveh[i] = json.dumps(info.nearby_vehicles)
+        self._ds_nped[i] = json.dumps(info.nearby_pedestrians)
+
+        self.n_written += 1
+
+    # -- Finalize ----------------------------------------------------------
+
+    def finalize(
+        self,
+        status: str,
+        collision_frame: int | None,
+    ) -> EpisodeResult:
+        """Resize datasets to actual frame count, write metadata, close."""
+        n = self.n_written
+        config = self.config
+
+        if n == 0:
+            self._h5.close()
+            self.filepath.unlink(missing_ok=True)
+            return EpisodeResult(
+                status="crashed",
+                error_message="No frames collected",
+            )
+
+        # Trim datasets to actual length
+        for ds in [
+            self._ds_images,
+            self._ds_steering,
+            self._ds_throttle,
+            self._ds_brake,
+            self._ds_nav,
+            self._ds_pos,
+            self._ds_rot,
+            self._ds_vel,
+            self._ds_tl,
+            self._ds_ss,
+            self._ds_ts,
+            self._ds_dm,
+            self._ds_ncorr,
+            self._ds_wpbs,
+            self._ds_wpbh,
+            self._ds_sat,
+            self._ds_lat,
+            self._ds_nveh,
+            self._ds_nped,
+        ]:
+            ds.resize(n, axis=0)
+
+        # Derived: stationary flag
+        vel = self._ds_vel[:]
+        speed_ms = np.sqrt(vel[:, 0] ** 2 + vel[:, 1] ** 2 + vel[:, 2] ** 2)
+        self._h5.create_dataset(S.STATIONARY, data=(speed_ms * 3.6 < 0.5))
+
+        # Metadata
+        pano_w = config.camera_width * len(config.camera_yaws)
+        meta = self._h5.create_group(S.METADATA_GROUP)
+        meta.attrs[S.META_SCHEMA_VERSION] = S.SCHEMA_VERSION
+        meta.attrs[S.META_TOWN] = config.town
+        meta.attrs[S.META_WEATHER] = config.weather
+        meta.attrs[S.META_FPS] = config.fps
+        meta.attrs[S.META_N_FRAMES] = n
+        meta.attrs[S.META_STATUS] = status
+        meta.attrs[S.META_CAMERA_WIDTH] = config.camera_width
+        meta.attrs[S.META_CAMERA_HEIGHT] = config.camera_height
+        meta.attrs[S.META_N_CAMERAS] = len(config.camera_yaws)
+        meta.attrs[S.META_CAMERA_FOV] = config.camera_fov
+        meta.attrs[S.META_CAMERA_YAWS] = list(config.camera_yaws)
+        meta.attrs[S.META_EXPERT_TYPE] = "privileged_expert"
+        meta.attrs[S.META_EXPERT_TARGET_SPEED] = config.expert_config.target_speed
+        if collision_frame is not None:
+            meta.attrs[S.META_COLLISION_FRAME] = collision_frame
+
+        self._h5.close()
+
+        # Nav distribution
+        nav = self._read_nav_distribution()
+
+        filename = self.filepath.name
+        episode_hash = filename.replace("episode_", "").replace(".h5", "")
+
+        logger.info(
+            "Saved %s — %d frames (%dx%d panoramic), status=%s, town=%s",
+            filename,
+            n,
+            pano_w,
+            config.camera_height,
+            status,
+            config.town,
+        )
+
+        return EpisodeResult(
+            status=status,
+            filename=filename,
+            episode_hash=episode_hash,
+            n_frames=n,
+            town=config.town,
+            weather=config.weather,
+            nav_distribution=nav,
+            collision_frame=collision_frame,
+        )
+
+    def _read_nav_distribution(self) -> dict[str, int]:
+        """Read nav command distribution from the (already-written) dataset."""
+        nav_names = {
+            int(RoadOption.LANEFOLLOW): "LaneFollow",
+            int(RoadOption.LEFT): "Left",
+            int(RoadOption.RIGHT): "Right",
+            int(RoadOption.STRAIGHT): "Straight",
+        }
+        # Re-open briefly to read the trimmed nav dataset
+        with h5py.File(self.filepath, "r") as f:
+            nav = f[S.NAV_COMMAND][:]
+        dist = {}
+        for cmd_id, cmd_name in nav_names.items():
+            dist[cmd_name] = int(np.sum(nav == cmd_id))
+        return dist
+
+    def abort(self) -> None:
+        """Close the file without finalizing (e.g. on crash with no data)."""
+        try:
+            self._h5.close()
+        except Exception:
+            pass
+        self.filepath.unlink(missing_ok=True)
 
 
 class ExpertDataCollector:
@@ -529,28 +784,13 @@ class ExpertDataCollector:
         original_settings = None
         cameras: list[tuple[carla.Actor, queue.Queue]] = []
 
-        # Data buffers
-        images_buf: list[np.ndarray] = []
-        steering_buf: list[float] = []
-        throttle_buf: list[float] = []
-        brake_buf: list[float] = []
-        nav_cmd_buf: list[int] = []
-        # Privileged / future-proofing buffers
-        position_buf: list[np.ndarray] = []
-        rotation_buf: list[np.ndarray] = []
-        velocity_buf: list[np.ndarray] = []
-        traffic_light_buf: list[int] = []
-        stop_sign_distance_buf: list[float] = []
-        target_speed_buf: list[float] = []
-        driving_mode_buf: list[int] = []
-        nearby_vehicles_buf: list[str] = []  # JSON strings
-        nearby_pedestrians_buf: list[str] = []  # JSON strings
-        # Corridor diagnostic buffers (Option D)
-        n_corridor_segments_buf: list[int] = []
-        wp_buffer_size_buf: list[int] = []
-        wp_buffer_head_dist_buf: list[float] = []
-        sat_detections_buf: list[int] = []
-        lateral_detections_buf: list[int] = []
+        # Streaming HDF5 writer (replaces in-memory buffer lists)
+        # Generate hash-based filename upfront
+        timestamp_bytes = int(time.time() * 1_000_000).to_bytes(8, "big")
+        episode_hash = hashlib.sha256(timestamp_bytes).hexdigest()[:8]
+        episode_filename = f"episode_{episode_hash}.h5"
+        episode_filepath = self.output_dir / episode_filename
+        writer: _StreamingEpisodeWriter | None = None
         collision_frame: int | None = None
 
         try:
@@ -796,6 +1036,13 @@ class ExpertDataCollector:
             prev_location = vehicle.get_transform().location
             dt = 1.0 / config.fps
 
+            # Create streaming HDF5 writer (writes one frame at a time)
+            writer = _StreamingEpisodeWriter(
+                filepath=episode_filepath,
+                config=config,
+                max_frames=config.max_frames,
+            )
+
             for frame_idx in range(config.max_frames):
                 # Check if expert finished route
                 if expert.done():
@@ -824,34 +1071,12 @@ class ExpertDataCollector:
 
                 # --- Capture panoramic image ---
                 panoramic = self._capture_panoramic(cameras, config)
-                images_buf.append(panoramic)
 
-                # --- Store control signals ---
-                steering_buf.append(float(control.steer))
-                throttle_buf.append(float(control.throttle))
-                brake_buf.append(float(control.brake))
+                # --- Stream frame directly to HDF5 (no in-memory buffer) ---
+                writer.append_frame(panoramic, control, info)
 
-                # --- Navigation command (from expert route) ---
-                nav_cmd_buf.append(info.nav_command)
-
-                # --- Ego state ---
-                position_buf.append(np.array(info.position, dtype=np.float32))
-                rotation_buf.append(np.array(info.rotation, dtype=np.float32))
-                velocity_buf.append(np.array(info.velocity, dtype=np.float32))
-
-                # --- Privileged data ---
-                traffic_light_buf.append(info.traffic_light_state)
-                stop_sign_distance_buf.append(info.stop_sign_distance)
-                target_speed_buf.append(info.target_speed)
-                driving_mode_buf.append(info.driving_mode)
-                nearby_vehicles_buf.append(json.dumps(info.nearby_vehicles))
-                nearby_pedestrians_buf.append(json.dumps(info.nearby_pedestrians))
-                # Corridor diagnostics
-                n_corridor_segments_buf.append(info.n_corridor_segments)
-                wp_buffer_size_buf.append(info.wp_buffer_size)
-                wp_buffer_head_dist_buf.append(info.wp_buffer_head_dist)
-                sat_detections_buf.append(info.sat_detections)
-                lateral_detections_buf.append(info.lateral_detections)
+                # Free the panoramic array immediately
+                del panoramic
 
                 # --- Distance tracking ---
                 cur_loc = vehicle.get_transform().location
@@ -907,69 +1132,19 @@ class ExpertDataCollector:
             else:
                 status = "completed"
 
-            # --- Save to HDF5 ---
-            if len(images_buf) > 0:
-                result = self._save_episode(
-                    images=np.stack(images_buf),
-                    steering=np.array(steering_buf, dtype=np.float32),
-                    throttle=np.array(throttle_buf, dtype=np.float32),
-                    brake=np.array(brake_buf, dtype=np.float32),
-                    nav_command=np.array(nav_cmd_buf, dtype=np.int32),
-                    position=np.stack(position_buf),
-                    rotation=np.stack(rotation_buf),
-                    velocity=np.stack(velocity_buf),
-                    traffic_light_state=np.array(traffic_light_buf, dtype=np.int32),
-                    stop_sign_distance=np.array(stop_sign_distance_buf, dtype=np.float32),
-                    target_speed=np.array(target_speed_buf, dtype=np.float32),
-                    driving_mode=np.array(driving_mode_buf, dtype=np.int32),
-                    nearby_vehicles=nearby_vehicles_buf,
-                    nearby_pedestrians=nearby_pedestrians_buf,
-                    n_corridor_segments=np.array(n_corridor_segments_buf, dtype=np.int32),
-                    wp_buffer_size=np.array(wp_buffer_size_buf, dtype=np.int32),
-                    wp_buffer_head_dist=np.array(wp_buffer_head_dist_buf, dtype=np.float32),
-                    sat_detections=np.array(sat_detections_buf, dtype=np.int32),
-                    lateral_detections=np.array(lateral_detections_buf, dtype=np.int32),
-                    config=config,
-                    status=status,
-                    collision_frame=collision_frame,
-                )
-                result.duration_seconds = time.time() - start_time
-                result.recording_path = recording_path
-                return result
-            else:
-                return EpisodeResult(
-                    status="crashed",
-                    error_message="No frames collected",
-                    duration_seconds=time.time() - start_time,
-                )
+            # --- Finalize streaming HDF5 ---
+            result = writer.finalize(status=status, collision_frame=collision_frame)
+            result.duration_seconds = time.time() - start_time
+            result.recording_path = recording_path
+            return result
 
         except Exception as e:
             logger.error("Episode crashed: %s\n%s", e, traceback.format_exc())
 
-            # Save partial episode if we have data
-            if len(images_buf) > 10:
+            # Finalize partial episode if writer has data
+            if writer is not None and writer.n_written > 10:
                 try:
-                    result = self._save_episode(
-                        images=np.stack(images_buf),
-                        steering=np.array(steering_buf, dtype=np.float32),
-                        throttle=np.array(throttle_buf, dtype=np.float32),
-                        brake=np.array(brake_buf, dtype=np.float32),
-                        nav_command=np.array(nav_cmd_buf, dtype=np.int32),
-                        position=np.stack(position_buf),
-                        rotation=np.stack(rotation_buf),
-                        velocity=np.stack(velocity_buf),
-                        traffic_light_state=np.array(traffic_light_buf, dtype=np.int32),
-                        stop_sign_distance=np.array(stop_sign_distance_buf, dtype=np.float32),
-                        target_speed=np.array(target_speed_buf, dtype=np.float32),
-                        driving_mode=np.array(driving_mode_buf, dtype=np.int32),
-                        nearby_vehicles=nearby_vehicles_buf,
-                        nearby_pedestrians=nearby_pedestrians_buf,
-                        n_corridor_segments=np.array(n_corridor_segments_buf, dtype=np.int32),
-                        wp_buffer_size=np.array(wp_buffer_size_buf, dtype=np.int32),
-                        wp_buffer_head_dist=np.array(wp_buffer_head_dist_buf, dtype=np.float32),
-                        sat_detections=np.array(sat_detections_buf, dtype=np.int32),
-                        lateral_detections=np.array(lateral_detections_buf, dtype=np.int32),
-                        config=config,
+                    result = writer.finalize(
                         status="crashed",
                         collision_frame=collision_frame,
                     )
@@ -978,11 +1153,13 @@ class ExpertDataCollector:
                     return result
                 except Exception:
                     pass
+            elif writer is not None:
+                writer.abort()
 
             return EpisodeResult(
                 status="crashed",
                 error_message=str(e),
-                n_frames=len(images_buf),
+                n_frames=writer.n_written if writer is not None else 0,
                 town=config.town,
                 weather=config.weather,
                 duration_seconds=time.time() - start_time,
@@ -1044,6 +1221,9 @@ class ExpertDataCollector:
                     self.world.apply_settings(original_settings)
                 except Exception:
                     pass
+
+            # Force garbage collection to free any lingering references
+            gc.collect()
 
     # ------------------------------------------------------------------
     # Save

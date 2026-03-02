@@ -22,6 +22,7 @@ from src.data.expert_collector import (
     EpisodeConfig,
     EpisodeResult,
     ExpertDataCollector,
+    _StreamingEpisodeWriter,
 )
 
 # ── Dataclass tests ──────────────────────────────────────────────────
@@ -328,3 +329,130 @@ class TestHDF5Schema:
             S.META_EXPERT_TARGET_SPEED,
         ]:
             assert isinstance(field, str)
+
+
+# ── _StreamingEpisodeWriter tests ────────────────────────────────────
+
+
+class _FakeControl:
+    """Lightweight stand-in for carla.VehicleControl."""
+
+    def __init__(self, steer: float = 0.0, throttle: float = 0.5, brake: float = 0.0):
+        self.steer = steer
+        self.throttle = throttle
+        self.brake = brake
+
+
+class _FakeFrameInfo:
+    """Lightweight stand-in for FrameInfo with all required fields."""
+
+    def __init__(self, nav_command: int = 4, speed_kmh: float = 30.0):
+        self.nav_command = nav_command
+        self.position = [10.0, 20.0, 0.5]
+        self.rotation = [0.0, 90.0, 0.0]
+        self.velocity = [speed_kmh / 3.6, 0.0, 0.0]
+        self.traffic_light_state = 0
+        self.stop_sign_distance = -1.0
+        self.target_speed = 8.33
+        self.driving_mode = 0
+        self.nearby_vehicles: list[dict[str, Any]] = []
+        self.nearby_pedestrians: list[dict[str, Any]] = []
+        self.n_corridor_segments = 10
+        self.wp_buffer_size = 20
+        self.wp_buffer_head_dist = 3.5
+        self.sat_detections = 0
+        self.lateral_detections = 0
+        self.current_speed = speed_kmh
+        self.route_completion = 0.5
+
+
+class TestStreamingEpisodeWriter:
+    """Tests for the streaming HDF5 writer."""
+
+    @pytest.fixture()
+    def config(self) -> EpisodeConfig:
+        return EpisodeConfig(max_frames=100)
+
+    @pytest.fixture()
+    def filepath(self, tmp_path: Path) -> Path:
+        return tmp_path / "episode_test1234.h5"
+
+    def test_write_and_finalize(self, filepath: Path, config: EpisodeConfig) -> None:
+        """Writer creates a valid HDF5 file identical in structure to _save_episode."""
+        n_frames = 20
+        writer = _StreamingEpisodeWriter(filepath, config, max_frames=config.max_frames)
+
+        pano_w = config.camera_width * len(config.camera_yaws)
+        for _ in range(n_frames):
+            img = np.random.randint(0, 255, (config.camera_height, pano_w, 3), dtype=np.uint8)
+            writer.append_frame(img, _FakeControl(), _FakeFrameInfo())
+
+        result = writer.finalize(status="completed", collision_frame=None)
+
+        assert result.status == "completed"
+        assert result.n_frames == n_frames
+        assert filepath.exists()
+
+        with h5py.File(filepath, "r") as f:
+            assert f[S.IMAGES].shape == (n_frames, config.camera_height, pano_w, 3)
+            assert f[S.STEERING].shape == (n_frames,)
+            assert f[S.POSITION].shape == (n_frames, 3)
+            assert S.STATIONARY in f
+            assert S.METADATA_GROUP in f
+            assert f[S.METADATA_GROUP].attrs[S.META_N_FRAMES] == n_frames
+            assert f[S.METADATA_GROUP].attrs[S.META_STATUS] == "completed"
+
+    def test_finalize_with_collision(self, filepath: Path, config: EpisodeConfig) -> None:
+        writer = _StreamingEpisodeWriter(filepath, config, max_frames=100)
+        pano_w = config.camera_width * len(config.camera_yaws)
+        for _ in range(5):
+            img = np.random.randint(0, 255, (config.camera_height, pano_w, 3), dtype=np.uint8)
+            writer.append_frame(img, _FakeControl(), _FakeFrameInfo())
+
+        result = writer.finalize(status="collision", collision_frame=4)
+
+        assert result.status == "collision"
+        assert result.collision_frame == 4
+        with h5py.File(filepath, "r") as f:
+            assert f[S.METADATA_GROUP].attrs[S.META_COLLISION_FRAME] == 4
+
+    def test_finalize_zero_frames_aborts(self, filepath: Path, config: EpisodeConfig) -> None:
+        writer = _StreamingEpisodeWriter(filepath, config, max_frames=100)
+        result = writer.finalize(status="completed", collision_frame=None)
+        assert result.status == "crashed"
+        assert not filepath.exists()  # File deleted
+
+    def test_abort_removes_file(self, filepath: Path, config: EpisodeConfig) -> None:
+        writer = _StreamingEpisodeWriter(filepath, config, max_frames=100)
+        pano_w = config.camera_width * len(config.camera_yaws)
+        img = np.random.randint(0, 255, (config.camera_height, pano_w, 3), dtype=np.uint8)
+        writer.append_frame(img, _FakeControl(), _FakeFrameInfo())
+        writer.abort()
+        assert not filepath.exists()
+
+    def test_compression_is_gzip(self, filepath: Path, config: EpisodeConfig) -> None:
+        writer = _StreamingEpisodeWriter(filepath, config, max_frames=100)
+        pano_w = config.camera_width * len(config.camera_yaws)
+        img = np.random.randint(0, 255, (config.camera_height, pano_w, 3), dtype=np.uint8)
+        writer.append_frame(img, _FakeControl(), _FakeFrameInfo())
+        writer.finalize(status="completed", collision_frame=None)
+
+        with h5py.File(filepath, "r") as f:
+            assert f[S.IMAGES].compression == "gzip"
+            assert f[S.IMAGES].compression_opts == 1
+
+    def test_nav_distribution(self, filepath: Path, config: EpisodeConfig) -> None:
+        writer = _StreamingEpisodeWriter(filepath, config, max_frames=100)
+        pano_w = config.camera_width * len(config.camera_yaws)
+        img = np.random.randint(0, 255, (config.camera_height, pano_w, 3), dtype=np.uint8)
+
+        # 10 frames of LaneFollow (nav=4)
+        for _ in range(10):
+            writer.append_frame(img, _FakeControl(), _FakeFrameInfo(nav_command=4))
+        # 5 frames of Left (nav=1)
+        for _ in range(5):
+            writer.append_frame(img, _FakeControl(), _FakeFrameInfo(nav_command=1))
+
+        result = writer.finalize(status="completed", collision_frame=None)
+        assert result.nav_distribution["LaneFollow"] == 10
+        assert result.nav_distribution["Left"] == 5
