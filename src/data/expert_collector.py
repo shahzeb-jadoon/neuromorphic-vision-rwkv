@@ -28,6 +28,8 @@ import hashlib
 import json
 import logging
 import math
+import os
+import subprocess
 import queue
 import time
 import traceback
@@ -1224,6 +1226,24 @@ class ExpertDataCollector:
 
             # Force garbage collection to free any lingering references
             gc.collect()
+
+            # Drop Linux filesystem caches.  WSL2 counts cached pages
+            # against the .wslconfig memory limit; after writing a
+            # multi-GB HDF5 file the cache alone can push us into OOM
+            # on the next episode (especially on map change).
+            # Requires sudo — set up passwordless access with:
+            #   echo "$USER ALL=(root) NOPASSWD: /usr/sbin/sysctl vm.drop_caches=3" \
+            #     | sudo tee /etc/sudoers.d/drop_caches
+            try:
+                os.sync()
+                subprocess.run(
+                    ["sudo", "-n", "sysctl", "-w", "vm.drop_caches=3"],
+                    capture_output=True,
+                    timeout=5,
+                )
+                logger.debug("Dropped filesystem caches")
+            except Exception:
+                pass
 
     # ------------------------------------------------------------------
     # Save
