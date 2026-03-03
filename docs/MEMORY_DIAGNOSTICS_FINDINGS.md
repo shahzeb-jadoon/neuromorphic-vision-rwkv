@@ -315,25 +315,49 @@ The severe group has nearly 2× the virtual memory. This suggests progressive me
 
 ---
 
-## 8. Recommendations
+## 8. Recommendations & Fix Status
 
-### 8.1 Critical Fix: Sensor Listener Teardown Before `load_world()` (F1)
+### 8.1 F1: Sensor Listener Teardown Before `load_world()` — INEFFECTIVE
 
-The leak starts when sensor data flows on the new map via tick(). The most likely cause: CARLA sensor listeners from Town01 are still registered when Town03 assets are loaded. Each tick delivers sensor data through old callback handles that buffer internally in the C++ client without releasing.
+**Status: IMPLEMENTED AND TESTED — DOES NOT FIX THE LEAK**
 
-**Fix:** In `expert_collector.py`, explicitly call `sensor.stop()` and `sensor.destroy()` for ALL sensors BEFORE `client.load_world()`. Verify that the old `carla.World` handle and all actor references are deleted, then call `gc.collect()` to release C-level pointers.
+Added `teardown_world()` to `ExpertDataCollector` (commit `84fc0e9`). The method
+explicitly destroys all sensors, vehicles, and walkers, drops `self.world = None`,
+and calls `gc.collect()` before every `load_world()` call.
 
-### 8.2 Strong Mitigation: Single-Town Subprocess Isolation (F2)
+**Test result (2026-03-03):** The cross-town test (Town01→Town03) with F1
+produced identical OOM behaviour:
 
-If F1 doesn't resolve the leak, restructure `collect_data.py` to run each town in a **separate subprocess**. This guarantees all C-level allocations are released by the OS when the subprocess exits:
+- `Teardown: destroyed 0 sensors, 0 vehicles, 0 walkers` — episode cleanup
+  (the `finally` block in `collect_episode()`) already destroys everything.
+  There are no stale handles by the time `teardown_world()` is called.
+- RSS trajectory: 553 → 918 → 2,050 → … → 19,027 MB (same ~100 MB/s rate)
+- dmesg: `anon-rss:19560868kB, file-rss:0kB` → OOM-killed
 
-```python
-for town in towns:
-    subprocess.run([sys.executable, "scripts/collect_data.py",
-                    "--town", town, "--episodes", str(episodes), ...])
-```
+**Conclusion:** The leak is NOT caused by stale sensor handles or Python-side
+actor references. It originates inside `libcarla_client.so`'s internal state
+management during map transitions — below Python's reach.
 
-Cost: ~12s per town for a fresh CARLA connection + map load. Negligible compared to episode collection time.
+### 8.2 F2: Per-Town Subprocess Isolation — IMPLEMENTED
+
+**Status: IMPLEMENTED (commit pending), AWAITING TEST**
+
+Restructured `collect_data.py` so each town runs in a **separate subprocess**.
+When the subprocess exits, the OS reclaims ALL C-level memory, including any
+leaked buffers inside `libcarla_client.so`.
+
+**Design:**
+- `main()` dispatches to `_run_orchestrator()` (parent) or worker mode
+- Orchestrator determines towns from config/CLI, spawns one subprocess per town
+- Each subprocess connects to CARLA, loads exactly one map, runs all episodes
+  for that town, then exits
+- Internal `--_subprocess-town` flag (hidden from `--help`) selects worker mode
+- Manifest is shared: workers append episodes, orchestrator reads final summary
+- Cost: ~12s per town for fresh CARLA connection + map load
+
+**Why this is guaranteed to work:** The leak is in anonymous memory allocated by
+the C++ client library. When the process exits, the kernel reclaims ALL of its
+address space — there is no way for a C library leak to survive process exit.
 
 ### 8.3 Safety Net: RSS Memory Guard (F3)
 
@@ -382,6 +406,8 @@ All data is in `data/test_collection/`:
 | `episode_a43f594c.h5` | Tracemalloc: 619 frames, timeout (tracemalloc-induced) |
 | `episode_1d8a7457.h5` | Tracemalloc: 1303 frames, timeout (tracemalloc-induced) |
 | `episode_a412e96e.h5` | Tracemalloc: 902 frames, timeout (tracemalloc-induced) |
+| `f1_crosstown_test.log` | Console output from F1 teardown test (OOM, same as pre-F1) |
+| `memory_log_f1_test.csv` | Background monitor for F1 test (553→19,027 MB RSS) |
 
 ---
 

@@ -14,6 +14,8 @@ from __future__ import annotations
 import argparse
 import itertools
 import logging
+import os
+import subprocess
 import sys
 import time
 import tracemalloc
@@ -132,6 +134,71 @@ def build_campaign(
     return episodes
 
 
+def _run_orchestrator(args: argparse.Namespace) -> None:
+    """Spawn one subprocess per town for memory isolation.
+
+    CARLA's C++ client library leaks ~100 MB/s of anonymous memory
+    after load_world() map changes.  Running each town in a separate
+    process ensures the OS reclaims all C-level memory (including the
+    leaked buffers) when the subprocess exits.
+
+    Overhead: ~12 s per town for fresh CARLA connection + map load,
+    negligible vs. hours of data collection per town.
+    """
+    cfg = load_config(args.config)
+    if args.town:
+        cfg["towns"] = args.town
+    towns: list[str] = cfg.get("towns", ["Town01"])
+
+    logger.info(
+        "F2 memory isolation: spawning %d subprocess(es), one per town",
+        len(towns),
+    )
+
+    # Build subprocess command: same CLI args + internal --_subprocess-town flag
+    # Use resolved __file__ so the call works from any cwd.
+    script = str(Path(__file__).resolve())
+    base_argv = [a for a in sys.argv[1:] if not a.startswith("--_subprocess-town")]
+
+    failed_towns: list[tuple[str, str]] = []
+    for i, town in enumerate(towns, 1):
+        logger.info("--- [%d/%d] Spawning worker for %s ---", i, len(towns), town)
+
+        cmd = [sys.executable, script] + base_argv + ["--_subprocess-town", town]
+        result = subprocess.run(cmd)
+
+        if result.returncode == 0:
+            logger.info("Town %s worker exited cleanly", town)
+        elif result.returncode == -9:
+            logger.error(
+                "Town %s worker OOM-killed (SIGKILL). "
+                "Leak may persist within-town for very long runs.",
+                town,
+            )
+            failed_towns.append((town, "OOM-killed"))
+        else:
+            logger.error(
+                "Town %s worker exited with code %d",
+                town,
+                result.returncode,
+            )
+            failed_towns.append((town, f"exit code {result.returncode}"))
+
+    # Final summary (read manifest written by workers)
+    output_dir = args.output or cfg.get("output", {}).get("directory", "data/collected")
+    manifest_name = cfg.get("output", {}).get("manifest", "collection_manifest.json")
+    manifest = CollectionManifest(Path(output_dir) / manifest_name)
+
+    logger.info("=" * 60)
+    logger.info("Campaign complete!")
+    logger.info(manifest.summary())
+    if failed_towns:
+        logger.warning(
+            "Failed towns: %s",
+            ", ".join(f"{t} ({r})" for t, r in failed_towns),
+        )
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Run data collection campaign")
     parser.add_argument("--config", type=str, default="configs/collection.yaml")
@@ -182,14 +249,36 @@ def main() -> None:
         action="store_true",
         help="Log system memory at key points (map loads, episode boundaries)",
     )
+    parser.add_argument(
+        "--_subprocess-town",
+        type=str,
+        default=None,
+        dest="_subprocess_town",
+        help=argparse.SUPPRESS,  # Internal: per-town worker spawned by orchestrator
+    )
     args = parser.parse_args()
+
+    # --- F2: Per-town subprocess isolation (memory leak mitigation) ---
+    # CARLA's C++ client library (libcarla_client.so) leaks ~100 MB/s of
+    # anonymous memory after load_world() map changes.  By running each
+    # town in a separate subprocess, the OS reclaims all leaked C-level
+    # memory when the subprocess exits.
+    if not args._subprocess_town:
+        _run_orchestrator(args)
+        return
+
+    # ---- Below: per-town worker mode (one town per process) ----
+    logger.info(
+        "Worker process for %s (PID %d)",
+        args._subprocess_town,
+        os.getpid(),
+    )
 
     # Load config
     cfg = load_config(args.config)
 
-    # Apply CLI overrides
-    if args.town:
-        cfg["towns"] = args.town
+    # Force single town (subprocess isolation — ignore CLI --town)
+    cfg["towns"] = [args._subprocess_town]
     if args.weather:
         cfg["weathers"] = args.weather
     if args.max_frames:
@@ -370,10 +459,12 @@ def main() -> None:
                 # Force map reload + route_gen re-init on next iteration
                 current_town = None
 
-    # Final summary
-    logger.info("=" * 60)
-    logger.info("Campaign complete!")
-    logger.info(manifest.summary())
+    # Worker complete — process exit reclaims all C-level memory
+    logger.info(
+        "Worker for %s finished (PID %d)",
+        args._subprocess_town,
+        os.getpid(),
+    )
 
 
 if __name__ == "__main__":
