@@ -16,11 +16,14 @@ import itertools
 import logging
 import sys
 import time
+import tracemalloc
 from pathlib import Path
 from typing import Any
 
 import numpy as np
 import yaml
+
+from scripts.diagnose_memory import log_memory_snapshot
 
 from src.data.expert_collector import (
     CollectionManifest,
@@ -169,6 +172,16 @@ def main() -> None:
         action="store_true",
         help="Draw route, trajectory, and target in CARLA viewport",
     )
+    parser.add_argument(
+        "--tracemalloc",
+        action="store_true",
+        help="Enable tracemalloc to profile Python memory allocations",
+    )
+    parser.add_argument(
+        "--memory-log",
+        action="store_true",
+        help="Log system memory at key points (map loads, episode boundaries)",
+    )
     args = parser.parse_args()
 
     # Load config
@@ -213,6 +226,11 @@ def main() -> None:
     if args.resume:
         logger.info("Resuming from manifest:\n%s", manifest.summary())
 
+    # --- M13: tracemalloc profiling (opt-in) ---
+    if args.tracemalloc:
+        tracemalloc.start(10)  # 10 frames of call stack
+        logger.info("tracemalloc started (10-frame stack depth)")
+
     # Setup collector
     rng = np.random.default_rng(args.seed)
     collector = ExpertDataCollector(
@@ -239,6 +257,12 @@ def main() -> None:
         if config.town != current_town:
             logger.info("Loading map: %s", config.town)
             assert collector.client is not None
+
+            # --- Town03 / memory logging: snapshot before map load ---
+            if args.memory_log:
+                log_memory_snapshot(f"PRE load_world({config.town})")
+            map_load_start = time.monotonic()
+
             # Map loading can take 60-120s over WSL2; temporarily increase timeout
             collector.client.set_timeout(120.0)
             try:
@@ -258,6 +282,14 @@ def main() -> None:
                     current_town = None
                     continue
             collector.client.set_timeout(60.0)
+
+            map_load_elapsed = time.monotonic() - map_load_start
+            logger.info("Map %s loaded in %.1fs", config.town, map_load_elapsed)
+
+            # --- Town03 / memory logging: snapshot after map load ---
+            if args.memory_log:
+                log_memory_snapshot(f"POST load_world({config.town}) [{map_load_elapsed:.1f}s]")
+
             current_town = config.town
 
             # (Re-)create route generator on the now-correct map
@@ -290,6 +322,10 @@ def main() -> None:
                 except Exception as e:
                     logger.warning("Route generation failed, using random: %s", e)
 
+            # --- Memory snapshot before episode ---
+            if args.memory_log:
+                log_memory_snapshot(f"PRE episode {episode_num} ({config.town}/{config.weather})")
+
             # Collect
             result = collector.collect_episode(config, route_waypoints=route)
             logger.info(
@@ -298,6 +334,21 @@ def main() -> None:
                 result.n_frames,
                 result.duration_seconds,
             )
+
+            # --- Memory snapshot after episode ---
+            if args.memory_log:
+                log_memory_snapshot(
+                    f"POST episode {episode_num} status={result.status} "
+                    f"frames={result.n_frames}"
+                )
+
+            # --- M13: tracemalloc snapshot between episodes ---
+            if args.tracemalloc:
+                snapshot = tracemalloc.take_snapshot()
+                top_stats = snapshot.statistics("lineno")
+                logger.info("tracemalloc top 10 after episode %d:", episode_num)
+                for stat in top_stats[:10]:
+                    logger.info("  %s", stat)
 
             # Update manifest
             manifest.add_episode(result)
