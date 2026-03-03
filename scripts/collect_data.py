@@ -134,16 +134,68 @@ def build_campaign(
     return episodes
 
 
+def _preload_map(town: str, host: str, port: int) -> bool:
+    """Load a CARLA map in a throwaway subprocess.
+
+    CARLA's C++ client library leaks ~100 MB/s of anonymous memory
+    after ``load_world()`` map changes.  By calling ``load_world()``
+    in a short-lived subprocess, the OS reclaims all leaked C-level
+    memory when the subprocess exits.  The CARLA *server* retains the
+    new map, so the next client that connects sees it immediately.
+
+    Returns True if the map was loaded successfully.
+    """
+    # Inline script: connect, load_world, exit.  No sensor callbacks
+    # are created, so even if the leak fires it's tiny and dies with
+    # this process.
+    loader_script = f"""\
+import subprocess as sp, sys, time
+import carla
+host = "{host}"
+if host == "auto":
+    try:
+        r = sp.run(["ip", "route", "show", "default"],
+                    capture_output=True, text=True, check=True)
+        host = r.stdout.strip().split()[2]
+    except Exception:
+        host = "localhost"
+c = carla.Client(host, {port})
+c.set_timeout(120.0)
+c.load_world("{town}")
+time.sleep(3)
+print(f"Map preloaded: {town} on {{host}}")
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", loader_script],
+        timeout=180,
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode == 0:
+        logger.info("Map preloader for %s exited cleanly", town)
+        return True
+    logger.error(
+        "Map preloader for %s failed (rc=%d): %s",
+        town,
+        result.returncode,
+        result.stderr.strip()[-500:] if result.stderr else "(no stderr)",
+    )
+    return False
+
+
 def _run_orchestrator(args: argparse.Namespace) -> None:
     """Spawn one subprocess per town for memory isolation.
 
-    CARLA's C++ client library leaks ~100 MB/s of anonymous memory
-    after load_world() map changes.  Running each town in a separate
-    process ensures the OS reclaims all C-level memory (including the
-    leaked buffers) when the subprocess exits.
+    For each town the orchestrator:
+    1. Spawns a throwaway "map preloader" subprocess that calls
+       ``load_world(town)`` then exits — any leaked C-level memory
+       is reclaimed by the OS.
+    2. Spawns the real collector worker which connects to CARLA
+       (server is already on the correct map), calls ``get_world()``,
+       and collects all episodes **without ever calling load_world()**.
 
-    Overhead: ~12 s per town for fresh CARLA connection + map load,
-    negligible vs. hours of data collection per town.
+    This two-phase design ensures the collector process never triggers
+    the libcarla_client.so memory leak.
     """
     cfg = load_config(args.config)
     if args.town:
@@ -160,10 +212,21 @@ def _run_orchestrator(args: argparse.Namespace) -> None:
     script = str(Path(__file__).resolve())
     base_argv = [a for a in sys.argv[1:] if not a.startswith("--_subprocess-town")]
 
+    # Resolve host once for the preloader
+    carla_host = args.host
+    carla_port = args.port
+
     failed_towns: list[tuple[str, str]] = []
     for i, town in enumerate(towns, 1):
-        logger.info("--- [%d/%d] Spawning worker for %s ---", i, len(towns), town)
+        # --- Phase 1: preload map in throwaway subprocess ---
+        logger.info("--- [%d/%d] Preloading map %s ---", i, len(towns), town)
+        if not _preload_map(town, carla_host, carla_port):
+            logger.error("Skipping %s — map preload failed", town)
+            failed_towns.append((town, "preload failed"))
+            continue
 
+        # --- Phase 2: spawn collector worker (no load_world) ---
+        logger.info("--- [%d/%d] Spawning worker for %s ---", i, len(towns), town)
         cmd = [sys.executable, script] + base_argv + ["--_subprocess-town", town]
         result = subprocess.run(cmd)
 
@@ -337,54 +400,58 @@ def main() -> None:
     )
 
     # Run campaign
+    # F2b: The map was already loaded by the orchestrator's preloader
+    # subprocess.  The worker just calls get_world() — NO load_world()
+    # — so the libcarla_client.so memory leak is never triggered.
     episode_num = 0
     current_town: str | None = None
     route_gen: BalancedRouteGenerator | None = None
 
     for config, n_remaining in campaign:
-        # Ensure correct map is loaded BEFORE creating route generator
+        # Verify correct map (preloaded by orchestrator) — no load_world()!
         if config.town != current_town:
-            logger.info("Loading map: %s", config.town)
             assert collector.client is not None
 
-            # --- F1: Tear down all actors and flush C++ client state ---
-            # CARLA's C++ client library retains sensor data buffers
-            # after map changes, leaking ~100 MB/s.  Explicitly destroy
-            # all actors and drop the world reference before load_world().
-            if current_town is not None:
-                collector.teardown_world()
-
-            # --- Town03 / memory logging: snapshot before map load ---
             if args.memory_log:
-                log_memory_snapshot(f"PRE load_world({config.town})")
-            map_load_start = time.monotonic()
+                log_memory_snapshot(f"PRE get_world({config.town})")
 
-            # Map loading can take 60-120s over WSL2; temporarily increase timeout
-            collector.client.set_timeout(120.0)
-            try:
-                collector.client.load_world(config.town)
-                time.sleep(5.0)  # Let the new map fully settle
-                collector.world = collector.client.get_world()
-            except RuntimeError as e:
-                logger.error("Failed to load %s: %s — retrying once", config.town, e)
-                time.sleep(10.0)
+            # The orchestrator's _preload_map() already called load_world()
+            # in a throwaway subprocess.  We just get_world() here.
+            collector.world = collector.client.get_world()
+            actual_map = collector.world.get_map().name
+            expected_suffix = config.town
+
+            if expected_suffix not in actual_map:
+                # Fallback: map mismatch — the preloader may have failed
+                # or another client changed the map.  Load it ourselves.
+                logger.warning(
+                    "Map mismatch: expected %s, got %s — loading directly",
+                    config.town,
+                    actual_map,
+                )
+                collector.client.set_timeout(120.0)
                 try:
                     collector.client.load_world(config.town)
                     time.sleep(5.0)
                     collector.world = collector.client.get_world()
-                except RuntimeError as e2:
-                    logger.error("Retry failed for %s: %s — skipping town", config.town, e2)
+                except RuntimeError as e:
+                    logger.error(
+                        "Failed to load %s: %s — skipping town",
+                        config.town,
+                        e,
+                    )
                     collector.client.set_timeout(60.0)
                     current_town = None
                     continue
-            collector.client.set_timeout(60.0)
+                collector.client.set_timeout(60.0)
+            else:
+                logger.info(
+                    "Map %s already loaded (preloaded by orchestrator)",
+                    actual_map,
+                )
 
-            map_load_elapsed = time.monotonic() - map_load_start
-            logger.info("Map %s loaded in %.1fs", config.town, map_load_elapsed)
-
-            # --- Town03 / memory logging: snapshot after map load ---
             if args.memory_log:
-                log_memory_snapshot(f"POST load_world({config.town}) [{map_load_elapsed:.1f}s]")
+                log_memory_snapshot(f"POST get_world({config.town})")
 
             current_town = config.town
 
