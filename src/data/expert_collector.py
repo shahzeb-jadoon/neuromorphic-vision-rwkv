@@ -453,6 +453,74 @@ class ExpertDataCollector:
             self.world.get_map().name,
         )
 
+    def teardown_world(self) -> None:
+        """Destroy all actors and flush C++ client state before map change.
+
+        CARLA's C++ client library (libcarla_client) may retain internal
+        sensor data buffers after actors are destroyed at the Python level.
+        This method aggressively cleans up to prevent memory leaks during
+        ``client.load_world()`` map transitions.
+
+        Call this BEFORE ``client.load_world()`` when switching towns.
+        """
+        if self.world is None:
+            return
+
+        # 1. Destroy all actors we can find in the CARLA world
+        try:
+            actors = self.world.get_actors()
+            # Stop and destroy sensors first (cameras, collision, lidar, etc.)
+            sensors = actors.filter("sensor.*")
+            for sensor in sensors:
+                try:
+                    sensor.stop()
+                except Exception:
+                    pass
+                try:
+                    sensor.destroy()
+                except Exception:
+                    pass
+
+            # Destroy vehicles (except hero/ego if any — they should
+            # already be gone from episode cleanup)
+            vehicles = actors.filter("vehicle.*")
+            for v in vehicles:
+                try:
+                    v.set_autopilot(False)
+                    v.destroy()
+                except Exception:
+                    pass
+
+            # Destroy walkers and controllers
+            walkers = actors.filter("walker.*")
+            for w in walkers:
+                try:
+                    w.destroy()
+                except Exception:
+                    pass
+            controllers = actors.filter("controller.*")
+            for c in controllers:
+                try:
+                    c.stop()
+                    c.destroy()
+                except Exception:
+                    pass
+
+            logger.info(
+                "Teardown: destroyed %d sensors, %d vehicles, %d walkers",
+                len(sensors),
+                len(vehicles),
+                len(walkers),
+            )
+        except Exception as e:
+            logger.warning("Teardown actor cleanup failed: %s", e)
+
+        # 2. Drop our Python reference to the old world
+        self.world = None
+
+        # 3. Force garbage collection to release C-level pointers
+        gc.collect()
+
     def _reconnect(self) -> bool:
         """Attempt to reconnect after CARLA crash."""
         for attempt in range(1, self.crash_retries + 1):

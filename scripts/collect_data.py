@@ -258,6 +258,13 @@ def main() -> None:
             logger.info("Loading map: %s", config.town)
             assert collector.client is not None
 
+            # --- F1: Tear down all actors and flush C++ client state ---
+            # CARLA's C++ client library retains sensor data buffers
+            # after map changes, leaking ~100 MB/s.  Explicitly destroy
+            # all actors and drop the world reference before load_world().
+            if current_town is not None:
+                collector.teardown_world()
+
             # --- Town03 / memory logging: snapshot before map load ---
             if args.memory_log:
                 log_memory_snapshot(f"PRE load_world({config.town})")
