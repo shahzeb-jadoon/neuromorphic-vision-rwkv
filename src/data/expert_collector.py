@@ -1129,6 +1129,24 @@ class ExpertDataCollector:
             dt = 1.0 / config.fps
             memory_limit_hit = False
 
+            # Pre-tick RSS baseline: catch leaks that accumulated during
+            # setup (warm-up ticks, actor spawning, etc.)
+            if config.rss_limit_mb > 0:
+                rss = self._get_rss_mb()
+                logger.info(
+                    "  [RSS guard] baseline before tick loop: %d MB " "(limit %d MB)",
+                    rss,
+                    config.rss_limit_mb,
+                )
+                if rss > config.rss_limit_mb:
+                    logger.warning(
+                        "RSS memory guard: %d MB exceeds limit "
+                        "%d MB before tick loop — aborting episode",
+                        rss,
+                        config.rss_limit_mb,
+                    )
+                    memory_limit_hit = True
+
             # Create streaming HDF5 writer (writes one frame at a time)
             writer = _StreamingEpisodeWriter(
                 filepath=episode_filepath,
@@ -1136,13 +1154,51 @@ class ExpertDataCollector:
                 max_frames=config.max_frames,
             )
 
+            # Track last RSS log time (log every 30s regardless of frame
+            # count, since the C++ leak is wall-clock-proportional).
+            _last_rss_log = time.time()
+
             for frame_idx in range(config.max_frames):
+                if memory_limit_hit:
+                    break
+
                 # Check if expert finished route
                 if expert.done():
                     logger.info("Expert completed route at frame %d", frame_idx)
                     break
 
                 self.world.tick()
+
+                # --- F3: RSS memory guard ---
+                # Check EVERY frame — reading /proc/self/status costs
+                # ~5 µs, negligible vs. the ~50 ms CARLA tick.  The C++
+                # leak is wall-clock-proportional (~40-100 MB/s), NOT
+                # frame-proportional, so infrequent frame-based checks
+                # miss it when tick rate drops under memory pressure.
+                if config.rss_limit_mb > 0:
+                    rss = self._get_rss_mb()
+                    now = time.time()
+                    if now - _last_rss_log >= 30.0:
+                        logger.info(
+                            "  [RSS guard] frame %d, t=%.0fs: " "%d MB (limit %d MB)",
+                            frame_idx + 1,
+                            now - start_time,
+                            rss,
+                            config.rss_limit_mb,
+                        )
+                        _last_rss_log = now
+                    if rss > config.rss_limit_mb:
+                        logger.warning(
+                            "RSS memory guard: %d MB exceeds limit "
+                            "%d MB at frame %d (t=%.0fs) "
+                            "— stopping episode",
+                            rss,
+                            config.rss_limit_mb,
+                            frame_idx + 1,
+                            now - start_time,
+                        )
+                        memory_limit_hit = True
+                        break
 
                 # --- Expert step ---
                 control, info = expert.run_step(dt)
@@ -1213,23 +1269,6 @@ class ExpertDataCollector:
                         info.driving_mode,
                         info.route_completion * 100,
                     )
-
-                # --- F3: RSS memory guard ---
-                # Check every 200 frames (~10s at 20 FPS).  The CARLA C++
-                # client leaks ~40-80 MB/s on most maps; catching it at
-                # 8 GB leaves headroom before the 20 GB OOM threshold.
-                if config.rss_limit_mb > 0 and (frame_idx + 1) % 200 == 0:
-                    rss = self._get_rss_mb()
-                    if rss > config.rss_limit_mb:
-                        logger.warning(
-                            "RSS memory guard: %d MB exceeds limit "
-                            "%d MB at frame %d — stopping episode",
-                            rss,
-                            config.rss_limit_mb,
-                            frame_idx + 1,
-                        )
-                        memory_limit_hit = True
-                        break
 
             # --- Determine status ---
             timed_out = stuck_start is not None and (

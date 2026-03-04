@@ -674,3 +674,141 @@ All data is in `data/test_collection/`:
 | `--memory-log` flag | `scripts/collect_data.py` | System memory snapshots at map loads / episode boundaries |
 | `--tracemalloc` flag | `scripts/collect_data.py` | Python heap profiling (developer use only, causes 5-7× slowdown) |
 | `verify_town03_leak.sh` | `scripts/verify_town03_leak.sh` | Verification test battery (T1-T4) for leak hypothesis testing |
+
+---
+
+## 13. F3 RSS Memory Guard — Implementation, Test, and Fix
+
+### 13.1 Initial Implementation (commit `55c3a32`)
+
+The initial F3 implementation checked RSS every **200 frames** (~10 seconds
+at 20 FPS):
+
+```python
+# Check every 200 frames (~10s at 20 FPS)
+if config.rss_limit_mb > 0 and (frame_idx + 1) % 200 == 0:
+    rss = self._get_rss_mb()
+    if rss > config.rss_limit_mb:
+        memory_limit_hit = True
+        break
+```
+
+Threshold: 8192 MB (8 GB), configurable via `EpisodeConfig.rss_limit_mb`.
+
+### 13.2 F3 Test — Town04 (FAILED)
+
+**Command:**
+```bash
+conda run -n rwkv python scripts/collect_data.py \
+  --config configs/collection.yaml --output data/test_f3 \
+  --town Town04 --episodes 1 --weather ClearNoon --memory-log
+```
+
+**Result:** Worker was OOM-killed (SIGKILL). Guard never fired.
+
+**Evidence:**
+
+| Fact | Data Source | Value |
+|---|---|---|
+| OOM kill | `dmesg` | `Out of memory: Killed process 8361 (python) anon-rss:19683864kB` (19.2 GB) |
+| HDF5 partially written | `ls -la data/test_f3/` | `episode_0b0896e7.h5` — 142,809,504 bytes (136 MB) |
+| HDF5 corrupted | `h5py.File()` | `OSError: bad object header version number` (killed mid-write) |
+| No manifest written | `cat data/test_f3/collection_manifest.json` | File does not exist |
+| Estimated frames written | File size / frame size | ~77–155 frames (far less than 200) |
+| Log not captured | `ls data/test_f3/f3_test.log` | File does not exist |
+
+**Log capture failure:** The `| tee data/test_f3/f3_test.log` pipe failed
+because `tee` opens its output file *immediately* when the shell pipeline
+starts, but `data/test_f3/` is only created later by
+`ExpertDataCollector.__init__()`. This is a race condition: bash starts all
+pipeline commands simultaneously. Fix: `mkdir -p data/test_f3` before the
+pipeline.
+
+### 13.3 Root Cause Analysis
+
+**Hypothesis (tested and confirmed):** The RSS check interval of 200
+frames was too infrequent because the CARLA C++ memory leak is
+**wall-clock-proportional**, NOT **frame-proportional**.
+
+**Supporting data:**
+
+1. `_get_rss_mb()` reads `/proc/self/status` VmRSS correctly — verified
+   independently:
+   ```
+   $ python -c "from src.data.expert_collector import ExpertDataCollector; \
+     print(ExpertDataCollector._get_rss_mb(), 'MB')"
+   9 MB
+   ```
+
+2. `EpisodeConfig.rss_limit_mb` defaults to 8192, not overridden by
+   `configs/collection.yaml` — verified by reading the YAML config.
+
+3. The HDF5 file contains only ~77–155 frames. At 20 FPS nominal, that is
+   3.8–7.7 seconds of data. But the leak accumulated to 19.2 GB, which at
+   ~40 MB/s (Town04's measured rate) requires **~480 seconds** of
+   wall-clock time. This means the effective tick rate was extremely low
+   (~0.3 FPS) — each `world.tick()` call blocked for seconds as the C++
+   client consumed memory.
+
+4. The first RSS check would have occurred at frame 200, which never
+   happened because the process was OOM-killed after only ~155 frames.
+
+**Conclusion:** When memory pressure causes the CARLA tick rate to collapse
+(from 20 FPS to <1 FPS), frame-based interval checks become wallclock-blind. A check "every 200 frames" that was designed for ~10 seconds
+instead spans ~10 minutes of actual time, during which the leak adds
+~24 GB — far exceeding the 20 GB OOM threshold.
+
+### 13.4 Fix — Every-Frame RSS Check
+
+Changed the RSS guard to check **every frame** with **time-based logging**:
+
+```python
+# Check EVERY frame — reading /proc/self/status costs ~5 µs,
+# negligible vs. the ~50 ms CARLA tick.
+if config.rss_limit_mb > 0:
+    rss = self._get_rss_mb()
+    now = time.time()
+    if now - _last_rss_log >= 30.0:
+        logger.info("  [RSS guard] frame %d, t=%.0fs: %d MB (limit %d MB)", ...)
+        _last_rss_log = now
+    if rss > config.rss_limit_mb:
+        memory_limit_hit = True
+        break
+```
+
+**Additional changes:**
+
+1. **Baseline check before tick loop:** Catches leaks accumulated during
+   episode setup (warm-up ticks, actor spawning).
+2. **RSS check moved to top of tick loop:** Fires before
+   `expert.run_step()` and `_capture_panoramic()`, ensuring the guard
+   acts before the heaviest operations.
+3. **Time-based logging (every 30s):** Logs RSS with elapsed wall-clock
+   time, providing a clear trajectory regardless of frame rate.
+
+**Validation:** 108 tests pass; pre-commit (black, flake8, mypy) passes.
+
+### 13.5 F3 Test — Pending Re-test
+
+The fix has not yet been validated with a live CARLA test. Re-test command:
+
+```bash
+mkdir -p data/test_f3 && rm -rf data/test_f3/*
+conda run -n rwkv python scripts/collect_data.py \
+  --config configs/collection.yaml --output data/test_f3 \
+  --town Town04 --episodes 1 --weather ClearNoon --memory-log \
+  2>&1 | tee data/test_f3/f3_test.log
+```
+
+**Expected behavior:**
+- `[RSS guard] baseline before tick loop: ~500 MB` log line at start
+- `[RSS guard] frame N, t=Ts: M MB` log lines every 30 seconds
+- Worker exits with code 42 when RSS exceeds 8192 MB
+- Orchestrator logs restart, re-preloads map, spawns new worker
+- No OOM kill in dmesg
+
+**Success criteria:**
+- Log file `data/test_f3/f3_test.log` exists and contains RSS guard entries
+- `collection_manifest.json` exists with status `memory_limit`
+- No new OOM entries in `dmesg | grep 'Out of memory'`
+- Worker exit code 42 (not -9)
