@@ -15,7 +15,7 @@ Key differences from the v2 collector:
 
 Handles three failure modes:
     - CARLA crash recovery (reconnect with retries)
-    - Episode termination (completed / collision / timeout)
+    - Episode termination (completed / collision / timeout / memory_limit)
     - Campaign resumption via collection_manifest.json
 """
 
@@ -101,12 +101,18 @@ class EpisodeConfig:
     # Expert agent
     expert_config: ExpertConfig = field(default_factory=ExpertConfig)
 
+    # F3: RSS memory guard — CARLA's C++ client leaks anonymous memory
+    # on most maps.  When RSS exceeds this limit (MB), the episode is
+    # stopped gracefully and the worker exits so the orchestrator can
+    # restart it.  0 = disabled.
+    rss_limit_mb: int = 8192  # 8 GB default
+
 
 @dataclass
 class EpisodeResult:
     """Result of a single episode collection."""
 
-    status: str  # "completed", "collision", "crashed", "timeout"
+    status: str  # "completed", "collision", "crashed", "timeout", "memory_limit"
     filename: str | None = None
     episode_hash: str | None = None
     n_frames: int = 0
@@ -537,6 +543,24 @@ class ExpertDataCollector:
             except Exception as e:
                 logger.error("Reconnection failed: %s", e)
         return False
+
+    @staticmethod
+    def _get_rss_mb() -> int:
+        """Read current process RSS (Resident Set Size) in MB.
+
+        Uses ``/proc/self/status`` on Linux for a zero-overhead read
+        (no subprocess, no psutil dependency).  Returns 0 on non-Linux
+        platforms so the RSS guard is effectively disabled.
+        """
+        try:
+            with open("/proc/self/status") as f:
+                for line in f:
+                    if line.startswith("VmRSS:"):
+                        # Format: "VmRSS:   12345 kB"
+                        return int(line.split()[1]) // 1024
+        except (FileNotFoundError, OSError):
+            return 0
+        return 0
 
     # ------------------------------------------------------------------
     # Camera helpers
@@ -1103,6 +1127,7 @@ class ExpertDataCollector:
             distance_traveled = 0.0
             prev_location = vehicle.get_transform().location
             dt = 1.0 / config.fps
+            memory_limit_hit = False
 
             # Create streaming HDF5 writer (writes one frame at a time)
             writer = _StreamingEpisodeWriter(
@@ -1189,11 +1214,30 @@ class ExpertDataCollector:
                         info.route_completion * 100,
                     )
 
+                # --- F3: RSS memory guard ---
+                # Check every 200 frames (~10s at 20 FPS).  The CARLA C++
+                # client leaks ~40-80 MB/s on most maps; catching it at
+                # 8 GB leaves headroom before the 20 GB OOM threshold.
+                if config.rss_limit_mb > 0 and (frame_idx + 1) % 200 == 0:
+                    rss = self._get_rss_mb()
+                    if rss > config.rss_limit_mb:
+                        logger.warning(
+                            "RSS memory guard: %d MB exceeds limit "
+                            "%d MB at frame %d — stopping episode",
+                            rss,
+                            config.rss_limit_mb,
+                            frame_idx + 1,
+                        )
+                        memory_limit_hit = True
+                        break
+
             # --- Determine status ---
             timed_out = stuck_start is not None and (
                 time.time() - stuck_start > config.timeout_duration
             )
-            if timed_out:
+            if memory_limit_hit:
+                status = "memory_limit"
+            elif timed_out:
                 status = "timeout"
             elif collision_frame is not None:
                 status = "collision"

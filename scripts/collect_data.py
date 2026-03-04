@@ -51,87 +51,88 @@ def load_config(config_path: str) -> dict:
 
 def build_campaign(
     cfg: dict,
-    completed_counts: dict[tuple[str, str], int],
+    done_count: int,
     episodes_per_config: int,
 ) -> list[tuple[EpisodeConfig, int]]:
-    """Build list of (episode_config, remaining_count) pairs, accounting for completed.
+    """Build list of (episode_config, 1) pairs, skipping already-done entries.
 
     Args:
         cfg: Collection config dict.
-        completed_counts: Map of (town, weather) -> number of completed episodes.
-        episodes_per_config: Total desired episodes per (town, weather) combo.
+        done_count: Number of episodes already recorded for this town in the
+            manifest (any status — completed, timeout, collision, memory_limit).
+            These are skipped from the front of the campaign.
+        episodes_per_config: Number of episodes per traffic config.
 
     Returns:
-        List of (EpisodeConfig, n_remaining) where n_remaining > 0.
+        List of (EpisodeConfig, 1) for remaining episodes.
     """
-    episodes = []
     towns = cfg.get("towns", ["Town01"])
     weathers = cfg.get("weathers", ["ClearNoon"])
     traffic_configs = cfg.get("traffic", {}).get("vehicles", [50])
 
+    # Build full flat list of configs, then skip `done_count` from front
+    all_configs: list[EpisodeConfig] = []
     for town, weather in itertools.product(towns, weathers):
-        already_done = completed_counts.get((town, weather), 0)
-        remaining = episodes_per_config - already_done
-        if remaining <= 0:
-            logger.info(
-                "Skipping %s / %s (%d/%d already completed)",
-                town,
-                weather,
-                already_done,
-                episodes_per_config,
-            )
-            continue
-
         for n_vehicles in traffic_configs:
-            cam_cfg = cfg.get("cameras", {})
+            for _ in range(episodes_per_config):
+                cam_cfg = cfg.get("cameras", {})
 
-            # Parse expert agent config from YAML (falls back to defaults)
-            expert_cfg_dict = cfg.get("expert", {})
-            expert_kw: dict[str, Any] = {}
-            if "target_speed" in expert_cfg_dict:
-                expert_kw["target_speed"] = float(expert_cfg_dict["target_speed"])
-            if "max_speed" in expert_cfg_dict:
-                expert_kw["max_speed"] = float(expert_cfg_dict["max_speed"])
-            if "speed_pid" in expert_cfg_dict:
-                kp, ki, kd = expert_cfg_dict["speed_pid"]
-                expert_kw.update(speed_kp=float(kp), speed_ki=float(ki), speed_kd=float(kd))
-            if "steer_pid" in expert_cfg_dict:
-                kp, ki, kd = expert_cfg_dict["steer_pid"]
-                expert_kw.update(steer_kp=float(kp), steer_ki=float(ki), steer_kd=float(kd))
-            if "traffic_light_brake_distance" in expert_cfg_dict:
-                expert_kw["traffic_light_brake_distance"] = float(
-                    expert_cfg_dict["traffic_light_brake_distance"]
-                )
-            if "vehicle_hazard_distance" in expert_cfg_dict:
-                expert_kw["vehicle_hazard_distance"] = float(
-                    expert_cfg_dict["vehicle_hazard_distance"]
-                )
-            if "pedestrian_hazard_distance" in expert_cfg_dict:
-                expert_kw["pedestrian_hazard_distance"] = float(
-                    expert_cfg_dict["pedestrian_hazard_distance"]
-                )
-            if "turn_speed_factor" in expert_cfg_dict:
-                expert_kw["turn_speed_factor"] = float(expert_cfg_dict["turn_speed_factor"])
-            expert_config = ExpertConfig(**expert_kw)
+                # Parse expert agent config from YAML (falls back to defaults)
+                expert_cfg_dict = cfg.get("expert", {})
+                expert_kw: dict[str, Any] = {}
+                if "target_speed" in expert_cfg_dict:
+                    expert_kw["target_speed"] = float(expert_cfg_dict["target_speed"])
+                if "max_speed" in expert_cfg_dict:
+                    expert_kw["max_speed"] = float(expert_cfg_dict["max_speed"])
+                if "speed_pid" in expert_cfg_dict:
+                    kp, ki, kd = expert_cfg_dict["speed_pid"]
+                    expert_kw.update(speed_kp=float(kp), speed_ki=float(ki), speed_kd=float(kd))
+                if "steer_pid" in expert_cfg_dict:
+                    kp, ki, kd = expert_cfg_dict["steer_pid"]
+                    expert_kw.update(steer_kp=float(kp), steer_ki=float(ki), steer_kd=float(kd))
+                if "traffic_light_brake_distance" in expert_cfg_dict:
+                    expert_kw["traffic_light_brake_distance"] = float(
+                        expert_cfg_dict["traffic_light_brake_distance"]
+                    )
+                if "vehicle_hazard_distance" in expert_cfg_dict:
+                    expert_kw["vehicle_hazard_distance"] = float(
+                        expert_cfg_dict["vehicle_hazard_distance"]
+                    )
+                if "pedestrian_hazard_distance" in expert_cfg_dict:
+                    expert_kw["pedestrian_hazard_distance"] = float(
+                        expert_cfg_dict["pedestrian_hazard_distance"]
+                    )
+                if "turn_speed_factor" in expert_cfg_dict:
+                    expert_kw["turn_speed_factor"] = float(expert_cfg_dict["turn_speed_factor"])
+                expert_config = ExpertConfig(**expert_kw)
 
-            ep = EpisodeConfig(
-                town=town,
-                weather=weather,
-                n_vehicles=n_vehicles,
-                n_walkers=cfg.get("traffic", {}).get("walkers", [30])[0],
-                max_frames=cfg.get("episode", {}).get("max_frames", 2000),
-                timeout_speed=cfg.get("episode", {}).get("timeout_speed", 0.1),
-                timeout_duration=cfg.get("episode", {}).get("timeout_duration", 180),
-                fps=cfg.get("carla", {}).get("fps", 20),
-                camera_width=cam_cfg.get("per_camera_width", 640),
-                camera_height=cam_cfg.get("per_camera_height", 320),
-                camera_fov=cam_cfg.get("fov", 60),
-                camera_yaws=tuple(cam_cfg.get("yaw_offsets", [-60, 0, 60])),
-                expert_config=expert_config,
-            )
-            episodes.append((ep, remaining))
+                ep = EpisodeConfig(
+                    town=town,
+                    weather=weather,
+                    n_vehicles=n_vehicles,
+                    n_walkers=cfg.get("traffic", {}).get("walkers", [30])[0],
+                    max_frames=cfg.get("episode", {}).get("max_frames", 2000),
+                    timeout_speed=cfg.get("episode", {}).get("timeout_speed", 0.1),
+                    timeout_duration=cfg.get("episode", {}).get("timeout_duration", 180),
+                    fps=cfg.get("carla", {}).get("fps", 20),
+                    camera_width=cam_cfg.get("per_camera_width", 640),
+                    camera_height=cam_cfg.get("per_camera_height", 320),
+                    camera_fov=cam_cfg.get("fov", 60),
+                    camera_yaws=tuple(cam_cfg.get("yaw_offsets", [-60, 0, 60])),
+                    expert_config=expert_config,
+                )
+                all_configs.append(ep)
 
-    return episodes
+    # Skip already-done entries (F3 restart or --resume)
+    remaining = all_configs[done_count:]
+    if done_count > 0:
+        logger.info(
+            "Skipping %d already-recorded episodes, %d remaining",
+            done_count,
+            len(remaining),
+        )
+
+    return [(ep, 1) for ep in remaining]
 
 
 def _preload_map(town: str, host: str, port: int) -> bool:
@@ -228,24 +229,60 @@ def _run_orchestrator(args: argparse.Namespace) -> None:
         # --- Phase 2: spawn collector worker (no load_world) ---
         logger.info("--- [%d/%d] Spawning worker for %s ---", i, len(towns), town)
         cmd = [sys.executable, script] + base_argv + ["--_subprocess-town", town]
-        result = subprocess.run(cmd)
 
-        if result.returncode == 0:
-            logger.info("Town %s worker exited cleanly", town)
-        elif result.returncode == -9:
-            logger.error(
-                "Town %s worker OOM-killed (SIGKILL). "
-                "Leak may persist within-town for very long runs.",
-                town,
-            )
-            failed_towns.append((town, "OOM-killed"))
+        # F3: retry loop — worker exits with code 42 when RSS guard fires.
+        # The OS reclaims all leaked C-level memory, then we respawn.
+        max_restarts = 10
+        for restart in range(max_restarts + 1):
+            if restart > 0:
+                logger.info(
+                    "--- Restarting worker for %s (attempt %d/%d) ---",
+                    town,
+                    restart + 1,
+                    max_restarts + 1,
+                )
+            result = subprocess.run(cmd)
+
+            if result.returncode == 0:
+                logger.info("Town %s worker exited cleanly", town)
+                break
+            elif result.returncode == 42:
+                # F3 RSS guard triggered — worker saved its episode and
+                # exited.  The manifest records progress, so the next
+                # worker will skip completed episodes.
+                logger.info(
+                    "Town %s worker hit RSS limit — restarting " "(restart %d/%d)",
+                    town,
+                    restart + 1,
+                    max_restarts,
+                )
+                # Quick preload to ensure map is still correct
+                _preload_map(town, carla_host, carla_port)
+                continue
+            elif result.returncode == -9:
+                logger.error(
+                    "Town %s worker OOM-killed (SIGKILL). "
+                    "Leak may persist within-town for very long runs.",
+                    town,
+                )
+                failed_towns.append((town, "OOM-killed"))
+                break
+            else:
+                logger.error(
+                    "Town %s worker exited with code %d",
+                    town,
+                    result.returncode,
+                )
+                failed_towns.append((town, f"exit code {result.returncode}"))
+                break
         else:
+            # Exhausted all restarts
             logger.error(
-                "Town %s worker exited with code %d",
+                "Town %s exhausted %d RSS-guard restarts",
                 town,
-                result.returncode,
+                max_restarts,
             )
-            failed_towns.append((town, f"exit code {result.returncode}"))
+            failed_towns.append((town, "max RSS restarts exceeded"))
 
     # Final summary (read manifest written by workers)
     output_dir = args.output or cfg.get("output", {}).get("directory", "data/collected")
@@ -353,10 +390,18 @@ def main() -> None:
 
     # Initialize
     manifest = CollectionManifest(manifest_path)
-    completed_counts = manifest.get_completed_counts() if args.resume else {}
 
-    n_episodes = args.episodes or 1  # Episodes per (town, weather, traffic) config
-    campaign = build_campaign(cfg, completed_counts, n_episodes)
+    # Count already-recorded episodes for this town (any status) so we
+    # can skip them.  This enables both --resume and F3 restart-after-
+    # RSS-guard to work correctly.
+    done_count = 0
+    town = args._subprocess_town
+    for e in manifest.data.get("episodes", []):
+        if e.get("town", "") == town:
+            done_count += 1
+
+    n_episodes = args.episodes or 1  # Episodes per traffic config
+    campaign = build_campaign(cfg, done_count, n_episodes)
 
     # Apply visualization / recording flags to every episode config
     if args.spectator or args.record or args.debug_draw:
@@ -525,6 +570,15 @@ def main() -> None:
                     sys.exit(1)
                 # Force map reload + route_gen re-init on next iteration
                 current_town = None
+
+            # F3: RSS memory guard — exit worker so orchestrator restarts it
+            if result.status == "memory_limit":
+                logger.warning(
+                    "RSS memory guard triggered — exiting worker for restart " "(PID %d, %s)",
+                    os.getpid(),
+                    args._subprocess_town,
+                )
+                sys.exit(42)  # Special exit code: "restart me"
 
     # Worker complete — process exit reclaims all C-level memory
     logger.info(
