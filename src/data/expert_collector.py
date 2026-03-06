@@ -23,11 +23,14 @@ from __future__ import annotations
 
 from src.data import hdf5_schema as S
 
+import ctypes
+import ctypes.util
 import gc
 import hashlib
 import json
 import logging
 import math
+import os
 import queue
 import time
 import traceback
@@ -42,6 +45,33 @@ import numpy as np
 # RoadOption is a pure-Python IntEnum with no carla dependency,
 # so import it unconditionally.
 from agents.navigation.local_planner import RoadOption
+
+# ---------------------------------------------------------------------------
+# posix_fadvise — evict clean page cache after HDF5 flushes
+# ---------------------------------------------------------------------------
+# Without this, every HDF5 write stays in Linux page cache indefinitely,
+# inflating VmmemWSL to 19+ GB on Windows.  With periodic
+# fadvise(DONTNEED) the cache stays below ~2 MB.
+# See docs/MEMORY_DIAGNOSTICS_FINDINGS.md §15 for full analysis.
+POSIX_FADV_DONTNEED = 4
+_CACHE_EVICT_INTERVAL = 100  # frames between flush+evict cycles
+
+_libc = None
+try:
+    _libc_name = ctypes.util.find_library("c")
+    if _libc_name:
+        _libc = ctypes.CDLL(_libc_name, use_errno=True)
+except OSError:
+    pass
+
+
+def _posix_fadvise(fd: int, offset: int, length: int, advice: int) -> int:
+    """Call posix_fadvise(3) via ctypes.  Returns 0 on success."""
+    if _libc is None:
+        return -1
+    # int posix_fadvise(int fd, off_t offset, off_t length, int advice)
+    return int(_libc.posix_fadvise(fd, ctypes.c_int64(offset), ctypes.c_int64(length), advice))
+
 
 try:
     import carla
@@ -227,6 +257,25 @@ class _StreamingEpisodeWriter:
 
     # -- Per-frame append --------------------------------------------------
 
+    def _flush_and_evict_cache(self) -> None:
+        """Flush HDF5 buffers to disk and evict pages from Linux page cache.
+
+        Without this, every HDF5 write stays in the kernel's page cache,
+        inflating VmmemWSL to 19+ GB on Windows/WSL2.  Calling
+        ``posix_fadvise(POSIX_FADV_DONTNEED)`` after each flush tells the
+        kernel to drop the clean pages, keeping cache below ~2 MB.
+
+        See docs/MEMORY_DIAGNOSTICS_FINDINGS.md §15 for the full analysis.
+        """
+        try:
+            self._h5.flush()
+            fd = self._h5.id.get_vfd_handle()
+            os.fsync(fd)
+            _posix_fadvise(fd, 0, 0, POSIX_FADV_DONTNEED)
+        except Exception:
+            # Non-fatal — data is still written, just cached longer.
+            pass
+
     def append_frame(
         self,
         panoramic: np.ndarray,
@@ -257,6 +306,10 @@ class _StreamingEpisodeWriter:
         self._ds_nped[i] = json.dumps(info.nearby_pedestrians)
 
         self.n_written += 1
+
+        # Periodically flush + evict page cache to prevent VmmemWSL bloat.
+        if self.n_written % _CACHE_EVICT_INTERVAL == 0:
+            self._flush_and_evict_cache()
 
     # -- Finalize ----------------------------------------------------------
 
@@ -325,6 +378,8 @@ class _StreamingEpisodeWriter:
         if collision_frame is not None:
             meta.attrs[S.META_COLLISION_FRAME] = collision_frame
 
+        # Final cache eviction before close — release all remaining pages.
+        self._flush_and_evict_cache()
         self._h5.close()
 
         # Nav distribution
