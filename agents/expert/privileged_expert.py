@@ -136,6 +136,30 @@ class ExpertConfig:
     # --- Rate limiter ---
     max_target_drop_per_frame: float = 2.0  # km/h — prevents target jumps
 
+    # --- Junction gap filling ---
+    # Controls how _fill_junction_gaps() fills large waypoint gaps at
+    # junctions by querying wp.next() from the CARLA server.
+    #
+    # The original code had an unbounded while loop that diverged at
+    # junctions (wp_prev and wp_next on different roads), issuing
+    # thousands of CARLA server RPCs per frame and leaking ~19 GB of
+    # server-side memory.  These parameters bound that loop.
+    #
+    # gap_fill_max_factor: max iterations = gap_m / fill_step * factor.
+    #   Default 3.0 means a 10m gap allows at most 15 iterations.
+    #   Set to 0 to disable gap filling entirely.
+    #   Set to float('inf') for unbounded (NOT RECOMMENDED — OOM risk).
+    # gap_fill_diverge_factor: break if distance from origin > gap * factor.
+    #   Default 2.0 — if we've traveled twice the original gap distance,
+    #   we're following the wrong road.
+    # gap_fill_rpc_budget: cumulative wp.next() RPC limit per episode.
+    #   Default 50_000.  When exceeded, gap filling is disabled for the
+    #   rest of the episode to cap server-side memory.  Set to 0 for
+    #   unlimited.  A warning is logged when the budget is exhausted.
+    gap_fill_max_factor: float = 3.0
+    gap_fill_diverge_factor: float = 2.0
+    gap_fill_rpc_budget: int = 50_000
+
 
 # ---------------------------------------------------------------------------
 # Data structures
@@ -193,6 +217,11 @@ class FrameInfo:
     wp_buffer_head_dist: float = -1.0  # distance (m) from ego to buffer[0]
     sat_detections: int = 0  # vehicles with obb_in_lane=True
     lateral_detections: int = 0  # vehicles that lateral check would catch
+
+    # Junction gap-fill RPC tracking — cumulative wp.next() calls.
+    # Collectors can monitor this to decide when to end an episode.
+    gap_fill_rpcs: int = 0
+    gap_fill_diverged: int = 0  # cumulative gaps that diverged (discarded)
 
 
 # ---------------------------------------------------------------------------
@@ -300,6 +329,12 @@ class PrivilegedExpert:
 
         # Stop sign state
         self._cleared_stop_signs: set[int] = set()
+
+        # Cumulative wp.next() RPC counter for gap filling budget
+        self._gap_fill_rpcs: int = 0
+        self._gap_fill_diverged: int = 0
+        self._gap_fill_budget_exhausted: bool = False
+        self._gap_fill_tried: set = set()  # (wp_prev.id, wp_next.id) pairs already probed
         self._stop_sign_wait_counter: int = 0
         self._stop_sign_active: int | None = None  # actor ID
 
@@ -337,6 +372,10 @@ class PrivilegedExpert:
         self._cleared_stop_signs.clear()
         self._stop_sign_wait_counter = 0
         self._stop_sign_active = None
+        self._gap_fill_rpcs = 0
+        self._gap_fill_diverged = 0
+        self._gap_fill_budget_exhausted = False
+        self._gap_fill_tried = set()
 
     def set_destination(self, start: "carla.Location", end: "carla.Location") -> None:
         """Plan and load a route from *start* to *end*."""
@@ -481,6 +520,8 @@ class PrivilegedExpert:
             wp_buffer_head_dist=round(buf_head_dist, 2),
             sat_detections=sat_hits,
             lateral_detections=lat_hits,
+            gap_fill_rpcs=self._gap_fill_rpcs,
+            gap_fill_diverged=self._gap_fill_diverged,
         )
 
         return control, info
@@ -551,15 +592,48 @@ class PrivilegedExpert:
 
         The buffer's ``maxlen`` is respected — filling stops when
         full, and the deque naturally evicts the oldest entries.
+
+        Safety bounds (configurable via ``ExpertConfig``):
+
+        1. **Per-gap iteration cap** (``gap_fill_max_factor``):  max
+           iterations = ``gap / fill_step * factor``.  Prevents
+           runaway loops when ``wp_prev`` and ``wp_next`` lie on
+           different roads at a junction — in that case ``wp.next()``
+           follows *wp_prev*'s road forward and never converges on
+           *wp_next*.  Set to ``float('inf')`` for unbounded
+           (NOT RECOMMENDED — the unbounded loop leaked ~19 GB of
+           server-side memory and triggered OOM).
+
+        2. **Distance-from-origin guard** (``gap_fill_diverge_factor``):
+           breaks if the interpolated waypoint has traveled further
+           from the gap's starting point than ``gap * factor``.  This
+           catches divergence even with a generous iteration cap.
+
+        3. **Cumulative RPC budget** (``gap_fill_rpc_budget``):  total
+           ``wp.next()`` calls across all frames for this episode.
+           When exhausted, gap filling is disabled for the rest of
+           the episode with a warning.  Default 50,000 RPCs is
+           generous for normal driving (~2 RPCs per junction × ~200
+           junctions encountered in a long episode) while capping
+           server-side memory at a predictable level.  Set to 0
+           for unlimited.
         """
         _GAP_THRESHOLD = 4.0  # metres — normal spacing is ~2 m
         _FILL_STEP = 2.0  # metres — interpolation step
+        cfg = self.config
+
+        # Gap filling disabled by config or budget exhausted
+        if cfg.gap_fill_max_factor == 0:
+            return
+        if self._gap_fill_budget_exhausted:
+            return
         if len(self._wp_buffer) < 2:
             return
 
         # Work on a snapshot; rebuild with fills inserted.
         items = list(self._wp_buffer)
         rebuilt: list[tuple] = [items[0]]
+        rpcs_this_call = 0
 
         for j in range(1, len(items)):
             wp_prev, _ = items[j - 1]
@@ -567,19 +641,83 @@ class PrivilegedExpert:
             gap = wp_prev.transform.location.distance(wp_next.transform.location)
 
             if gap > _GAP_THRESHOLD:
-                # Fill the gap with intermediate map waypoints.
+                # Skip gaps we've already probed and found diverging.
+                pair_key = (wp_prev.id, wp_next.id)
+                if pair_key in self._gap_fill_tried:
+                    rebuilt.append((wp_next, cmd_next))
+                    continue
+
+                # Cap iterations per gap.  For factor=3.0 and a 10 m
+                # gap with 2 m steps, this allows 15 iterations.
+                # float('inf') gives unbounded (NOT RECOMMENDED).
+                max_fills = (
+                    int(gap / _FILL_STEP * cfg.gap_fill_max_factor) + 1
+                    if math.isfinite(cfg.gap_fill_max_factor)
+                    else float("inf")
+                )
+                diverge_limit = gap * cfg.gap_fill_diverge_factor
+                origin = wp_prev.transform.location
+                # Accumulate fills tentatively — only commit if they
+                # actually converge toward wp_next.  If the loop exits
+                # via the divergence guard or iteration cap WITHOUT
+                # reaching the target, ALL tentative fills are discarded.
+                # This prevents wrong-road waypoints from corrupting the
+                # buffer and triggering cascading re-fills on subsequent
+                # frames.
+                tentative: list[tuple] = []
+                converged = False
                 try:
                     nexts = wp_prev.next(_FILL_STEP)
-                    while nexts:
+                    rpcs_this_call += 1
+                    fills = 0
+                    while nexts and fills < max_fills:
                         nxt = nexts[0]
-                        if nxt.transform.location.distance(wp_next.transform.location) < _FILL_STEP:
+                        dist_to_target = nxt.transform.location.distance(
+                            wp_next.transform.location
+                        )
+                        if dist_to_target < _FILL_STEP:
+                            converged = True
                             break  # close enough to the next original wp
-                        rebuilt.append((nxt, cmd_next))
+                        # Divergence guard
+                        dist_from_origin = nxt.transform.location.distance(origin)
+                        if dist_from_origin > diverge_limit:
+                            break
+                        tentative.append((nxt, cmd_next))
                         nexts = nxt.next(_FILL_STEP)
+                        rpcs_this_call += 1
+                        fills += 1
                 except (AttributeError, RuntimeError):
                     pass  # graceful degradation
 
+                # Only insert fills that actually converged on the target.
+                # Diverging fills (wrong road) are silently discarded —
+                # the original gap is preserved, which is harmless
+                # (the corridor just has one longer segment there).
+                # Mark this pair as tried either way so we don't
+                # re-probe it on subsequent frames.
+                self._gap_fill_tried.add(pair_key)
+                if converged and tentative:
+                    rebuilt.extend(tentative)
+                elif tentative:
+                    # Gap diverged — fills were on a different road.
+                    # Discard them to avoid corrupting the waypoint
+                    # buffer and causing cascading re-fills.
+                    self._gap_fill_diverged += 1
+
             rebuilt.append((wp_next, cmd_next))
+
+        # Track cumulative RPCs and check budget
+        self._gap_fill_rpcs += rpcs_this_call
+        budget = cfg.gap_fill_rpc_budget
+        if budget > 0 and self._gap_fill_rpcs >= budget:
+            self._gap_fill_budget_exhausted = True
+            logger.warning(
+                "Junction gap-fill RPC budget exhausted (%d/%d). "
+                "Gap filling disabled for remainder of episode. "
+                "Increase ExpertConfig.gap_fill_rpc_budget if needed.",
+                self._gap_fill_rpcs,
+                budget,
+            )
 
         # Only rebuild if we actually inserted anything.
         if len(rebuilt) != len(items):
