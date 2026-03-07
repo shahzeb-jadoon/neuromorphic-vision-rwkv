@@ -153,6 +153,7 @@ class EpisodeResult:
     config_hash: str = ""
     nav_distribution: dict[str, int] = field(default_factory=dict)
     collision_frame: int | None = None
+    collision_other_actor: str | None = None
     error_message: str | None = None
     duration_seconds: float = 0.0
     recording_path: str | None = None
@@ -1130,9 +1131,14 @@ class ExpertDataCollector:
             )
             actors.append(collision_sensor)
             collision_detected = [False]
+            collision_other_actor: list[str | None] = [None]
 
             def on_collision(event: Any) -> None:
                 collision_detected[0] = True
+                try:
+                    collision_other_actor[0] = event.other_actor.type_id
+                except Exception:
+                    collision_other_actor[0] = "unknown"
 
             collision_sensor.listen(on_collision)
 
@@ -1299,7 +1305,11 @@ class ExpertDataCollector:
                 # --- Collision check ---
                 if collision_detected[0] and collision_frame is None:
                     collision_frame = frame_idx
-                    logger.warning("Collision detected at frame %d", frame_idx)
+                    logger.warning(
+                        "Collision detected at frame %d with %s",
+                        frame_idx,
+                        collision_other_actor[0] or "unknown",
+                    )
                     break  # Stop collecting — post-collision data is unusable
 
                 # --- Timeout (stuck) check ---
@@ -1347,6 +1357,7 @@ class ExpertDataCollector:
 
             # --- Finalize streaming HDF5 ---
             result = writer.finalize(status=status, collision_frame=collision_frame)
+            result.collision_other_actor = collision_other_actor[0]
             result.duration_seconds = time.time() - start_time
             result.recording_path = recording_path
             return result
@@ -1506,6 +1517,7 @@ class CollectionManifest:
             "status": result.status,
             "nav_distribution": result.nav_distribution,
             "collision_frame": result.collision_frame,
+            "collision_other_actor": result.collision_other_actor,
             "duration_seconds": result.duration_seconds,
             "timestamp": datetime.now(timezone.utc).isoformat(),
         }
