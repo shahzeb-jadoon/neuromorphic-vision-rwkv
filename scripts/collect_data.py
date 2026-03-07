@@ -12,6 +12,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import hashlib
 import itertools
 import logging
 import os
@@ -49,19 +50,50 @@ def load_config(config_path: str) -> dict:
         return yaml.safe_load(f)  # type: ignore[no-any-return]
 
 
+def _episode_config_hash(config: EpisodeConfig) -> str:
+    """SHA-256 fingerprint of data-affecting EpisodeConfig fields.
+
+    Hashes camera geometry, PID gains, expert hazard distances,
+    and timing parameters.  Excludes runtime-only flags (spectator,
+    debug_draw, rss_limit) so that re-runs with ``--spectator``
+    don't trigger false hash-mismatch warnings.
+    """
+    ec = config.expert_config
+    blob = (
+        f"{config.camera_width}x{config.camera_height}"
+        f"_fov{config.camera_fov}"
+        f"_yaws{config.camera_yaws}"
+        f"_fps{config.fps}"
+        f"_maxf{config.max_frames}"
+        f"_tspd{config.timeout_speed}_tdur{config.timeout_duration}"
+        f"_ts{ec.target_speed}_ms{ec.max_speed}"
+        f"_spid{ec.speed_kp},{ec.speed_ki},{ec.speed_kd}"
+        f"_stpid{ec.steer_kp},{ec.steer_ki},{ec.steer_kd}"
+        f"_tlbd{ec.traffic_light_brake_distance}"
+        f"_vhd{ec.vehicle_hazard_distance}"
+        f"_phd{ec.pedestrian_hazard_distance}"
+        f"_tsf{ec.turn_speed_factor}"
+    )
+    return hashlib.sha256(blob.encode()).hexdigest()[:16]
+
+
 def build_campaign(
     cfg: dict,
-    done_count: int,
+    manifest: "CollectionManifest",
     episodes_per_config: int,
 ) -> list[tuple[EpisodeConfig, int]]:
-    """Build list of (episode_config, 1) pairs, skipping already-done entries.
+    """Build remaining (episode_config, 1) pairs using per-key resume.
+
+    Uses ``manifest.get_completed_counts()`` keyed by
+    ``(town, weather, n_vehicles, n_walkers)`` to skip only
+    truly-completed episodes.  Also warns if the current config
+    hash differs from hashes already stored in the manifest for
+    the same scenario key (C-4 audit).
 
     Args:
         cfg: Collection config dict.
-        done_count: Number of episodes already recorded for this town in the
-            manifest (any status — completed, timeout, collision, memory_limit).
-            These are skipped from the front of the campaign.
-        episodes_per_config: Number of episodes per traffic config.
+        manifest: Previously loaded CollectionManifest.
+        episodes_per_config: Target episodes per traffic config.
 
     Returns:
         List of (EpisodeConfig, 1) for remaining episodes.
@@ -69,70 +101,114 @@ def build_campaign(
     towns = cfg.get("towns", ["Town01"])
     weathers = cfg.get("weathers", ["ClearNoon"])
     traffic_configs = cfg.get("traffic", {}).get("vehicles", [50])
+    walkers = cfg.get("traffic", {}).get("walkers", [30])
 
-    # Build full flat list of configs, then skip `done_count` from front
-    all_configs: list[EpisodeConfig] = []
+    completed_counts = manifest.get_completed_counts()
+
+    # Build a single EpisodeConfig template per scenario —
+    # duplicating the YAML → EpisodeConfig parsing only once.
+    cam_cfg = cfg.get("cameras", {})
+    expert_cfg_dict = cfg.get("expert", {})
+    expert_kw: dict[str, Any] = {}
+    if "target_speed" in expert_cfg_dict:
+        expert_kw["target_speed"] = float(expert_cfg_dict["target_speed"])
+    if "max_speed" in expert_cfg_dict:
+        expert_kw["max_speed"] = float(expert_cfg_dict["max_speed"])
+    if "speed_pid" in expert_cfg_dict:
+        kp, ki, kd = expert_cfg_dict["speed_pid"]
+        expert_kw.update(speed_kp=float(kp), speed_ki=float(ki), speed_kd=float(kd))
+    if "steer_pid" in expert_cfg_dict:
+        kp, ki, kd = expert_cfg_dict["steer_pid"]
+        expert_kw.update(steer_kp=float(kp), steer_ki=float(ki), steer_kd=float(kd))
+    if "traffic_light_brake_distance" in expert_cfg_dict:
+        expert_kw["traffic_light_brake_distance"] = float(
+            expert_cfg_dict["traffic_light_brake_distance"]
+        )
+    if "vehicle_hazard_distance" in expert_cfg_dict:
+        expert_kw["vehicle_hazard_distance"] = float(expert_cfg_dict["vehicle_hazard_distance"])
+    if "pedestrian_hazard_distance" in expert_cfg_dict:
+        expert_kw["pedestrian_hazard_distance"] = float(
+            expert_cfg_dict["pedestrian_hazard_distance"]
+        )
+    if "turn_speed_factor" in expert_cfg_dict:
+        expert_kw["turn_speed_factor"] = float(expert_cfg_dict["turn_speed_factor"])
+    expert_config = ExpertConfig(**expert_kw)
+
+    ep_template = EpisodeConfig(
+        town="",  # filled per-scenario
+        weather="",
+        n_vehicles=0,
+        n_walkers=0,
+        max_frames=cfg.get("episode", {}).get("max_frames", 2000),
+        timeout_speed=cfg.get("episode", {}).get("timeout_speed", 0.1),
+        timeout_duration=cfg.get("episode", {}).get("timeout_duration", 180),
+        fps=cfg.get("carla", {}).get("fps", 20),
+        camera_width=cam_cfg.get("per_camera_width", 640),
+        camera_height=cam_cfg.get("per_camera_height", 320),
+        camera_fov=cam_cfg.get("fov", 60),
+        camera_yaws=tuple(cam_cfg.get("yaw_offsets", [-60, 0, 60])),
+        expert_config=expert_config,
+    )
+
+    remaining: list[tuple[EpisodeConfig, int]] = []
+
     for town, weather in itertools.product(towns, weathers):
         for n_vehicles in traffic_configs:
-            for _ in range(episodes_per_config):
-                cam_cfg = cfg.get("cameras", {})
+            n_walkers_val = walkers[0] if walkers else 30
+            key = (town, weather, n_vehicles, n_walkers_val)
+            done = completed_counts.get(key, 0)
+            needed = episodes_per_config - done
 
-                # Parse expert agent config from YAML (falls back to defaults)
-                expert_cfg_dict = cfg.get("expert", {})
-                expert_kw: dict[str, Any] = {}
-                if "target_speed" in expert_cfg_dict:
-                    expert_kw["target_speed"] = float(expert_cfg_dict["target_speed"])
-                if "max_speed" in expert_cfg_dict:
-                    expert_kw["max_speed"] = float(expert_cfg_dict["max_speed"])
-                if "speed_pid" in expert_cfg_dict:
-                    kp, ki, kd = expert_cfg_dict["speed_pid"]
-                    expert_kw.update(speed_kp=float(kp), speed_ki=float(ki), speed_kd=float(kd))
-                if "steer_pid" in expert_cfg_dict:
-                    kp, ki, kd = expert_cfg_dict["steer_pid"]
-                    expert_kw.update(steer_kp=float(kp), steer_ki=float(ki), steer_kd=float(kd))
-                if "traffic_light_brake_distance" in expert_cfg_dict:
-                    expert_kw["traffic_light_brake_distance"] = float(
-                        expert_cfg_dict["traffic_light_brake_distance"]
-                    )
-                if "vehicle_hazard_distance" in expert_cfg_dict:
-                    expert_kw["vehicle_hazard_distance"] = float(
-                        expert_cfg_dict["vehicle_hazard_distance"]
-                    )
-                if "pedestrian_hazard_distance" in expert_cfg_dict:
-                    expert_kw["pedestrian_hazard_distance"] = float(
-                        expert_cfg_dict["pedestrian_hazard_distance"]
-                    )
-                if "turn_speed_factor" in expert_cfg_dict:
-                    expert_kw["turn_speed_factor"] = float(expert_cfg_dict["turn_speed_factor"])
-                expert_config = ExpertConfig(**expert_kw)
-
-                ep = EpisodeConfig(
-                    town=town,
-                    weather=weather,
-                    n_vehicles=n_vehicles,
-                    n_walkers=cfg.get("traffic", {}).get("walkers", [30])[0],
-                    max_frames=cfg.get("episode", {}).get("max_frames", 2000),
-                    timeout_speed=cfg.get("episode", {}).get("timeout_speed", 0.1),
-                    timeout_duration=cfg.get("episode", {}).get("timeout_duration", 180),
-                    fps=cfg.get("carla", {}).get("fps", 20),
-                    camera_width=cam_cfg.get("per_camera_width", 640),
-                    camera_height=cam_cfg.get("per_camera_height", 320),
-                    camera_fov=cam_cfg.get("fov", 60),
-                    camera_yaws=tuple(cam_cfg.get("yaw_offsets", [-60, 0, 60])),
-                    expert_config=expert_config,
+            if needed <= 0:
+                logger.info(
+                    "Skipping %s/%s (veh=%d, wal=%d): %d already completed",
+                    town,
+                    weather,
+                    n_vehicles,
+                    n_walkers_val,
+                    done,
                 )
-                all_configs.append(ep)
+                continue
 
-    # Skip already-done entries (F3 restart or --resume)
-    remaining = all_configs[done_count:]
-    if done_count > 0:
-        logger.info(
-            "Skipping %d already-recorded episodes, %d remaining",
-            done_count,
-            len(remaining),
-        )
+            # C-4: warn if config changed since last run
+            import dataclasses
 
-    return [(ep, 1) for ep in remaining]
+            ep = dataclasses.replace(
+                ep_template,
+                town=town,
+                weather=weather,
+                n_vehicles=n_vehicles,
+                n_walkers=n_walkers_val,
+            )
+            current_hash = _episode_config_hash(ep)
+            existing_hashes = manifest.get_config_hashes(town, weather, n_vehicles, n_walkers_val)
+            if existing_hashes and current_hash not in existing_hashes:
+                logger.warning(
+                    "Config hash mismatch for %s/%s (veh=%d, wal=%d): "
+                    "current=%s, existing=%s — data-affecting params changed!",
+                    town,
+                    weather,
+                    n_vehicles,
+                    n_walkers_val,
+                    current_hash,
+                    existing_hashes,
+                )
+
+            if done > 0:
+                logger.info(
+                    "%s/%s (veh=%d, wal=%d): %d done, %d remaining",
+                    town,
+                    weather,
+                    n_vehicles,
+                    n_walkers_val,
+                    done,
+                    needed,
+                )
+
+            for _ in range(needed):
+                remaining.append((dataclasses.replace(ep), 1))
+
+    return remaining
 
 
 def _preload_map(
@@ -443,7 +519,7 @@ def main() -> None:
             done_count += 1
 
     n_episodes = args.episodes or 1  # Episodes per traffic config
-    campaign = build_campaign(cfg, done_count, n_episodes)
+    campaign = build_campaign(cfg, manifest, n_episodes)
 
     # Apply visualization / recording flags to every episode config
     if args.spectator or args.record or args.debug_draw:
@@ -578,6 +654,7 @@ def main() -> None:
 
             # Collect
             result = collector.collect_episode(config, route_waypoints=route)
+            result.config_hash = _episode_config_hash(config)
             logger.info(
                 "Result: status=%s, frames=%d, duration=%.1fs",
                 result.status,

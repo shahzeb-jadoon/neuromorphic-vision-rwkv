@@ -148,6 +148,9 @@ class EpisodeResult:
     n_frames: int = 0
     town: str = ""
     weather: str = ""
+    n_vehicles: int = 0
+    n_walkers: int = 0
+    config_hash: str = ""
     nav_distribution: dict[str, int] = field(default_factory=dict)
     collision_frame: int | None = None
     error_message: str | None = None
@@ -405,6 +408,8 @@ class _StreamingEpisodeWriter:
             n_frames=n,
             town=config.town,
             weather=config.weather,
+            n_vehicles=config.n_vehicles,
+            n_walkers=config.n_walkers,
             nav_distribution=nav,
             collision_frame=collision_frame,
         )
@@ -1023,6 +1028,8 @@ class ExpertDataCollector:
                 return EpisodeResult(
                     status="crashed",
                     error_message="Failed to spawn vehicle",
+                    n_vehicles=config.n_vehicles,
+                    n_walkers=config.n_walkers,
                     duration_seconds=time.time() - start_time,
                 )
 
@@ -1368,6 +1375,8 @@ class ExpertDataCollector:
                 n_frames=writer.n_written if writer is not None else 0,
                 town=config.town,
                 weather=config.weather,
+                n_vehicles=config.n_vehicles,
+                n_walkers=config.n_walkers,
                 duration_seconds=time.time() - start_time,
             )
 
@@ -1490,6 +1499,9 @@ class CollectionManifest:
             "hash": result.episode_hash,
             "town": result.town,
             "weather": result.weather,
+            "n_vehicles": result.n_vehicles,
+            "n_walkers": result.n_walkers,
+            "config_hash": result.config_hash,
             "n_frames": result.n_frames,
             "status": result.status,
             "nav_distribution": result.nav_distribution,
@@ -1510,20 +1522,57 @@ class CollectionManifest:
         with open(self.path, "w") as f:
             json.dump(self.data, f, indent=2)
 
-    def get_completed_configs(self) -> set[tuple[str, str]]:
-        """Return set of (town, weather) combos already completed."""
+    def get_completed_configs(self) -> set[tuple[str, str, int, int]]:
+        """Return set of (town, weather, n_vehicles, n_walkers) completed."""
         return {
-            (e["town"], e["weather"]) for e in self.data["episodes"] if e["status"] == "completed"
+            (
+                e["town"],
+                e["weather"],
+                e.get("n_vehicles", 0),
+                e.get("n_walkers", 0),
+            )
+            for e in self.data["episodes"]
+            if e["status"] == "completed"
         }
 
-    def get_completed_counts(self) -> dict[tuple[str, str], int]:
-        """Return count of completed episodes per (town, weather) combo."""
-        counts: dict[tuple[str, str], int] = {}
+    def get_completed_counts(self) -> dict[tuple[str, str, int, int], int]:
+        """Return count of completed episodes per (town, weather, n_vehicles, n_walkers)."""
+        counts: dict[tuple[str, str, int, int], int] = {}
         for e in self.data["episodes"]:
             if e["status"] == "completed":
-                key = (e["town"], e["weather"])
+                key = (
+                    e["town"],
+                    e["weather"],
+                    e.get("n_vehicles", 0),
+                    e.get("n_walkers", 0),
+                )
                 counts[key] = counts.get(key, 0) + 1
         return counts
+
+    def get_config_hashes(
+        self,
+        town: str,
+        weather: str,
+        n_vehicles: int,
+        n_walkers: int,
+    ) -> set[str]:
+        """Return distinct config hashes for a scenario key.
+
+        Used by C-4 audit: if the returned set is non-empty and the
+        current config hash is not in it, data-affecting parameters
+        changed between collection runs.
+        """
+        hashes: set[str] = set()
+        for e in self.data["episodes"]:
+            if (
+                e["town"] == town
+                and e["weather"] == weather
+                and e.get("n_vehicles", 0) == n_vehicles
+                and e.get("n_walkers", 0) == n_walkers
+                and e.get("config_hash")
+            ):
+                hashes.add(e["config_hash"])
+        return hashes
 
     def summary(self) -> str:
         """Return human-readable summary."""
