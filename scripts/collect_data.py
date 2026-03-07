@@ -135,14 +135,24 @@ def build_campaign(
     return [(ep, 1) for ep in remaining]
 
 
-def _preload_map(town: str, host: str, port: int) -> bool:
-    """Load a CARLA map in a throwaway subprocess.
+def _preload_map(
+    town: str,
+    host: str,
+    port: int,
+    max_retries: int = 3,
+    base_wait: float = 10.0,
+) -> bool:
+    """Load a CARLA map in a throwaway subprocess with retry.
 
     CARLA's C++ client library leaks ~100 MB/s of anonymous memory
     after ``load_world()`` map changes.  By calling ``load_world()``
     in a short-lived subprocess, the OS reclaims all leaked C-level
     memory when the subprocess exits.  The CARLA *server* retains the
     new map, so the next client that connects sees it immediately.
+
+    Uses exponential backoff on failure (10 s → 20 s → 40 s by default)
+    to handle transient CARLA server hiccups without losing an entire
+    town's data.
 
     Returns True if the map was loaded successfully.
     """
@@ -166,21 +176,53 @@ c.load_world("{town}")
 time.sleep(3)
 print(f"Map preloaded: {town} on {{host}}")
 """
-    result = subprocess.run(
-        [sys.executable, "-c", loader_script],
-        timeout=180,
-        capture_output=True,
-        text=True,
-    )
-    if result.returncode == 0:
-        logger.info("Map preloader for %s exited cleanly", town)
-        return True
-    logger.error(
-        "Map preloader for %s failed (rc=%d): %s",
-        town,
-        result.returncode,
-        result.stderr.strip()[-500:] if result.stderr else "(no stderr)",
-    )
+    for attempt in range(1, max_retries + 1):
+        try:
+            result = subprocess.run(
+                [sys.executable, "-c", loader_script],
+                timeout=180,
+                capture_output=True,
+                text=True,
+            )
+        except subprocess.TimeoutExpired:
+            logger.warning(
+                "Map preload for %s timed out (attempt %d/%d)",
+                town,
+                attempt,
+                max_retries,
+            )
+            if attempt < max_retries:
+                wait = base_wait * (2 ** (attempt - 1))
+                logger.info("Retrying in %.0fs...", wait)
+                time.sleep(wait)
+            continue
+
+        if result.returncode == 0:
+            logger.info("Map preloader for %s exited cleanly", town)
+            return True
+
+        stderr_tail = result.stderr.strip()[-500:] if result.stderr else "(no stderr)"
+        if attempt < max_retries:
+            wait = base_wait * (2 ** (attempt - 1))
+            logger.warning(
+                "Map preload for %s failed (attempt %d/%d, rc=%d): %s " "— retrying in %.0fs",
+                town,
+                attempt,
+                max_retries,
+                result.returncode,
+                stderr_tail,
+                wait,
+            )
+            time.sleep(wait)
+        else:
+            logger.error(
+                "Map preload for %s failed after %d attempts (rc=%d): %s",
+                town,
+                max_retries,
+                result.returncode,
+                stderr_tail,
+            )
+
     return False
 
 
