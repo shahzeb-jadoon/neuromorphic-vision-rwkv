@@ -14,13 +14,18 @@ from __future__ import annotations
 import argparse
 import itertools
 import logging
+import os
+import subprocess
 import sys
 import time
+import tracemalloc
 from pathlib import Path
 from typing import Any
 
 import numpy as np
 import yaml
+
+from scripts.diagnose_memory import log_memory_snapshot
 
 from src.data.expert_collector import (
     CollectionManifest,
@@ -46,87 +51,252 @@ def load_config(config_path: str) -> dict:
 
 def build_campaign(
     cfg: dict,
-    completed_counts: dict[tuple[str, str], int],
+    done_count: int,
     episodes_per_config: int,
 ) -> list[tuple[EpisodeConfig, int]]:
-    """Build list of (episode_config, remaining_count) pairs, accounting for completed.
+    """Build list of (episode_config, 1) pairs, skipping already-done entries.
 
     Args:
         cfg: Collection config dict.
-        completed_counts: Map of (town, weather) -> number of completed episodes.
-        episodes_per_config: Total desired episodes per (town, weather) combo.
+        done_count: Number of episodes already recorded for this town in the
+            manifest (any status — completed, timeout, collision, memory_limit).
+            These are skipped from the front of the campaign.
+        episodes_per_config: Number of episodes per traffic config.
 
     Returns:
-        List of (EpisodeConfig, n_remaining) where n_remaining > 0.
+        List of (EpisodeConfig, 1) for remaining episodes.
     """
-    episodes = []
     towns = cfg.get("towns", ["Town01"])
     weathers = cfg.get("weathers", ["ClearNoon"])
     traffic_configs = cfg.get("traffic", {}).get("vehicles", [50])
 
+    # Build full flat list of configs, then skip `done_count` from front
+    all_configs: list[EpisodeConfig] = []
     for town, weather in itertools.product(towns, weathers):
-        already_done = completed_counts.get((town, weather), 0)
-        remaining = episodes_per_config - already_done
-        if remaining <= 0:
-            logger.info(
-                "Skipping %s / %s (%d/%d already completed)",
-                town,
-                weather,
-                already_done,
-                episodes_per_config,
-            )
+        for n_vehicles in traffic_configs:
+            for _ in range(episodes_per_config):
+                cam_cfg = cfg.get("cameras", {})
+
+                # Parse expert agent config from YAML (falls back to defaults)
+                expert_cfg_dict = cfg.get("expert", {})
+                expert_kw: dict[str, Any] = {}
+                if "target_speed" in expert_cfg_dict:
+                    expert_kw["target_speed"] = float(expert_cfg_dict["target_speed"])
+                if "max_speed" in expert_cfg_dict:
+                    expert_kw["max_speed"] = float(expert_cfg_dict["max_speed"])
+                if "speed_pid" in expert_cfg_dict:
+                    kp, ki, kd = expert_cfg_dict["speed_pid"]
+                    expert_kw.update(speed_kp=float(kp), speed_ki=float(ki), speed_kd=float(kd))
+                if "steer_pid" in expert_cfg_dict:
+                    kp, ki, kd = expert_cfg_dict["steer_pid"]
+                    expert_kw.update(steer_kp=float(kp), steer_ki=float(ki), steer_kd=float(kd))
+                if "traffic_light_brake_distance" in expert_cfg_dict:
+                    expert_kw["traffic_light_brake_distance"] = float(
+                        expert_cfg_dict["traffic_light_brake_distance"]
+                    )
+                if "vehicle_hazard_distance" in expert_cfg_dict:
+                    expert_kw["vehicle_hazard_distance"] = float(
+                        expert_cfg_dict["vehicle_hazard_distance"]
+                    )
+                if "pedestrian_hazard_distance" in expert_cfg_dict:
+                    expert_kw["pedestrian_hazard_distance"] = float(
+                        expert_cfg_dict["pedestrian_hazard_distance"]
+                    )
+                if "turn_speed_factor" in expert_cfg_dict:
+                    expert_kw["turn_speed_factor"] = float(expert_cfg_dict["turn_speed_factor"])
+                expert_config = ExpertConfig(**expert_kw)
+
+                ep = EpisodeConfig(
+                    town=town,
+                    weather=weather,
+                    n_vehicles=n_vehicles,
+                    n_walkers=cfg.get("traffic", {}).get("walkers", [30])[0],
+                    max_frames=cfg.get("episode", {}).get("max_frames", 2000),
+                    timeout_speed=cfg.get("episode", {}).get("timeout_speed", 0.1),
+                    timeout_duration=cfg.get("episode", {}).get("timeout_duration", 180),
+                    fps=cfg.get("carla", {}).get("fps", 20),
+                    camera_width=cam_cfg.get("per_camera_width", 640),
+                    camera_height=cam_cfg.get("per_camera_height", 320),
+                    camera_fov=cam_cfg.get("fov", 60),
+                    camera_yaws=tuple(cam_cfg.get("yaw_offsets", [-60, 0, 60])),
+                    expert_config=expert_config,
+                )
+                all_configs.append(ep)
+
+    # Skip already-done entries (F3 restart or --resume)
+    remaining = all_configs[done_count:]
+    if done_count > 0:
+        logger.info(
+            "Skipping %d already-recorded episodes, %d remaining",
+            done_count,
+            len(remaining),
+        )
+
+    return [(ep, 1) for ep in remaining]
+
+
+def _preload_map(town: str, host: str, port: int) -> bool:
+    """Load a CARLA map in a throwaway subprocess.
+
+    CARLA's C++ client library leaks ~100 MB/s of anonymous memory
+    after ``load_world()`` map changes.  By calling ``load_world()``
+    in a short-lived subprocess, the OS reclaims all leaked C-level
+    memory when the subprocess exits.  The CARLA *server* retains the
+    new map, so the next client that connects sees it immediately.
+
+    Returns True if the map was loaded successfully.
+    """
+    # Inline script: connect, load_world, exit.  No sensor callbacks
+    # are created, so even if the leak fires it's tiny and dies with
+    # this process.
+    loader_script = f"""\
+import subprocess as sp, sys, time
+import carla
+host = "{host}"
+if host == "auto":
+    try:
+        r = sp.run(["ip", "route", "show", "default"],
+                    capture_output=True, text=True, check=True)
+        host = r.stdout.strip().split()[2]
+    except Exception:
+        host = "localhost"
+c = carla.Client(host, {port})
+c.set_timeout(120.0)
+c.load_world("{town}")
+time.sleep(3)
+print(f"Map preloaded: {town} on {{host}}")
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", loader_script],
+        timeout=180,
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode == 0:
+        logger.info("Map preloader for %s exited cleanly", town)
+        return True
+    logger.error(
+        "Map preloader for %s failed (rc=%d): %s",
+        town,
+        result.returncode,
+        result.stderr.strip()[-500:] if result.stderr else "(no stderr)",
+    )
+    return False
+
+
+def _run_orchestrator(args: argparse.Namespace) -> None:
+    """Spawn one subprocess per town for memory isolation.
+
+    For each town the orchestrator:
+    1. Spawns a throwaway "map preloader" subprocess that calls
+       ``load_world(town)`` then exits — any leaked C-level memory
+       is reclaimed by the OS.
+    2. Spawns the real collector worker which connects to CARLA
+       (server is already on the correct map), calls ``get_world()``,
+       and collects all episodes **without ever calling load_world()**.
+
+    This two-phase design ensures the collector process never triggers
+    the libcarla_client.so memory leak.
+    """
+    cfg = load_config(args.config)
+    if args.town:
+        cfg["towns"] = args.town
+    towns: list[str] = cfg.get("towns", ["Town01"])
+
+    logger.info(
+        "F2 memory isolation: spawning %d subprocess(es), one per town",
+        len(towns),
+    )
+
+    # Build subprocess command: same CLI args + internal --_subprocess-town flag
+    # Use resolved __file__ so the call works from any cwd.
+    script = str(Path(__file__).resolve())
+    base_argv = [a for a in sys.argv[1:] if not a.startswith("--_subprocess-town")]
+
+    # Resolve host once for the preloader
+    carla_host = args.host
+    carla_port = args.port
+
+    failed_towns: list[tuple[str, str]] = []
+    for i, town in enumerate(towns, 1):
+        # --- Phase 1: preload map in throwaway subprocess ---
+        logger.info("--- [%d/%d] Preloading map %s ---", i, len(towns), town)
+        if not _preload_map(town, carla_host, carla_port):
+            logger.error("Skipping %s — map preload failed", town)
+            failed_towns.append((town, "preload failed"))
             continue
 
-        for n_vehicles in traffic_configs:
-            cam_cfg = cfg.get("cameras", {})
+        # --- Phase 2: spawn collector worker (no load_world) ---
+        logger.info("--- [%d/%d] Spawning worker for %s ---", i, len(towns), town)
+        cmd = [sys.executable, script] + base_argv + ["--_subprocess-town", town]
 
-            # Parse expert agent config from YAML (falls back to defaults)
-            expert_cfg_dict = cfg.get("expert", {})
-            expert_kw: dict[str, Any] = {}
-            if "target_speed" in expert_cfg_dict:
-                expert_kw["target_speed"] = float(expert_cfg_dict["target_speed"])
-            if "max_speed" in expert_cfg_dict:
-                expert_kw["max_speed"] = float(expert_cfg_dict["max_speed"])
-            if "speed_pid" in expert_cfg_dict:
-                kp, ki, kd = expert_cfg_dict["speed_pid"]
-                expert_kw.update(speed_kp=float(kp), speed_ki=float(ki), speed_kd=float(kd))
-            if "steer_pid" in expert_cfg_dict:
-                kp, ki, kd = expert_cfg_dict["steer_pid"]
-                expert_kw.update(steer_kp=float(kp), steer_ki=float(ki), steer_kd=float(kd))
-            if "traffic_light_brake_distance" in expert_cfg_dict:
-                expert_kw["traffic_light_brake_distance"] = float(
-                    expert_cfg_dict["traffic_light_brake_distance"]
+        # F3: retry loop — worker exits with code 42 when RSS guard fires.
+        # The OS reclaims all leaked C-level memory, then we respawn.
+        max_restarts = 10
+        for restart in range(max_restarts + 1):
+            if restart > 0:
+                logger.info(
+                    "--- Restarting worker for %s (attempt %d/%d) ---",
+                    town,
+                    restart + 1,
+                    max_restarts + 1,
                 )
-            if "vehicle_hazard_distance" in expert_cfg_dict:
-                expert_kw["vehicle_hazard_distance"] = float(
-                    expert_cfg_dict["vehicle_hazard_distance"]
-                )
-            if "pedestrian_hazard_distance" in expert_cfg_dict:
-                expert_kw["pedestrian_hazard_distance"] = float(
-                    expert_cfg_dict["pedestrian_hazard_distance"]
-                )
-            if "turn_speed_factor" in expert_cfg_dict:
-                expert_kw["turn_speed_factor"] = float(expert_cfg_dict["turn_speed_factor"])
-            expert_config = ExpertConfig(**expert_kw)
+            result = subprocess.run(cmd)
 
-            ep = EpisodeConfig(
-                town=town,
-                weather=weather,
-                n_vehicles=n_vehicles,
-                n_walkers=cfg.get("traffic", {}).get("walkers", [30])[0],
-                max_frames=cfg.get("episode", {}).get("max_frames", 2000),
-                timeout_speed=cfg.get("episode", {}).get("timeout_speed", 0.1),
-                timeout_duration=cfg.get("episode", {}).get("timeout_duration", 180),
-                fps=cfg.get("carla", {}).get("fps", 20),
-                camera_width=cam_cfg.get("per_camera_width", 640),
-                camera_height=cam_cfg.get("per_camera_height", 320),
-                camera_fov=cam_cfg.get("fov", 60),
-                camera_yaws=tuple(cam_cfg.get("yaw_offsets", [-60, 0, 60])),
-                expert_config=expert_config,
+            if result.returncode == 0:
+                logger.info("Town %s worker exited cleanly", town)
+                break
+            elif result.returncode == 42:
+                # F3 RSS guard triggered — worker saved its episode and
+                # exited.  The manifest records progress, so the next
+                # worker will skip completed episodes.
+                logger.info(
+                    "Town %s worker hit RSS limit — restarting " "(restart %d/%d)",
+                    town,
+                    restart + 1,
+                    max_restarts,
+                )
+                # Quick preload to ensure map is still correct
+                _preload_map(town, carla_host, carla_port)
+                continue
+            elif result.returncode == -9:
+                logger.error(
+                    "Town %s worker OOM-killed (SIGKILL). "
+                    "Leak may persist within-town for very long runs.",
+                    town,
+                )
+                failed_towns.append((town, "OOM-killed"))
+                break
+            else:
+                logger.error(
+                    "Town %s worker exited with code %d",
+                    town,
+                    result.returncode,
+                )
+                failed_towns.append((town, f"exit code {result.returncode}"))
+                break
+        else:
+            # Exhausted all restarts
+            logger.error(
+                "Town %s exhausted %d RSS-guard restarts",
+                town,
+                max_restarts,
             )
-            episodes.append((ep, remaining))
+            failed_towns.append((town, "max RSS restarts exceeded"))
 
-    return episodes
+    # Final summary (read manifest written by workers)
+    output_dir = args.output or cfg.get("output", {}).get("directory", "data/collected")
+    manifest_name = cfg.get("output", {}).get("manifest", "collection_manifest.json")
+    manifest = CollectionManifest(Path(output_dir) / manifest_name)
+
+    logger.info("=" * 60)
+    logger.info("Campaign complete!")
+    logger.info(manifest.summary())
+    if failed_towns:
+        logger.warning(
+            "Failed towns: %s",
+            ", ".join(f"{t} ({r})" for t, r in failed_towns),
+        )
 
 
 def main() -> None:
@@ -169,14 +339,46 @@ def main() -> None:
         action="store_true",
         help="Draw route, trajectory, and target in CARLA viewport",
     )
+    parser.add_argument(
+        "--tracemalloc",
+        action="store_true",
+        help="Enable tracemalloc to profile Python memory allocations",
+    )
+    parser.add_argument(
+        "--memory-log",
+        action="store_true",
+        help="Log system memory at key points (map loads, episode boundaries)",
+    )
+    parser.add_argument(
+        "--_subprocess-town",
+        type=str,
+        default=None,
+        dest="_subprocess_town",
+        help=argparse.SUPPRESS,  # Internal: per-town worker spawned by orchestrator
+    )
     args = parser.parse_args()
+
+    # --- F2: Per-town subprocess isolation (memory leak mitigation) ---
+    # CARLA's C++ client library (libcarla_client.so) leaks ~100 MB/s of
+    # anonymous memory after load_world() map changes.  By running each
+    # town in a separate subprocess, the OS reclaims all leaked C-level
+    # memory when the subprocess exits.
+    if not args._subprocess_town:
+        _run_orchestrator(args)
+        return
+
+    # ---- Below: per-town worker mode (one town per process) ----
+    logger.info(
+        "Worker process for %s (PID %d)",
+        args._subprocess_town,
+        os.getpid(),
+    )
 
     # Load config
     cfg = load_config(args.config)
 
-    # Apply CLI overrides
-    if args.town:
-        cfg["towns"] = args.town
+    # Force single town (subprocess isolation — ignore CLI --town)
+    cfg["towns"] = [args._subprocess_town]
     if args.weather:
         cfg["weathers"] = args.weather
     if args.max_frames:
@@ -188,10 +390,18 @@ def main() -> None:
 
     # Initialize
     manifest = CollectionManifest(manifest_path)
-    completed_counts = manifest.get_completed_counts() if args.resume else {}
 
-    n_episodes = args.episodes or 1  # Episodes per (town, weather, traffic) config
-    campaign = build_campaign(cfg, completed_counts, n_episodes)
+    # Count already-recorded episodes for this town (any status) so we
+    # can skip them.  This enables both --resume and F3 restart-after-
+    # RSS-guard to work correctly.
+    done_count = 0
+    town = args._subprocess_town
+    for e in manifest.data.get("episodes", []):
+        if e.get("town", "") == town:
+            done_count += 1
+
+    n_episodes = args.episodes or 1  # Episodes per traffic config
+    campaign = build_campaign(cfg, done_count, n_episodes)
 
     # Apply visualization / recording flags to every episode config
     if args.spectator or args.record or args.debug_draw:
@@ -213,6 +423,11 @@ def main() -> None:
     if args.resume:
         logger.info("Resuming from manifest:\n%s", manifest.summary())
 
+    # --- M13: tracemalloc profiling (opt-in) ---
+    if args.tracemalloc:
+        tracemalloc.start(10)  # 10 frames of call stack
+        logger.info("tracemalloc started (10-frame stack depth)")
+
     # Setup collector
     rng = np.random.default_rng(args.seed)
     collector = ExpertDataCollector(
@@ -230,34 +445,59 @@ def main() -> None:
     )
 
     # Run campaign
+    # F2b: The map was already loaded by the orchestrator's preloader
+    # subprocess.  The worker just calls get_world() — NO load_world()
+    # — so the libcarla_client.so memory leak is never triggered.
     episode_num = 0
     current_town: str | None = None
     route_gen: BalancedRouteGenerator | None = None
 
     for config, n_remaining in campaign:
-        # Ensure correct map is loaded BEFORE creating route generator
+        # Verify correct map (preloaded by orchestrator) — no load_world()!
         if config.town != current_town:
-            logger.info("Loading map: %s", config.town)
             assert collector.client is not None
-            # Map loading can take 60-120s over WSL2; temporarily increase timeout
-            collector.client.set_timeout(120.0)
-            try:
-                collector.client.load_world(config.town)
-                time.sleep(5.0)  # Let the new map fully settle
-                collector.world = collector.client.get_world()
-            except RuntimeError as e:
-                logger.error("Failed to load %s: %s — retrying once", config.town, e)
-                time.sleep(10.0)
+
+            if args.memory_log:
+                log_memory_snapshot(f"PRE get_world({config.town})")
+
+            # The orchestrator's _preload_map() already called load_world()
+            # in a throwaway subprocess.  We just get_world() here.
+            collector.world = collector.client.get_world()
+            actual_map = collector.world.get_map().name
+            expected_suffix = config.town
+
+            if expected_suffix not in actual_map:
+                # Fallback: map mismatch — the preloader may have failed
+                # or another client changed the map.  Load it ourselves.
+                logger.warning(
+                    "Map mismatch: expected %s, got %s — loading directly",
+                    config.town,
+                    actual_map,
+                )
+                collector.client.set_timeout(120.0)
                 try:
                     collector.client.load_world(config.town)
                     time.sleep(5.0)
                     collector.world = collector.client.get_world()
-                except RuntimeError as e2:
-                    logger.error("Retry failed for %s: %s — skipping town", config.town, e2)
+                except RuntimeError as e:
+                    logger.error(
+                        "Failed to load %s: %s — skipping town",
+                        config.town,
+                        e,
+                    )
                     collector.client.set_timeout(60.0)
                     current_town = None
                     continue
-            collector.client.set_timeout(60.0)
+                collector.client.set_timeout(60.0)
+            else:
+                logger.info(
+                    "Map %s already loaded (preloaded by orchestrator)",
+                    actual_map,
+                )
+
+            if args.memory_log:
+                log_memory_snapshot(f"POST get_world({config.town})")
+
             current_town = config.town
 
             # (Re-)create route generator on the now-correct map
@@ -290,6 +530,10 @@ def main() -> None:
                 except Exception as e:
                     logger.warning("Route generation failed, using random: %s", e)
 
+            # --- Memory snapshot before episode ---
+            if args.memory_log:
+                log_memory_snapshot(f"PRE episode {episode_num} ({config.town}/{config.weather})")
+
             # Collect
             result = collector.collect_episode(config, route_waypoints=route)
             logger.info(
@@ -298,6 +542,21 @@ def main() -> None:
                 result.n_frames,
                 result.duration_seconds,
             )
+
+            # --- Memory snapshot after episode ---
+            if args.memory_log:
+                log_memory_snapshot(
+                    f"POST episode {episode_num} status={result.status} "
+                    f"frames={result.n_frames}"
+                )
+
+            # --- M13: tracemalloc snapshot between episodes ---
+            if args.tracemalloc:
+                snapshot = tracemalloc.take_snapshot()
+                top_stats = snapshot.statistics("lineno")
+                logger.info("tracemalloc top 10 after episode %d:", episode_num)
+                for stat in top_stats[:10]:
+                    logger.info("  %s", stat)
 
             # Update manifest
             manifest.add_episode(result)
@@ -312,10 +571,21 @@ def main() -> None:
                 # Force map reload + route_gen re-init on next iteration
                 current_town = None
 
-    # Final summary
-    logger.info("=" * 60)
-    logger.info("Campaign complete!")
-    logger.info(manifest.summary())
+            # F3: RSS memory guard — exit worker so orchestrator restarts it
+            if result.status == "memory_limit":
+                logger.warning(
+                    "RSS memory guard triggered — exiting worker for restart " "(PID %d, %s)",
+                    os.getpid(),
+                    args._subprocess_town,
+                )
+                sys.exit(42)  # Special exit code: "restart me"
+
+    # Worker complete — process exit reclaims all C-level memory
+    logger.info(
+        "Worker for %s finished (PID %d)",
+        args._subprocess_town,
+        os.getpid(),
+    )
 
 
 if __name__ == "__main__":

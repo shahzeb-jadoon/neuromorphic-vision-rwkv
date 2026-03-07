@@ -15,7 +15,7 @@ Key differences from the v2 collector:
 
 Handles three failure modes:
     - CARLA crash recovery (reconnect with retries)
-    - Episode termination (completed / collision / timeout)
+    - Episode termination (completed / collision / timeout / memory_limit)
     - Campaign resumption via collection_manifest.json
 """
 
@@ -23,11 +23,14 @@ from __future__ import annotations
 
 from src.data import hdf5_schema as S
 
+import ctypes
+import ctypes.util
 import gc
 import hashlib
 import json
 import logging
 import math
+import os
 import queue
 import time
 import traceback
@@ -42,6 +45,33 @@ import numpy as np
 # RoadOption is a pure-Python IntEnum with no carla dependency,
 # so import it unconditionally.
 from agents.navigation.local_planner import RoadOption
+
+# ---------------------------------------------------------------------------
+# posix_fadvise — evict clean page cache after HDF5 flushes
+# ---------------------------------------------------------------------------
+# Without this, every HDF5 write stays in Linux page cache indefinitely,
+# inflating VmmemWSL to 19+ GB on Windows.  With periodic
+# fadvise(DONTNEED) the cache stays below ~2 MB.
+# See docs/MEMORY_DIAGNOSTICS_FINDINGS.md §15 for full analysis.
+POSIX_FADV_DONTNEED = 4
+_CACHE_EVICT_INTERVAL = 100  # frames between flush+evict cycles
+
+_libc = None
+try:
+    _libc_name = ctypes.util.find_library("c")
+    if _libc_name:
+        _libc = ctypes.CDLL(_libc_name, use_errno=True)
+except OSError:
+    pass
+
+
+def _posix_fadvise(fd: int, offset: int, length: int, advice: int) -> int:
+    """Call posix_fadvise(3) via ctypes.  Returns 0 on success."""
+    if _libc is None:
+        return -1
+    # int posix_fadvise(int fd, off_t offset, off_t length, int advice)
+    return int(_libc.posix_fadvise(fd, ctypes.c_int64(offset), ctypes.c_int64(length), advice))
+
 
 try:
     import carla
@@ -101,12 +131,18 @@ class EpisodeConfig:
     # Expert agent
     expert_config: ExpertConfig = field(default_factory=ExpertConfig)
 
+    # F3: RSS memory guard — CARLA's C++ client leaks anonymous memory
+    # on most maps.  When RSS exceeds this limit (MB), the episode is
+    # stopped gracefully and the worker exits so the orchestrator can
+    # restart it.  0 = disabled.
+    rss_limit_mb: int = 8192  # 8 GB default
+
 
 @dataclass
 class EpisodeResult:
     """Result of a single episode collection."""
 
-    status: str  # "completed", "collision", "crashed", "timeout"
+    status: str  # "completed", "collision", "crashed", "timeout", "memory_limit"
     filename: str | None = None
     episode_hash: str | None = None
     n_frames: int = 0
@@ -221,6 +257,25 @@ class _StreamingEpisodeWriter:
 
     # -- Per-frame append --------------------------------------------------
 
+    def _flush_and_evict_cache(self) -> None:
+        """Flush HDF5 buffers to disk and evict pages from Linux page cache.
+
+        Without this, every HDF5 write stays in the kernel's page cache,
+        inflating VmmemWSL to 19+ GB on Windows/WSL2.  Calling
+        ``posix_fadvise(POSIX_FADV_DONTNEED)`` after each flush tells the
+        kernel to drop the clean pages, keeping cache below ~2 MB.
+
+        See docs/MEMORY_DIAGNOSTICS_FINDINGS.md §15 for the full analysis.
+        """
+        try:
+            self._h5.flush()
+            fd = self._h5.id.get_vfd_handle()
+            os.fsync(fd)
+            _posix_fadvise(fd, 0, 0, POSIX_FADV_DONTNEED)
+        except Exception:
+            # Non-fatal — data is still written, just cached longer.
+            pass
+
     def append_frame(
         self,
         panoramic: np.ndarray,
@@ -251,6 +306,10 @@ class _StreamingEpisodeWriter:
         self._ds_nped[i] = json.dumps(info.nearby_pedestrians)
 
         self.n_written += 1
+
+        # Periodically flush + evict page cache to prevent VmmemWSL bloat.
+        if self.n_written % _CACHE_EVICT_INTERVAL == 0:
+            self._flush_and_evict_cache()
 
     # -- Finalize ----------------------------------------------------------
 
@@ -319,6 +378,8 @@ class _StreamingEpisodeWriter:
         if collision_frame is not None:
             meta.attrs[S.META_COLLISION_FRAME] = collision_frame
 
+        # Final cache eviction before close — release all remaining pages.
+        self._flush_and_evict_cache()
         self._h5.close()
 
         # Nav distribution
@@ -453,6 +514,74 @@ class ExpertDataCollector:
             self.world.get_map().name,
         )
 
+    def teardown_world(self) -> None:
+        """Destroy all actors and flush C++ client state before map change.
+
+        CARLA's C++ client library (libcarla_client) may retain internal
+        sensor data buffers after actors are destroyed at the Python level.
+        This method aggressively cleans up to prevent memory leaks during
+        ``client.load_world()`` map transitions.
+
+        Call this BEFORE ``client.load_world()`` when switching towns.
+        """
+        if self.world is None:
+            return
+
+        # 1. Destroy all actors we can find in the CARLA world
+        try:
+            actors = self.world.get_actors()
+            # Stop and destroy sensors first (cameras, collision, lidar, etc.)
+            sensors = actors.filter("sensor.*")
+            for sensor in sensors:
+                try:
+                    sensor.stop()
+                except Exception:
+                    pass
+                try:
+                    sensor.destroy()
+                except Exception:
+                    pass
+
+            # Destroy vehicles (except hero/ego if any — they should
+            # already be gone from episode cleanup)
+            vehicles = actors.filter("vehicle.*")
+            for v in vehicles:
+                try:
+                    v.set_autopilot(False)
+                    v.destroy()
+                except Exception:
+                    pass
+
+            # Destroy walkers and controllers
+            walkers = actors.filter("walker.*")
+            for w in walkers:
+                try:
+                    w.destroy()
+                except Exception:
+                    pass
+            controllers = actors.filter("controller.*")
+            for c in controllers:
+                try:
+                    c.stop()
+                    c.destroy()
+                except Exception:
+                    pass
+
+            logger.info(
+                "Teardown: destroyed %d sensors, %d vehicles, %d walkers",
+                len(sensors),
+                len(vehicles),
+                len(walkers),
+            )
+        except Exception as e:
+            logger.warning("Teardown actor cleanup failed: %s", e)
+
+        # 2. Drop our Python reference to the old world
+        self.world = None
+
+        # 3. Force garbage collection to release C-level pointers
+        gc.collect()
+
     def _reconnect(self) -> bool:
         """Attempt to reconnect after CARLA crash."""
         for attempt in range(1, self.crash_retries + 1):
@@ -469,6 +598,24 @@ class ExpertDataCollector:
             except Exception as e:
                 logger.error("Reconnection failed: %s", e)
         return False
+
+    @staticmethod
+    def _get_rss_mb() -> int:
+        """Read current process RSS (Resident Set Size) in MB.
+
+        Uses ``/proc/self/status`` on Linux for a zero-overhead read
+        (no subprocess, no psutil dependency).  Returns 0 on non-Linux
+        platforms so the RSS guard is effectively disabled.
+        """
+        try:
+            with open("/proc/self/status") as f:
+                for line in f:
+                    if line.startswith("VmRSS:"):
+                        # Format: "VmRSS:   12345 kB"
+                        return int(line.split()[1]) // 1024
+        except (FileNotFoundError, OSError):
+            return 0
+        return 0
 
     # ------------------------------------------------------------------
     # Camera helpers
@@ -1035,6 +1182,25 @@ class ExpertDataCollector:
             distance_traveled = 0.0
             prev_location = vehicle.get_transform().location
             dt = 1.0 / config.fps
+            memory_limit_hit = False
+
+            # Pre-tick RSS baseline: catch leaks that accumulated during
+            # setup (warm-up ticks, actor spawning, etc.)
+            if config.rss_limit_mb > 0:
+                rss = self._get_rss_mb()
+                logger.info(
+                    "  [RSS guard] baseline before tick loop: %d MB " "(limit %d MB)",
+                    rss,
+                    config.rss_limit_mb,
+                )
+                if rss > config.rss_limit_mb:
+                    logger.warning(
+                        "RSS memory guard: %d MB exceeds limit "
+                        "%d MB before tick loop — aborting episode",
+                        rss,
+                        config.rss_limit_mb,
+                    )
+                    memory_limit_hit = True
 
             # Create streaming HDF5 writer (writes one frame at a time)
             writer = _StreamingEpisodeWriter(
@@ -1043,13 +1209,51 @@ class ExpertDataCollector:
                 max_frames=config.max_frames,
             )
 
+            # Track last RSS log time (log every 30s regardless of frame
+            # count, since the C++ leak is wall-clock-proportional).
+            _last_rss_log = time.time()
+
             for frame_idx in range(config.max_frames):
+                if memory_limit_hit:
+                    break
+
                 # Check if expert finished route
                 if expert.done():
                     logger.info("Expert completed route at frame %d", frame_idx)
                     break
 
                 self.world.tick()
+
+                # --- F3: RSS memory guard ---
+                # Check EVERY frame — reading /proc/self/status costs
+                # ~5 µs, negligible vs. the ~50 ms CARLA tick.  The C++
+                # leak is wall-clock-proportional (~40-100 MB/s), NOT
+                # frame-proportional, so infrequent frame-based checks
+                # miss it when tick rate drops under memory pressure.
+                if config.rss_limit_mb > 0:
+                    rss = self._get_rss_mb()
+                    now = time.time()
+                    if now - _last_rss_log >= 30.0:
+                        logger.info(
+                            "  [RSS guard] frame %d, t=%.0fs: " "%d MB (limit %d MB)",
+                            frame_idx + 1,
+                            now - start_time,
+                            rss,
+                            config.rss_limit_mb,
+                        )
+                        _last_rss_log = now
+                    if rss > config.rss_limit_mb:
+                        logger.warning(
+                            "RSS memory guard: %d MB exceeds limit "
+                            "%d MB at frame %d (t=%.0fs) "
+                            "— stopping episode",
+                            rss,
+                            config.rss_limit_mb,
+                            frame_idx + 1,
+                            now - start_time,
+                        )
+                        memory_limit_hit = True
+                        break
 
                 # --- Expert step ---
                 control, info = expert.run_step(dt)
@@ -1125,7 +1329,9 @@ class ExpertDataCollector:
             timed_out = stuck_start is not None and (
                 time.time() - stuck_start > config.timeout_duration
             )
-            if timed_out:
+            if memory_limit_hit:
+                status = "memory_limit"
+            elif timed_out:
                 status = "timeout"
             elif collision_frame is not None:
                 status = "collision"
