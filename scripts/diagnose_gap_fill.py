@@ -17,6 +17,7 @@ Usage:
   python scripts/diagnose_gap_fill.py --test corridor  --town Town03 --ticks 3000
   python scripts/diagnose_gap_fill.py --test all       --town Town03 --ticks 3000
 """
+
 import argparse
 import gc
 import os

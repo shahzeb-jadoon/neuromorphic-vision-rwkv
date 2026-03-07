@@ -19,6 +19,7 @@ Usage:
     python scripts/diagnose_tick_leak.py --test get_waypoints --town Town03 --ticks 5000
     python scripts/diagnose_tick_leak.py --test full --town Town03 --ticks 5000
 """
+
 import argparse
 import gc
 import math
@@ -26,7 +27,6 @@ import os
 import time
 from typing import Any
 import carla
-
 
 # ---------- Memory helpers ----------
 

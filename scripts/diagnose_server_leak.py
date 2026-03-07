@@ -8,6 +8,7 @@ Usage:
     python scripts/diagnose_server_leak.py --town Town03 --ticks 1000
     python scripts/diagnose_server_leak.py --town Town04 --ticks 1000
 """
+
 import argparse
 import gc
 import time
