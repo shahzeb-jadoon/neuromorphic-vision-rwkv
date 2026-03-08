@@ -103,7 +103,7 @@ class ExpertConfig:
 
     # --- Safety thresholds ---
     traffic_light_brake_distance: float = 60.0  # metres — start braking
-    traffic_light_stop_distance: float = 4.0  # metres — full stop
+    traffic_light_stop_distance: float = 6.0  # metres — full stop
     tl_comfort_decel: float = 3.0  # m/s² — comfortable deceleration for TL
     turn_comfort_decel: float = 1.5  # m/s² — gentler braking for turn approach
     vehicle_hazard_distance: float = 25.0  # metres — start slowing (min)
@@ -305,6 +305,10 @@ class PrivilegedExpert:
         self.map = world.get_map()
         self.route_planner = route_planner
         self.config = config or ExpertConfig()
+
+        # Cache ego vehicle half-length so we can offset stop distances
+        # to account for the bumper extending ahead of the centre of mass.
+        self._ego_half_length: float = self.vehicle.bounding_box.extent.x
 
         # Controllers
         self.speed_pid = PIDController(
@@ -932,12 +936,12 @@ class PrivilegedExpert:
         if tl_state is not None and tl_distance is not None:
             if tl_state in (carla.TrafficLightState.Red, carla.TrafficLightState.Yellow):
                 if 0 < tl_distance < cfg.traffic_light_brake_distance:
-                    if tl_distance < cfg.traffic_light_stop_distance:
+                    if tl_distance < cfg.traffic_light_stop_distance + self._ego_half_length:
                         mode = DrivingMode.TRAFFIC_LIGHT_STOP
                         target = 0.0
                     else:
                         # Kinematic profile: v = sqrt(2 * a * d)
-                        d = max(tl_distance - cfg.traffic_light_stop_distance, 0.0)
+                        d = max(tl_distance - cfg.traffic_light_stop_distance - self._ego_half_length, 0.0)
                         v_ms = math.sqrt(2.0 * cfg.tl_comfort_decel * d)
                         tl_target = v_ms * 3.6  # m/s → km/h
                         if tl_target < target:
@@ -946,11 +950,12 @@ class PrivilegedExpert:
 
         # --- Stop sign ---
         if ss_distance is not None and 0 < ss_distance < cfg.stop_sign_brake_distance:
+            effective_ss_stop = cfg.stop_sign_stop_distance + self._ego_half_length
             mode = DrivingMode.STOP_SIGN_STOP
-            if ss_distance < cfg.stop_sign_stop_distance:
+            if ss_distance < effective_ss_stop:
                 target = 0.0
             else:
-                d = max(ss_distance - cfg.stop_sign_stop_distance, 0.0)
+                d = max(ss_distance - effective_ss_stop, 0.0)
                 v_ms = math.sqrt(2.0 * cfg.stop_sign_comfort_decel * d)
                 target = min(target, v_ms * 3.6)
 
