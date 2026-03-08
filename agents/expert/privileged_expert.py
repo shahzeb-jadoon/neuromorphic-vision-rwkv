@@ -76,7 +76,7 @@ class ExpertConfig:
     # (0.8 / 0.05 / 0.01) were tuned for normalised error dividing
     # by target_speed, which capped proportional authority and
     # prevented the car from reaching cruising speed.
-    speed_kp: float = 0.05
+    speed_kp: float = 0.07
     speed_ki: float = 0.005
     speed_kd: float = 0.002
 
@@ -87,7 +87,7 @@ class ExpertConfig:
 
     # --- PID gains for turns (blended smoothly via curvature) ---
     # Slightly higher than straight-line gains for tighter control.
-    turn_speed_kp: float = 0.06
+    turn_speed_kp: float = 0.08
     turn_speed_ki: float = 0.008
     turn_speed_kd: float = 0.003
     turn_steer_kp: float = 1.5
