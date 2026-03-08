@@ -437,7 +437,7 @@ class PrivilegedExpert:
         cfg = self.config
         road_limit = self.vehicle.get_speed_limit()  # km/h
         if road_limit is not None and road_limit > 0:
-            base_target = min(road_limit * cfg.speed_limit_margin, cfg.max_speed)
+            base_target = min(road_limit, cfg.max_speed)
         else:
             base_target = cfg.target_speed
 
