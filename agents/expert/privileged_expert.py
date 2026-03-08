@@ -354,6 +354,10 @@ class PrivilegedExpert:
             DrivingMode.STOP_SIGN_STOP,
         })
 
+        # P3-D: track consecutive TURNING frames so we can reset the
+        # speed PID only after a real turn (>0.5 s), not a brief curve.
+        self._turn_frame_count: int = 0
+
     # ------------------------------------------------------------------
     # Route management
     # ------------------------------------------------------------------
@@ -457,6 +461,18 @@ class PrivilegedExpert:
         # during the turn does not bias the post-turn straight.
         if self._prev_mode == DrivingMode.TURNING and mode != DrivingMode.TURNING:
             self.steer_pid.reset()
+            # P3-D: also reset speed PID if the turn was long enough
+            # (>10 frames = 0.5 s at 20 Hz).  This clears the stale
+            # integral from the turn-regime gains without false-
+            # triggering on brief 3-5 frame lane curves.
+            if self._turn_frame_count > 10:
+                self.speed_pid.reset()
+
+        # P3-D: maintain the turn duration counter.
+        if mode == DrivingMode.TURNING:
+            self._turn_frame_count += 1
+        else:
+            self._turn_frame_count = 0
 
         self._prev_mode = mode
 
