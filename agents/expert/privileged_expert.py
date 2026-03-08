@@ -1388,6 +1388,11 @@ class PrivilegedExpert:
                 continue
             if ss_wp.road_id != ego_wp.road_id and ss_wp.road_id != upcoming_road_id:
                 continue
+            # Skip signs on the opposite side of a bi-directional road.
+            # In OpenDRIVE, same-direction lanes share the same lane_id
+            # sign (positive or negative); opposing lanes have opposite.
+            if ss_wp.road_id == ego_wp.road_id and ss_wp.lane_id * ego_wp.lane_id < 0:
+                continue
 
             if best_dist is None or dist < best_dist:
                 best_dist = dist
