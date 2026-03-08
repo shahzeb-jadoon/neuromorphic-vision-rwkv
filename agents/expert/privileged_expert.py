@@ -72,9 +72,13 @@ class ExpertConfig:
     speed_limit_margin: float = 0.90  # drive at 90% of posted limit
 
     # --- PID: longitudinal (speed) ---
-    speed_kp: float = 0.8
-    speed_ki: float = 0.05
-    speed_kd: float = 0.01
+    # NOTE: gains tuned for RAW km/h error (P4-C).  Previous gains
+    # (0.8 / 0.05 / 0.01) were tuned for normalised error dividing
+    # by target_speed, which capped proportional authority and
+    # prevented the car from reaching cruising speed.
+    speed_kp: float = 0.05
+    speed_ki: float = 0.005
+    speed_kd: float = 0.002
 
     # --- PID: lateral (steering) — straight-line defaults ---
     steer_kp: float = 1.2
@@ -82,9 +86,10 @@ class ExpertConfig:
     steer_kd: float = 0.15
 
     # --- PID gains for turns (blended smoothly via curvature) ---
-    turn_speed_kp: float = 1.0
-    turn_speed_ki: float = 0.1
-    turn_speed_kd: float = 0.05
+    # Slightly higher than straight-line gains for tighter control.
+    turn_speed_kp: float = 0.06
+    turn_speed_ki: float = 0.008
+    turn_speed_kd: float = 0.003
     turn_steer_kp: float = 1.5
     turn_steer_ki: float = 0.05
     turn_steer_kd: float = 0.3
@@ -251,6 +256,15 @@ class PIDController:
         self._integral = 0.0
         self._prev_error = 0.0
 
+    def reset_integral(self) -> None:
+        """Clear accumulated integral without resetting prev_error.
+
+        Use this instead of ``reset()`` when transitioning between
+        modes to avoid derivative kicks caused by zeroing prev_error
+        while the actual error is large.
+        """
+        self._integral = 0.0
+
 
 # ---------------------------------------------------------------------------
 # Main expert class
@@ -297,7 +311,7 @@ class PrivilegedExpert:
             self.config.speed_kp,
             self.config.speed_ki,
             self.config.speed_kd,
-            integral_limit=2.0,
+            integral_limit=40.0,
         )
         self.steer_pid = PIDController(
             self.config.steer_kp,
@@ -459,14 +473,19 @@ class PrivilegedExpert:
 
         # Reset steer PID when exiting a turn so the integral wound up
         # during the turn does not bias the post-turn straight.
+        # Also snap _smoothed_curvature to 0 so follow-distance and
+        # gain-blending immediately return to straight-line values
+        # instead of decaying over ~15 frames (EMA lag).
         if self._prev_mode == DrivingMode.TURNING and mode != DrivingMode.TURNING:
             self.steer_pid.reset()
-            # P3-D: also reset speed PID if the turn was long enough
-            # (>10 frames = 0.5 s at 20 Hz).  This clears the stale
-            # integral from the turn-regime gains without false-
-            # triggering on brief 3-5 frame lane curves.
+            self._smoothed_curvature = 0.0
+            # P3-D: clear stale speed integral from the turn-regime
+            # gains if the turn lasted >10 frames (0.5 s at 20 Hz).
+            # Uses reset_integral() instead of reset() to avoid a
+            # derivative kick from zeroing _prev_error while the
+            # actual speed error is large (~15 km/h).
             if self._turn_frame_count > 10:
-                self.speed_pid.reset()
+                self.speed_pid.reset_integral()
 
         # P3-D: maintain the turn duration counter.
         if mode == DrivingMode.TURNING:
@@ -1071,7 +1090,9 @@ class PrivilegedExpert:
         overshoot situations) the behaviour is identical to the
         original binary overrides to preserve braking authority.
         """
-        error = (target_speed - speed_kmh) / max(self.config.target_speed, 10.0)
+        # P4-C: raw km/h error — no normalisation.  Gains are tuned
+        # for this scale (kp ≈ 0.05) so the car can reach target speed.
+        error = target_speed - speed_kmh
         output = self.speed_pid.step(error, dt)
 
         if output >= 0:

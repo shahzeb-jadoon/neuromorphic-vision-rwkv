@@ -28,8 +28,8 @@ expert:
   type: privileged_expert
   target_speed: 30.0     # km/h
   max_speed: 50.0
-  # PID tuning
-  speed_pid: [0.8, 0.05, 0.01]
+  # PID tuning — gains for RAW km/h error (P4-C)
+  speed_pid: [0.05, 0.005, 0.002]
   steer_pid: [1.2, 0.05, 0.15]
   # Safety
   traffic_light_brake_distance: 60.0
