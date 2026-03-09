@@ -32,7 +32,7 @@ expert:
   speed_pid: [0.07, 0.005, 0.002]
   steer_pid: [1.2, 0.05, 0.15]
   # Safety
-  traffic_light_brake_distance: 60.0
+  traffic_light_brake_distance: 80.0
   vehicle_hazard_distance: 25.0
   pedestrian_hazard_distance: 15.0
   turn_speed_factor: 0.45

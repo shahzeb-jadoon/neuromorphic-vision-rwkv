@@ -180,6 +180,7 @@ class _FakeFrameInfo:
         self.rotation = [0.0, 90.0, 0.0]
         self.velocity = [speed_kmh / 3.6, 0.0, 0.0]
         self.traffic_light_state = 0
+        self.traffic_light_distance = -1.0
         self.stop_sign_distance = -1.0
         self.target_speed = 8.33
         self.driving_mode = 0

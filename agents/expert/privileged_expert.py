@@ -102,9 +102,9 @@ class ExpertConfig:
     waypoint_buffer_size: int = 40
 
     # --- Safety thresholds ---
-    traffic_light_brake_distance: float = 60.0  # metres — start braking
-    traffic_light_stop_distance: float = 7.0  # metres — full stop
-    tl_comfort_decel: float = 3.0  # m/s² — comfortable deceleration for TL
+    traffic_light_brake_distance: float = 80.0  # metres — start braking
+    traffic_light_stop_distance: float = 6.0  # metres — full stop
+    tl_comfort_decel: float = 1.5  # m/s² — comfortable deceleration for TL
     turn_comfort_decel: float = 1.5  # m/s² — gentler braking for turn approach
     vehicle_hazard_distance: float = 25.0  # metres — start slowing (min)
     vehicle_emergency_distance: float = 5.0  # metres — emergency (min)
@@ -117,9 +117,9 @@ class ExpertConfig:
     pedestrian_lane_half_width: float = 3.0  # metres — wider lateral band for pedestrians
 
     # --- Stop signs ---
-    stop_sign_brake_distance: float = 30.0  # metres — start braking
+    stop_sign_brake_distance: float = 40.0  # metres — start braking
     stop_sign_stop_distance: float = 4.0  # metres — full stop
-    stop_sign_comfort_decel: float = 3.0  # m/s² — comfortable deceleration
+    stop_sign_comfort_decel: float = 1.5  # m/s² — comfortable deceleration
     stop_sign_wait_ticks: int = 40  # ~2 s at 20 Hz — minimum pause
 
     # --- Turn behaviour ---
@@ -936,20 +936,36 @@ class PrivilegedExpert:
         # a turn target of ~15 km/h masks the TL ramp (which is still
         # above 15 km/h at 20-40 m distance), so the car approaches
         # a red TL at turn speed and has to slam at the last moment.
+        speed_ms = speed_kmh / 3.6
         if tl_state is not None and tl_distance is not None:
             if tl_state in (carla.TrafficLightState.Red, carla.TrafficLightState.Yellow):
                 if 0 < tl_distance < cfg.traffic_light_brake_distance:
-                    if tl_distance < cfg.traffic_light_stop_distance:
-                        mode = DrivingMode.TRAFFIC_LIGHT_STOP
-                        target = 0.0
-                    else:
-                        # Kinematic profile: v = sqrt(2 * a * d)
-                        d = max(tl_distance - cfg.traffic_light_stop_distance, 0.0)
-                        v_ms = math.sqrt(2.0 * cfg.tl_comfort_decel * d)
-                        tl_target = v_ms * 3.6  # m/s → km/h
-                        if tl_target < target:
+                    effective_tl_stop = cfg.traffic_light_stop_distance + self._ego_half_length
+
+                    # Yellow dilemma zone: if the car cannot stop within
+                    # the comfort deceleration envelope, proceed through.
+                    # This mirrors real driving: a professional driver
+                    # committed at speed does not slam the brakes for a
+                    # late yellow.
+                    proceed_yellow = False
+                    if tl_state == carla.TrafficLightState.Yellow:
+                        d_to_stop = max(tl_distance - effective_tl_stop, 0.0)
+                        min_brake_dist = speed_ms ** 2 / (2.0 * cfg.tl_comfort_decel)
+                        if d_to_stop < min_brake_dist:
+                            proceed_yellow = True
+
+                    if not proceed_yellow:
+                        if tl_distance < effective_tl_stop:
                             mode = DrivingMode.TRAFFIC_LIGHT_STOP
-                            target = tl_target
+                            target = 0.0
+                        else:
+                            # Kinematic profile: v = sqrt(2 * a * d)
+                            d = max(tl_distance - effective_tl_stop, 0.0)
+                            v_ms = math.sqrt(2.0 * cfg.tl_comfort_decel * d)
+                            tl_target = v_ms * 3.6  # m/s → km/h
+                            if tl_target < target:
+                                mode = DrivingMode.TRAFFIC_LIGHT_STOP
+                                target = tl_target
 
         # --- Stop sign ---
         if ss_committed:
@@ -957,7 +973,8 @@ class PrivilegedExpert:
             target = 0.0
         elif ss_distance is not None and 0 < ss_distance < cfg.stop_sign_brake_distance:
             mode = DrivingMode.STOP_SIGN_STOP
-            d = max(ss_distance - cfg.stop_sign_stop_distance, 0.0)
+            effective_ss_stop = cfg.stop_sign_stop_distance + self._ego_half_length
+            d = max(ss_distance - effective_ss_stop, 0.0)
             v_ms = math.sqrt(2.0 * cfg.stop_sign_comfort_decel * d)
             target = min(target, v_ms * 3.6)
 
@@ -965,7 +982,6 @@ class PrivilegedExpert:
         # Scale safety distances with current speed (kinematic braking
         # envelope).  At low speed the fixed minimums apply; at high
         # speed the distances stretch to preserve reaction time.
-        speed_ms = speed_kmh / 3.6
         dyn_hazard = max(
             cfg.vehicle_hazard_distance,
             speed_ms * cfg.vehicle_reaction_time,
@@ -1235,6 +1251,15 @@ class PrivilegedExpert:
         best_dist: float | None = None
         best_tl_id: int | None = None
 
+        # Collect ALL road IDs along the planned route so we can
+        # detect TLs whose stop line sits on a road segment the
+        # ego hasn't reached yet (typically 30-60 m ahead).  The
+        # previous single-element look-ahead only matched TLs on
+        # the ego's current or next road segment (~4-12 m range).
+        route_road_ids: set[int] = {ego_wp.road_id}
+        for _bwp, _bcmd in self._wp_buffer:
+            route_road_ids.add(_bwp.road_id)
+
         for tl in self.world.get_actors().filter("*traffic_light*"):
             if tl.state == carla.TrafficLightState.Green:
                 continue
@@ -1254,13 +1279,10 @@ class PrivilegedExpert:
             affects_us = False
             stop_dist: float | None = None
 
-            # Predict upcoming road ID via buffer to detect TL early
-            upcoming_road_id = self._wp_buffer[0][0].road_id if self._wp_buffer else ego_wp.road_id
-
             try:
                 for awp in tl.get_affected_lane_waypoints():
                     if awp.lane_id == ego_wp.lane_id and (
-                        awp.road_id == ego_wp.road_id or awp.road_id == upcoming_road_id
+                        awp.road_id in route_road_ids
                     ):
                         # Verify the stop line is AHEAD of us, not behind.
                         # Without this check, a cross-street TL whose stop
@@ -1277,9 +1299,7 @@ class PrivilegedExpert:
             except (AttributeError, RuntimeError):
                 # Fallback for older CARLA builds.
                 tl_wp = self.map.get_waypoint(tl_loc)
-                if tl_wp is not None and (
-                    tl_wp.road_id == ego_wp.road_id or tl_wp.road_id == upcoming_road_id
-                ):
+                if tl_wp is not None and tl_wp.road_id in route_road_ids:
                     affects_us = True
 
             if not affects_us:
@@ -1367,7 +1387,7 @@ class PrivilegedExpert:
                     self._cleared_stop_signs.add(self._stop_sign_active)
                     self._stop_sign_active = None
                     self._stop_sign_wait_counter = 0
-                elif speed_kmh < 0.5:
+                elif speed_kmh < 1.0:
                     self._stop_sign_wait_counter += 1
                     if self._stop_sign_wait_counter >= cfg.stop_sign_wait_ticks:
                         # Waited long enough — clear the sign

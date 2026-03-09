@@ -54,6 +54,7 @@ ROTATION = "rotation"  # (N, 3)  float32  degrees (pitch, yaw, roll)
 
 # --- Privileged / future-proofing (new in v3) ---
 TRAFFIC_LIGHT_STATE = "traffic_light_state"  # (N,)    int32  0=None 1=G 2=Y 3=R
+TRAFFIC_LIGHT_DISTANCE = "traffic_light_distance"  # (N,)  float32  metres (-1 if none)
 STOP_SIGN_DISTANCE = "stop_sign_distance"  # (N,)    float32  metres (-1 if none)
 TARGET_SPEED = "target_speed"  # (N,)    float32  km/h
 DRIVING_MODE = "driving_mode"  # (N,)    int32  DrivingMode enum
