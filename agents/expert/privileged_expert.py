@@ -105,6 +105,7 @@ class ExpertConfig:
     traffic_light_brake_distance: float = 80.0  # metres — start braking
     traffic_light_stop_distance: float = 6.0  # metres — full stop
     tl_comfort_decel: float = 1.5  # m/s² — comfortable deceleration for TL
+    tl_clearance_margin: float = 8.0  # m — must clear stop line by this to commit on yellow
     turn_comfort_decel: float = 1.5  # m/s² — gentler braking for turn approach
     vehicle_hazard_distance: float = 25.0  # metres — start slowing (min)
     vehicle_emergency_distance: float = 5.0  # metres — emergency (min)
@@ -333,7 +334,9 @@ class PrivilegedExpert:
 
         # Driving state
         self.mode = DrivingMode.FOLLOW_LANE
-        self._tl_waiting: int | None = None  # actor-id of TL we're waiting for
+        self._tl_waiting: int | None = None  # actor-id of TL we're watching/waiting for
+        self._tl_stop_loc = None  # stored carla.Location of the stop-line waypoint
+        self._tl_proceed_committed: bool = False  # yellow dilemma commitment
 
         # Smoothed curvature estimate (EMA)
         self._smoothed_curvature: float = 0.0
@@ -393,6 +396,7 @@ class PrivilegedExpert:
         self.steer_pid.reset()
         self.mode = DrivingMode.FOLLOW_LANE
         self._tl_waiting = None
+        self._tl_stop_loc = None
         self._cleared_stop_signs.clear()
         self._stop_sign_wait_counter = 0
         self._stop_sign_active = None
@@ -960,21 +964,40 @@ class PrivilegedExpert:
         # a red TL at turn speed and has to slam at the last moment.
         speed_ms = speed_kmh / 3.6
         if tl_state is not None and tl_distance is not None:
-            if tl_state in (carla.TrafficLightState.Red, carla.TrafficLightState.Yellow):
+            if tl_state == carla.TrafficLightState.Green:
+                # TL is green — clear any yellow commitment.
+                self._tl_proceed_committed = False
+            elif tl_state in (carla.TrafficLightState.Red, carla.TrafficLightState.Yellow):
                 if 0 < tl_distance < cfg.traffic_light_brake_distance:
                     effective_tl_stop = cfg.traffic_light_stop_distance + self._ego_half_length
 
-                    # Yellow dilemma zone: if the car cannot stop within
-                    # the comfort deceleration envelope, proceed through.
-                    # This mirrors real driving: a professional driver
-                    # committed at speed does not slam the brakes for a
-                    # late yellow.
+                    # Yellow dilemma zone: commit to proceed only if
+                    # (a) the car cannot stop comfortably AND
+                    # (b) it can clear past the stop line + margin
+                    #     at current speed.  Without (b), a car that
+                    #     "can't stop comfortably" at 30+ m from the
+                    #     line would proceed into the junction and
+                    #     stop mid-intersection when the light turns
+                    #     red. The clearance check ensures we only
+                    #     commit when we'll actually make it through.
                     proceed_yellow = False
                     if tl_state == carla.TrafficLightState.Yellow:
                         d_to_stop = max(tl_distance - effective_tl_stop, 0.0)
                         min_brake_dist = speed_ms ** 2 / (2.0 * cfg.tl_comfort_decel)
-                        if d_to_stop < min_brake_dist:
+                        # Can we clear past the stop line at current speed?
+                        can_clear = (
+                            speed_ms > 0.5
+                            and tl_distance + cfg.tl_clearance_margin < min_brake_dist
+                        )
+                        if d_to_stop < min_brake_dist and can_clear:
                             proceed_yellow = True
+                            self._tl_proceed_committed = True
+
+                    # Honour a previous yellow commitment through the
+                    # red phase — the car already passed the point of
+                    # no return and should not stop mid-intersection.
+                    if self._tl_proceed_committed:
+                        proceed_yellow = True
 
                     if not proceed_yellow:
                         if tl_distance < effective_tl_stop:
@@ -1199,68 +1222,94 @@ class PrivilegedExpert:
         # ---- Tier 1: persistent TL memory ----
         if self._tl_waiting is not None:
             tl_actor = self.world.get_actor(self._tl_waiting)
-            if tl_actor is not None and tl_actor.state in (
-                carla.TrafficLightState.Red,
-                carla.TrafficLightState.Yellow,
-            ):
+            if tl_actor is None:
+                logger.debug("T1: actor %d gone, clearing", self._tl_waiting)
+                self._tl_waiting = None
+                self._tl_stop_loc = None
+                self._tl_proceed_committed = False
+            else:
                 tl_loc = tl_actor.get_transform().location
                 dist = ego_loc.distance(tl_loc)
 
                 # Clear stale memory if:
                 #   (a) we drove far past the light (distance cutoff), OR
                 #   (b) the light is behind us (dot-product with forward).
-                # The behind-ego check clears within 1–2 frames of
-                # passing, avoiding the 100+ frame stale blocks that
-                # pollute traffic_light_state in the HDF5 data.
                 fwd = transform.get_forward_vector()
                 dx = tl_loc.x - ego_loc.x
                 dy = tl_loc.y - ego_loc.y
                 tl_behind = (fwd.x * dx + fwd.y * dy) < 0
 
                 if dist > self.config.traffic_light_brake_distance * 1.5 or tl_behind:
+                    logger.debug(
+                        "T1: stale clear id=%d dist=%.1f behind=%s",
+                        self._tl_waiting, dist, tl_behind,
+                    )
                     self._tl_waiting = None
-                else:
-                    # Junction guard: if the ego is inside a junction,
-                    # verify that the remembered TL still controls our
-                    # lane.  Inside a junction the ego's road_id changes
-                    # to the junction's internal road, so
-                    # _stop_line_distance always returns None — which is
-                    # correct: you should never stop *mid-junction* for
-                    # any TL (including your own turning red).
-                    ego_wp = self.map.get_waypoint(ego_loc)
-                    if ego_wp is not None and ego_wp.is_junction:
-                        stop_dist = self._stop_line_distance(
-                            tl_actor, transform,
+                    self._tl_stop_loc = None
+                    self._tl_proceed_committed = False
+                elif self._tl_stop_loc is not None:
+                    # Use stored stop-line location for accurate distance.
+                    # This handles far-side TLs (Town03) where the pole
+                    # is across the junction but the stop line is before
+                    # it.  Re-computing _stop_line_distance each frame
+                    # fails because the AWP road_id doesn't match the
+                    # ego's approach road.
+                    stop_dist = ego_loc.distance(self._tl_stop_loc)
+                    sdx = self._tl_stop_loc.x - ego_loc.x
+                    sdy = self._tl_stop_loc.y - ego_loc.y
+                    stop_behind = (fwd.x * sdx + fwd.y * sdy) <= 0
+                    if stop_behind:
+                        logger.debug(
+                            "T1-STORED: id=%d stop_line behind, clearing",
+                            self._tl_waiting,
                         )
-                        if stop_dist is None:
-                            self._tl_waiting = None
-                            # Fall through to Tier 2 / Tier 3
-                        else:
-                            return tl_actor.state, stop_dist
+                        self._tl_waiting = None
+                        self._tl_stop_loc = None
+                        self._tl_proceed_committed = False
+                        # Fall through to Tier 2 / Tier 3
                     else:
-                        # Use stop-line distance if available
-                        stop_dist = self._stop_line_distance(
-                            tl_actor,
-                            transform,
+                        logger.debug(
+                            "T1-STORED: id=%d state=%s "
+                            "stop_dist=%.1f pole_dist=%.1f",
+                            self._tl_waiting, tl_actor.state,
+                            stop_dist, dist,
                         )
-                        return tl_actor.state, (stop_dist if stop_dist is not None else dist)
-            else:
-                # Light turned green or was destroyed — clear memory.
-                self._tl_waiting = None
+                        return tl_actor.state, stop_dist
+                else:
+                    # No stored stop-line location — use
+                    # _stop_line_distance or fall back to pole distance.
+                    stop_dist, stop_loc = self._stop_line_distance(
+                        tl_actor, transform,
+                    )
+                    if stop_loc is not None:
+                        self._tl_stop_loc = stop_loc
+                    logger.debug(
+                        "T1-FALLBACK: id=%d state=%s "
+                        "stop_dist=%s pole_dist=%.1f",
+                        self._tl_waiting, tl_actor.state,
+                        f"{stop_dist:.1f}" if stop_dist is not None else "None",
+                        dist,
+                    )
+                    return tl_actor.state, (stop_dist if stop_dist is not None else dist)
 
         # ---- Tier 2: CARLA built-in (close range) ----
         if self.vehicle.is_at_traffic_light():
             tl = self.vehicle.get_traffic_light()
             if tl is not None:
-                if tl.state == carla.TrafficLightState.Green:
-                    return None, None  # green → no action needed
                 # Lane guard: only react if this TL actually controls
                 # our lane.  Without this, cross-street TLs whose
                 # trigger volumes extend into the junction cause false
                 # RED detection during turns.
-                stop_dist = self._stop_line_distance(tl, transform)
+                stop_dist, stop_loc = self._stop_line_distance(tl, transform)
+                logger.debug(
+                    "T2: is_at_tl=True tl_id=%d state=%s "
+                    "stop_dist=%s",
+                    tl.id, tl.state,
+                    f"{stop_dist:.1f}" if stop_dist is not None else "None",
+                )
                 if stop_dist is not None:
                     self._tl_waiting = tl.id
+                    self._tl_stop_loc = stop_loc
                     return tl.state, stop_dist
                 # TL doesn't match our lane — fall through to Tier 3.
 
@@ -1277,6 +1326,7 @@ class PrivilegedExpert:
         best_state: Any = None
         best_dist: float | None = None
         best_tl_id: int | None = None
+        best_stop_loc = None
 
         # Collect ALL road IDs along the planned route so we can
         # detect TLs whose stop line sits on a road segment the
@@ -1288,9 +1338,6 @@ class PrivilegedExpert:
             route_road_ids.add(_bwp.road_id)
 
         for tl in self.world.get_actors().filter("*traffic_light*"):
-            if tl.state == carla.TrafficLightState.Green:
-                continue
-
             tl_loc = tl.get_transform().location
             pole_dist = ego_loc.distance(tl_loc)
             if pole_dist > pole_cutoff:
@@ -1305,6 +1352,7 @@ class PrivilegedExpert:
             # ---- Lane matching via affected waypoints ----
             affects_us = False
             stop_dist: float | None = None
+            stop_loc_candidate = None
 
             try:
                 for awp in tl.get_affected_lane_waypoints():
@@ -1312,16 +1360,31 @@ class PrivilegedExpert:
                         awp.road_id in route_road_ids
                     ):
                         # Verify the stop line is AHEAD of us, not behind.
-                        # Without this check, a cross-street TL whose stop
-                        # line shares a lane_id at the junction boundary
-                        # can be falsely matched, causing braking at green.
                         awp_loc = awp.transform.location
                         sdx = awp_loc.x - ego_loc.x
                         sdy = awp_loc.y - ego_loc.y
                         if fwd.x * sdx + fwd.y * sdy <= 0:
                             continue  # stop line is behind us
+
+                        # Route-proximity + heading check: the stop-line
+                        # waypoint must be within 4 m of a route waypoint
+                        # AND heading-aligned (< 40°).  Proximity alone
+                        # fails in Town03 where perpendicular stop-lines
+                        # sit < 4 m from route waypoints at narrow junctions.
+                        # Heading alignment rejects them because the
+                        # perpendicular lane's yaw differs by ~90°.
+                        awp_yaw = awp.transform.rotation.yaw
+                        on_route = any(
+                            awp_loc.distance(rwp.transform.location) < 4.0
+                            and abs((awp_yaw - rwp.transform.rotation.yaw + 180) % 360 - 180) < 40.0
+                            for rwp, _ in self._wp_buffer
+                        )
+                        if not on_route:
+                            continue
+
                         affects_us = True
                         stop_dist = ego_loc.distance(awp_loc)
+                        stop_loc_candidate = awp_loc
                         break
             except (AttributeError, RuntimeError):
                 # Fallback for older CARLA builds.
@@ -1341,9 +1404,15 @@ class PrivilegedExpert:
                 best_state = tl.state
                 best_dist = effective_dist
                 best_tl_id = tl.id
+                best_stop_loc = stop_loc_candidate
 
         if best_tl_id is not None:
             self._tl_waiting = best_tl_id
+            self._tl_stop_loc = best_stop_loc
+            logger.debug(
+                "T3: matched tl_id=%d state=%s dist=%.1f",
+                best_tl_id, best_state, best_dist,
+            )
 
         return best_state, best_dist
 
@@ -1351,22 +1420,33 @@ class PrivilegedExpert:
         self,
         tl: Any,
         transform: "carla.Transform",
-    ) -> float | None:
+    ) -> tuple[float | None, Any]:
         """Distance from ego to the traffic-light's stop line.
 
-        Returns ``None`` if the API is unavailable or no stop waypoint
-        matches our lane.
+        Returns ``(distance, awp_location)`` or ``(None, None)`` if
+        the API is unavailable or no stop waypoint matches our lane.
         """
         try:
             ego_wp = self.map.get_waypoint(transform.location)
+            # Use the vehicle's ACTUAL heading, not the map waypoint
+            # yaw.  Inside junctions ego_wp can snap to a cross-street
+            # internal road whose yaw is ~90° off from the vehicle's
+            # true direction of travel.
+            ego_yaw = transform.rotation.yaw
             for awp in tl.get_affected_lane_waypoints():
                 if awp.road_id == ego_wp.road_id and awp.lane_id == ego_wp.lane_id:
-                    return transform.location.distance(
-                        awp.transform.location,
+                    # Heading gate: reject cross-street TLs whose
+                    # affected waypoint yaw differs by ~90° from ours.
+                    yaw_diff = abs(
+                        (awp.transform.rotation.yaw - ego_yaw + 180) % 360 - 180
                     )
+                    if yaw_diff > 40.0:
+                        continue
+                    awp_loc = awp.transform.location
+                    return transform.location.distance(awp_loc), awp_loc
         except (AttributeError, RuntimeError):
             pass
-        return None
+        return None, None
 
     # --- Stop sign detection --------------------------------------------
 
