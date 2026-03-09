@@ -1407,10 +1407,6 @@ class PrivilegedExpert:
                     return 0.0, True
 
         # ---- Scan for new stop signs ----
-        upcoming_road_id = (
-            self._wp_buffer[0][0].road_id if self._wp_buffer else ego_wp.road_id
-        )
-
         best_dist: float | None = None
 
         for ss in self.world.get_actors().filter("*stop*"):
@@ -1435,12 +1431,20 @@ class PrivilegedExpert:
             if fwd.x * dx + fwd.y * dy <= 0:
                 continue
 
-            # Relaxed lane matching — must be on our road, but don't strictly
-            # compare lane_ids since pole waypoints snap randomly at junctions.
-            ss_wp = self.map.get_waypoint(ss_loc)
-            if ss_wp is None:
-                continue
-            if ss_wp.road_id != ego_wp.road_id and ss_wp.road_id != upcoming_road_id:
+            # Route-proximity check — ensure the sign is close to our
+            # planned path.  This replaces road_id / lane_id / sign-
+            # orientation checks which are all unreliable in CARLA:
+            # opposite-direction signs share the same road_id, lane_ids
+            # are inconsistent at junctions, and sign forward vectors
+            # vary by map.  A 2 m threshold keeps same-lane signs
+            # (pole is ~1-2 m from lane centre) while filtering
+            # opposite-lane signs (~6+ m from our route).
+            sign_near_route = False
+            for rwp, _ in self._wp_buffer:
+                if ss_loc.distance(rwp.transform.location) < 2.0:
+                    sign_near_route = True
+                    break
+            if not sign_near_route:
                 continue
 
             if best_dist is None or dist < best_dist:
