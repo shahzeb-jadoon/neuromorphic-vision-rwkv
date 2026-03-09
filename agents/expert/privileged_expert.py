@@ -120,6 +120,7 @@ class ExpertConfig:
     stop_sign_brake_distance: float = 40.0  # metres — start braking
     stop_sign_stop_distance: float = 4.0  # metres — full stop
     stop_sign_comfort_decel: float = 1.5  # m/s² — comfortable deceleration
+    stop_sign_creep_speed: float = 8.0  # km/h — Phase 1 floor; car creeps until trigger volume
     stop_sign_wait_ticks: int = 40  # ~2 s at 20 Hz — minimum pause
 
     # --- Turn behaviour ---
@@ -976,7 +977,12 @@ class PrivilegedExpert:
             effective_ss_stop = cfg.stop_sign_stop_distance + self._ego_half_length
             d = max(ss_distance - effective_ss_stop, 0.0)
             v_ms = math.sqrt(2.0 * cfg.stop_sign_comfort_decel * d)
-            target = min(target, v_ms * 3.6)
+            # Floor at creep speed so the car rolls into the trigger
+            # volume instead of stopping short of it (Phase 1 → Phase 2
+            # handoff).  Once trigger_volume.contains() fires, Phase 2
+            # commits to target=0 for a full stop.
+            ss_target = max(v_ms * 3.6, cfg.stop_sign_creep_speed)
+            target = min(target, ss_target)
 
         # --- Lead vehicle ---
         # Scale safety distances with current speed (kinematic braking
