@@ -103,7 +103,7 @@ class ExpertConfig:
 
     # --- Safety thresholds ---
     traffic_light_brake_distance: float = 60.0  # metres — start braking
-    traffic_light_stop_distance: float = 6.0  # metres — full stop
+    traffic_light_stop_distance: float = 7.0  # metres — full stop
     tl_comfort_decel: float = 3.0  # m/s² — comfortable deceleration for TL
     turn_comfort_decel: float = 1.5  # m/s² — gentler braking for turn approach
     vehicle_hazard_distance: float = 25.0  # metres — start slowing (min)
@@ -123,8 +123,9 @@ class ExpertConfig:
     stop_sign_wait_ticks: int = 40  # ~2 s at 20 Hz — minimum pause
 
     # --- Turn behaviour ---
-    turn_speed_factor: float = 0.45  # reduce speed to 45% at turns
-    junction_turn_factor: float = 0.65  # additional reduction inside junctions
+    turn_speed_factor: float = 0.45  # target speed multiplier for turns
+
+    # --- PIDs ---
     turn_anticipation_distance: float = 30.0  # start slowing this far ahead
 
     # --- Speed limits / curvature ---
@@ -159,8 +160,8 @@ class ExpertConfig:
     #   we're following the wrong road.
     # gap_fill_rpc_budget: cumulative wp.next() RPC limit per episode.
     #   Default 50_000.  When exceeded, gap filling is disabled for the
-    #   rest of the episode to cap server-side memory.  Set to 0 for
-    #   unlimited.  A warning is logged when the budget is exhausted.
+    #   rest of the episode to cap server-side memory.  A warning is logged
+    #   when the budget is exhausted.
     gap_fill_max_factor: float = 3.0
     gap_fill_diverge_factor: float = 2.0
     gap_fill_rpc_budget: int = 50_000
@@ -441,7 +442,7 @@ class PrivilegedExpert:
         cfg = self.config
         road_limit = self.vehicle.get_speed_limit()  # km/h
         if road_limit is not None and road_limit > 0:
-            base_target = min(road_limit, cfg.max_speed)
+            base_target = min(road_limit * cfg.speed_limit_margin, cfg.max_speed)
         else:
             base_target = cfg.target_speed
 
@@ -451,10 +452,10 @@ class PrivilegedExpert:
 
         # --- 3.  Privileged perception ---
         tl_state, tl_distance = self._check_traffic_light(transform)
-        ss_distance = self._check_stop_signs(transform, speed_kmh)
+        ss_distance, ss_committed = self._check_stop_signs(transform, speed_kmh)
         nearby_vehicles = self._detect_vehicles(transform)
         nearby_pedestrians = self._detect_pedestrians(transform)
-        lead_dist = self._lead_vehicle_distance(nearby_vehicles)
+        lead_distance = self._lead_vehicle_distance(nearby_vehicles)
         ped_dist = self._closest_pedestrian_distance(nearby_pedestrians)
 
         # --- 4.  Target speed & driving mode ---
@@ -464,7 +465,8 @@ class PrivilegedExpert:
             tl_state,
             tl_distance,
             ss_distance,
-            lead_dist,
+            ss_committed,
+            lead_distance,
             ped_dist,
             base_target,
         )
@@ -859,7 +861,8 @@ class PrivilegedExpert:
         tl_state: Any,
         tl_distance: float | None,
         ss_distance: float | None,
-        lead_dist: float | None,
+        ss_committed: bool,
+        lead_distance: float | None,
         ped_dist: float | None,
         base_target: float | None = None,
     ) -> Tuple[float, DrivingMode]:
@@ -936,12 +939,12 @@ class PrivilegedExpert:
         if tl_state is not None and tl_distance is not None:
             if tl_state in (carla.TrafficLightState.Red, carla.TrafficLightState.Yellow):
                 if 0 < tl_distance < cfg.traffic_light_brake_distance:
-                    if tl_distance < cfg.traffic_light_stop_distance + self._ego_half_length:
+                    if tl_distance < cfg.traffic_light_stop_distance:
                         mode = DrivingMode.TRAFFIC_LIGHT_STOP
                         target = 0.0
                     else:
                         # Kinematic profile: v = sqrt(2 * a * d)
-                        d = max(tl_distance - cfg.traffic_light_stop_distance - self._ego_half_length, 0.0)
+                        d = max(tl_distance - cfg.traffic_light_stop_distance, 0.0)
                         v_ms = math.sqrt(2.0 * cfg.tl_comfort_decel * d)
                         tl_target = v_ms * 3.6  # m/s → km/h
                         if tl_target < target:
@@ -949,15 +952,14 @@ class PrivilegedExpert:
                             target = tl_target
 
         # --- Stop sign ---
-        if ss_distance is not None and 0 < ss_distance < cfg.stop_sign_brake_distance:
-            effective_ss_stop = cfg.stop_sign_stop_distance + self._ego_half_length
+        if ss_committed:
             mode = DrivingMode.STOP_SIGN_STOP
-            if ss_distance < effective_ss_stop:
-                target = 0.0
-            else:
-                d = max(ss_distance - effective_ss_stop, 0.0)
-                v_ms = math.sqrt(2.0 * cfg.stop_sign_comfort_decel * d)
-                target = min(target, v_ms * 3.6)
+            target = 0.0
+        elif ss_distance is not None and 0 < ss_distance < cfg.stop_sign_brake_distance:
+            mode = DrivingMode.STOP_SIGN_STOP
+            d = max(ss_distance - cfg.stop_sign_stop_distance, 0.0)
+            v_ms = math.sqrt(2.0 * cfg.stop_sign_comfort_decel * d)
+            target = min(target, v_ms * 3.6)
 
         # --- Lead vehicle ---
         # Scale safety distances with current speed (kinematic braking
@@ -973,17 +975,17 @@ class PrivilegedExpert:
             speed_ms * cfg.vehicle_emergency_time,
         )
 
-        if lead_dist is not None:
-            if lead_dist < dyn_emergency:
+        if lead_distance is not None:
+            if lead_distance < dyn_emergency:
                 mode = DrivingMode.EMERGENCY_STOP
                 target = 0.0
-            elif lead_dist < dyn_hazard:
+            elif lead_distance < dyn_hazard:
                 mode = DrivingMode.VEHICLE_FOLLOWING
                 # Kinematic braking profile: v = sqrt(2 * a * d)
                 # Same physics-based curve used for traffic-light stops.
                 # Produces smooth, progressive braking that matches how
                 # a professional driver modulates brake pressure.
-                d = max(lead_dist - dyn_emergency, 0.0)
+                d = max(lead_distance - dyn_emergency, 0.0)
                 v_ms = math.sqrt(2.0 * cfg.vehicle_comfort_decel * d)
                 target = min(target, v_ms * 3.6)  # m/s → km/h
 
@@ -1175,12 +1177,30 @@ class PrivilegedExpert:
                 if dist > self.config.traffic_light_brake_distance * 1.5 or tl_behind:
                     self._tl_waiting = None
                 else:
-                    # Use stop-line distance if available
-                    stop_dist = self._stop_line_distance(
-                        tl_actor,
-                        transform,
-                    )
-                    return tl_actor.state, (stop_dist if stop_dist is not None else dist)
+                    # Junction guard: if the ego is inside a junction,
+                    # verify that the remembered TL still controls our
+                    # lane.  Inside a junction the ego's road_id changes
+                    # to the junction's internal road, so
+                    # _stop_line_distance always returns None — which is
+                    # correct: you should never stop *mid-junction* for
+                    # any TL (including your own turning red).
+                    ego_wp = self.map.get_waypoint(ego_loc)
+                    if ego_wp is not None and ego_wp.is_junction:
+                        stop_dist = self._stop_line_distance(
+                            tl_actor, transform,
+                        )
+                        if stop_dist is None:
+                            self._tl_waiting = None
+                            # Fall through to Tier 2 / Tier 3
+                        else:
+                            return tl_actor.state, stop_dist
+                    else:
+                        # Use stop-line distance if available
+                        stop_dist = self._stop_line_distance(
+                            tl_actor,
+                            transform,
+                        )
+                        return tl_actor.state, (stop_dist if stop_dist is not None else dist)
             else:
                 # Light turned green or was destroyed — clear memory.
                 self._tl_waiting = None
@@ -1191,14 +1211,15 @@ class PrivilegedExpert:
             if tl is not None:
                 if tl.state == carla.TrafficLightState.Green:
                     return None, None  # green → no action needed
-                self._tl_waiting = tl.id  # remember red/yellow
+                # Lane guard: only react if this TL actually controls
+                # our lane.  Without this, cross-street TLs whose
+                # trigger volumes extend into the junction cause false
+                # RED detection during turns.
                 stop_dist = self._stop_line_distance(tl, transform)
-                dist = (
-                    stop_dist
-                    if stop_dist is not None
-                    else ego_loc.distance(tl.get_transform().location)
-                )
-                return tl.state, dist
+                if stop_dist is not None:
+                    self._tl_waiting = tl.id
+                    return tl.state, stop_dist
+                # TL doesn't match our lane — fall through to Tier 3.
 
         # ---- Tier 3: junction-aware scan ----
         ego_wp = self.map.get_waypoint(ego_loc)
@@ -1306,27 +1327,25 @@ class PrivilegedExpert:
         self,
         transform: "carla.Transform",
         speed_kmh: float,
-    ) -> float | None:
-        """Return distance to the nearest uncleared stop sign, or ``None``.
+    ) -> tuple[float | None, bool]:
+        """Return (approach_dist, is_committed) for hybrid stop sign tracking.
 
-        Uses a three-stage approach inspired by TransFuser:
-
-        1. **Lane matching** — only react to stop signs whose trigger
-           volume waypoint matches the ego's road and lane.
-        2. **Ahead check** — ignore signs that are behind the ego.
-        3. **Distance gating** — only return signs within
-           ``stop_sign_brake_distance``.
+        Uses a two-phase hybrid approach:
+        1. **Phase 1 (Horizon Scan)**: Smoothly brake for any stop sign
+           ahead on our route up to ``stop_sign_brake_distance``.
+        2. **Phase 2 (Trigger Commitment)**: Hard commit to 0.0 target speed
+           only when the ego's bounding box intersects the sign's true
+           ``trigger_volume``.
 
         A stop sign is "cleared" once the ego has come to a full stop
-        within ``stop_sign_stop_distance`` for at least
-        ``stop_sign_wait_ticks`` consecutive ticks.  Once cleared, the
-        sign is remembered so the ego doesn't brake for it again.
+        within its trigger volume for at least ``stop_sign_wait_ticks``
+        consecutive ticks.
         """
         cfg = self.config
         ego_loc = transform.location
         ego_wp = self.map.get_waypoint(ego_loc)
         if ego_wp is None:
-            return None
+            return None, False
 
         fwd = transform.get_forward_vector()
 
@@ -1339,30 +1358,27 @@ class PrivilegedExpert:
                 self._stop_sign_wait_counter = 0
             else:
                 ss_loc = ss_actor.get_transform().location
-                dist = ego_loc.distance(ss_loc)
-
-                # Check if behind us (we've driven past)
                 dx = ss_loc.x - ego_loc.x
                 dy = ss_loc.y - ego_loc.y
-                behind = (fwd.x * dx + fwd.y * dy) < 0
+                behind = (fwd.x * dx + fwd.y * dy) < -2.0  # Give 2m grace
 
-                if behind or dist > cfg.stop_sign_brake_distance * 1.5:
+                if behind:
                     # Drove past it — add to cleared
                     self._cleared_stop_signs.add(self._stop_sign_active)
                     self._stop_sign_active = None
                     self._stop_sign_wait_counter = 0
-                elif speed_kmh < 0.5 and dist < cfg.stop_sign_stop_distance * 2:
+                elif speed_kmh < 0.5:
                     self._stop_sign_wait_counter += 1
                     if self._stop_sign_wait_counter >= cfg.stop_sign_wait_ticks:
                         # Waited long enough — clear the sign
                         self._cleared_stop_signs.add(self._stop_sign_active)
                         self._stop_sign_active = None
                         self._stop_sign_wait_counter = 0
-                        return None
-                    return dist
+                        return None, False
+                    return 0.0, True
                 else:
                     self._stop_sign_wait_counter = 0
-                    return dist
+                    return 0.0, True
 
         # ---- Scan for new stop signs ----
         upcoming_road_id = (
@@ -1370,7 +1386,6 @@ class PrivilegedExpert:
         )
 
         best_dist: float | None = None
-        best_id: int | None = None
 
         for ss in self.world.get_actors().filter("*stop*"):
             if ss.id in self._cleared_stop_signs:
@@ -1381,33 +1396,31 @@ class PrivilegedExpert:
             if dist > cfg.stop_sign_brake_distance:
                 continue
 
+            # Phase 2: Trigger Volume Commitment (Perfect lane matching)
+            if ss.trigger_volume.contains(ego_loc, ss.get_transform()):
+                self._stop_sign_active = ss.id
+                self._stop_sign_wait_counter = 0
+                return 0.0, True
+
+            # Phase 1: Horizon Scan (Smooth approach)
             # Ahead check
             dx = ss_loc.x - ego_loc.x
             dy = ss_loc.y - ego_loc.y
             if fwd.x * dx + fwd.y * dy <= 0:
                 continue
 
-            # Lane matching — stop sign should be on our road
+            # Relaxed lane matching — must be on our road, but don't strictly
+            # compare lane_ids since pole waypoints snap randomly at junctions.
             ss_wp = self.map.get_waypoint(ss_loc)
             if ss_wp is None:
                 continue
             if ss_wp.road_id != ego_wp.road_id and ss_wp.road_id != upcoming_road_id:
                 continue
-            # Skip signs on the opposite side of a bi-directional road.
-            # In OpenDRIVE, same-direction lanes share the same lane_id
-            # sign (positive or negative); opposing lanes have opposite.
-            if ss_wp.road_id == ego_wp.road_id and ss_wp.lane_id * ego_wp.lane_id < 0:
-                continue
 
             if best_dist is None or dist < best_dist:
                 best_dist = dist
-                best_id = ss.id
 
-        if best_id is not None:
-            self._stop_sign_active = best_id
-            self._stop_sign_wait_counter = 0
-
-        return best_dist
+        return best_dist, False
 
     # --- Curve-aware corridor -------------------------------------------
 
@@ -1803,7 +1816,8 @@ class PrivilegedExpert:
                 continue
             # Skip oncoming traffic
             if not v.get("same_direction", True):
-                continue
+                if not v.get("obb_in_lane", False):
+                    continue
             # Union of SAT overlap and lateral-distance check — either
             # one is sufficient to flag the vehicle as in-lane.
             obb_flag = v.get("obb_in_lane", False)
