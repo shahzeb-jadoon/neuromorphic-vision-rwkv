@@ -807,6 +807,13 @@ class PrivilegedExpert:
         ego_loc = transform.location
 
         # --- Determine nav command with anticipation ---
+        # Scan for the first LEFT/RIGHT in the buffer.  A STRAIGHT
+        # command alone does not trigger the turn-speed ramp (going
+        # straight through a junction needs no deceleration), but a
+        # STRAIGHT immediately *followed* by a LEFT/RIGHT means the
+        # turn waypoint is just past the STRAIGHT — we must still
+        # see and anticipate it.  So we skip STRAIGHT and keep
+        # scanning (up to one additional actionable command).
         nav_command = RoadOption.LANEFOLLOW
         self._turn_distance = None
         for wp, cmd in self._wp_buffer:
@@ -817,14 +824,16 @@ class PrivilegedExpert:
                 RoadOption.CHANGELANERIGHT,
             ):
                 continue
+            if cmd == RoadOption.STRAIGHT:
+                # STRAIGHT through a junction — skip it but keep
+                # scanning for a LEFT/RIGHT behind it.
+                continue
             dist = ego_loc.distance(wp.transform.location)
             if dist < self.config.turn_anticipation_distance:
                 nav_command = cmd
                 self._turn_distance = dist
-            # break is intentional: we only consider the *first*
-            # actionable command (LEFT/RIGHT/STRAIGHT).  If it is
-            # beyond turn_anticipation_distance we keep LANEFOLLOW,
-            # but either way we stop scanning here.
+            # Found a LEFT/RIGHT (or it was beyond anticipation
+            # distance).  Either way, stop scanning here.
             break
 
         # --- Pick target waypoint at desired follow distance ---
@@ -927,7 +936,19 @@ class PrivilegedExpert:
                     v_ms = math.sqrt(
                         2.0 * cfg.turn_comfort_decel * d + v_turn_ms**2,
                     )
-                    target = min(target, v_ms * 3.6)
+                    kinematic = v_ms * 3.6
+
+                    # Linear-blend ceiling: guarantees target decreases
+                    # from base down to turn_target as distance shrinks
+                    # from anticipation_distance to 0.  Without this,
+                    # the kinematic ramp stays above base_target for
+                    # most of the approach range (e.g. 33 km/h at 25 m
+                    # on a 27 km/h road), so the car never actually
+                    # slows during APPR.
+                    blend_frac = min(d / cfg.turn_anticipation_distance, 1.0)
+                    linear_cap = turn_target + (target - turn_target) * blend_frac
+
+                    target = min(target, kinematic, linear_cap)
                 else:
                     target = min(target, turn_target)
 
