@@ -69,7 +69,7 @@ class ExpertConfig:
     # Target cruising speed (used as fallback when road has no speed-limit sign)
     target_speed: float = 30.0
     max_speed: float = 50.0
-    speed_limit_margin: float = 0.90  # drive at 90% of posted limit
+    ### speed_limit_margin: float = 0.90  # drive at 90% of posted limit
 
     # --- PID: longitudinal (speed) ---
     # NOTE: gains tuned for RAW km/h error (P4-C).  Previous gains
@@ -114,7 +114,9 @@ class ExpertConfig:
     vehicle_comfort_decel: float = 3.0  # m/s² — comfortable braking for following
     pedestrian_hazard_distance: float = 15.0
     pedestrian_emergency_distance: float = 5.0
-    lane_half_width: float = 2.5  # metres — lateral check for "in-lane"
+    lane_half_width: float = 2.5  # metres — lateral fallback (used only when ego_wp unavailable)
+    corridor_margin_max: float = 0.7  # metres — max SAT corridor bleed into adjacent lane
+    corridor_margin_min: float = 0.3  # metres — min SAT corridor bleed into adjacent lane
     pedestrian_lane_half_width: float = 3.0  # metres — wider lateral band for pedestrians
 
     # --- Stop signs ---
@@ -343,6 +345,7 @@ class PrivilegedExpert:
 
         # Corridor polygon for debug drawing (set each tick)
         self._corridor: np.ndarray | None = None
+        self._cached_half_lane: float = self.config.lane_half_width
 
         # Number of corridor segments built (for diagnostics)
         self._n_corridor_segments: int = 0
@@ -447,7 +450,7 @@ class PrivilegedExpert:
         cfg = self.config
         road_limit = self.vehicle.get_speed_limit()  # km/h
         if road_limit is not None and road_limit > 0:
-            base_target = min(road_limit * cfg.speed_limit_margin, cfg.max_speed)
+            base_target = min(road_limit, cfg.max_speed) # or min(road_limit * cfg.speed_limit_margin, cfg.max_speed)
         else:
             base_target = cfg.target_speed
 
@@ -539,12 +542,13 @@ class PrivilegedExpert:
             buf_head_dist = transform.location.distance(wp0_loc)
 
         sat_hits = sum(1 for v in nearby_vehicles if v.get("obb_in_lane", False))
+        dynamic_half = self._dynamic_half_lane(transform)
         lat_hits = sum(
             1
             for v in nearby_vehicles
             if v["is_ahead"]
             and v.get("same_direction", True)
-            and abs(v["lateral"]) < cfg.lane_half_width
+            and abs(v["lateral"]) < dynamic_half
         )
 
         info = FrameInfo(
@@ -1677,7 +1681,7 @@ class PrivilegedExpert:
         fwd = transform.get_forward_vector()
         right = carla.Vector3D(-fwd.y, fwd.x, 0)
         cutoff = self.config.vehicle_hazard_distance * 2
-        half_lane = self.config.lane_half_width
+        half_lane = self._dynamic_half_lane(transform)
 
         # Ego bounding-box centroid in world space.
         # IMPORTANT: carla.Transform.transform() mutates the input
@@ -1952,10 +1956,33 @@ class PrivilegedExpert:
             # Union of SAT overlap and lateral-distance check — either
             # one is sufficient to flag the vehicle as in-lane.
             obb_flag = v.get("obb_in_lane", False)
-            lateral_flag = abs(v["lateral"]) < self.config.lane_half_width
+            lateral_flag = abs(v["lateral"]) < self._cached_half_lane
             if obb_flag or lateral_flag:
                 return v["distance"]
         return None
+
+    def _dynamic_half_lane(self, transform: "carla.Transform") -> float:
+        """Compute corridor half-width from the current lane width.
+
+        Uses ``ego_wp.lane_width / 2`` plus a margin that scales
+        linearly between ``corridor_margin_min`` (narrow lanes like
+        Town03 @ 2.6 m) and ``corridor_margin_max`` (wide lanes like
+        Town01 @ 3.5 m).  The result is cached on ``_cached_half_lane``
+        so that ``_lead_vehicle_distance`` can reuse it without an
+        extra ``get_waypoint`` call.
+        """
+        cfg = self.config
+        ego_wp = self.map.get_waypoint(transform.location)
+        if ego_wp is None:
+            self._cached_half_lane = cfg.lane_half_width
+            return cfg.lane_half_width
+        lw = ego_wp.lane_width
+        # Linear interpolation: 2.6m lane → margin_min, 3.5m lane → margin_max
+        t = max(0.0, min(1.0, (lw - 2.6) / 0.9))
+        margin = cfg.corridor_margin_min + t * (cfg.corridor_margin_max - cfg.corridor_margin_min)
+        half = lw / 2.0 + margin
+        self._cached_half_lane = half
+        return half
 
     def _closest_pedestrian_distance(
         self,

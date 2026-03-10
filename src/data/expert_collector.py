@@ -109,7 +109,7 @@ class EpisodeConfig:
     n_walkers: int = 30
     max_frames: int = 2000
     timeout_speed: float = 0.1  # m/s — below this for timeout_duration → discard
-    timeout_duration: float = 60.0  # seconds stuck before early termination
+    timeout_duration: float = 75.0  # seconds stuck before early termination
     fps: int = 20
 
     # 3-camera panoramic setup
@@ -766,33 +766,28 @@ class ExpertDataCollector:
                 )
 
         # 5. Nearby vehicle bounding boxes
-        #    Red    = lead vehicle (in-lane via SAT, ahead, braking target)
-        #    Orange = in corridor (in-lane via SAT, but not the closest braking target)
+        #    Red    = in corridor AND within emergency braking distance
+        #    Orange = in corridor but further away
         #    Yellow = detected but not in lane / not ahead
         RED = carla.Color(255, 0, 0)
         V_ORANGE = carla.Color(255, 140, 0)
         YELLOW = carla.Color(255, 255, 0)
 
         if info is not None:
-            # Find closest vehicle in SAT corridor
-            closest_in_lane_idx = -1
-            for i, v_info in enumerate(info.nearby_vehicles):
-                obb_flag = v_info.get("obb_in_lane", False)
-                is_ahead_same = v_info.get("is_ahead", False) and v_info.get("same_direction", True)
-                if is_ahead_same and obb_flag:
-                    closest_in_lane_idx = i
-                    break  # already sorted by distance
+            emrg_dist = expert.config.vehicle_emergency_distance
 
             for i, v_info in enumerate(info.nearby_vehicles):
                 obb_flag = v_info.get("obb_in_lane", False)
                 is_ahead_same = v_info.get("is_ahead", False) and v_info.get("same_direction", True)
 
                 color = YELLOW
-                if obb_flag:
-                    if is_ahead_same and i == closest_in_lane_idx:
+                if obb_flag and is_ahead_same:
+                    if v_info["distance"] < emrg_dist:
                         color = RED
                     else:
                         color = V_ORANGE
+                elif obb_flag:
+                    color = V_ORANGE
 
                 # Draw a marker at the vehicle's longitudinal/lateral
                 # offset relative to ego.  We approximate world position
@@ -814,6 +809,34 @@ class ExpertDataCollector:
                     f"{v_info['distance']:.0f}m",
                     draw_shadow=True,
                     color=color,
+                    life_time=life,
+                )
+
+            # 5b. Nearby pedestrian markers
+            #     Red    = in lane corridor (ahead + lateral < ped half-width)
+            #     Yellow = nearby but out of lane
+            P_RED = carla.Color(255, 50, 50)
+            P_YELLOW = carla.Color(255, 255, 100)
+            ped_half_w = expert.config.pedestrian_lane_half_width
+            fwd = vehicle.get_transform().get_forward_vector()
+            right = carla.Vector3D(-fwd.y, fwd.x, 0)
+            for p_info in getattr(info, "nearby_pedestrians", []):
+                in_lane = p_info["is_ahead"] and abs(p_info["lateral"]) < ped_half_w
+                p_color = P_RED if in_lane else P_YELLOW
+                px = ego_loc.x + fwd.x * p_info["longitudinal"] + right.x * p_info["lateral"]
+                py = ego_loc.y + fwd.y * p_info["longitudinal"] + right.y * p_info["lateral"]
+                pz = ego_loc.z + 1.0
+                debug.draw_point(
+                    carla.Location(px, py, pz),
+                    size=0.12,
+                    color=p_color,
+                    life_time=life,
+                )
+                debug.draw_string(
+                    carla.Location(px, py, pz + 0.5),
+                    f"{p_info['distance']:.0f}m",
+                    draw_shadow=True,
+                    color=p_color,
                     life_time=life,
                 )
 

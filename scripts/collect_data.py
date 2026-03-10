@@ -141,7 +141,7 @@ def build_campaign(
         n_walkers=0,
         max_frames=cfg.get("episode", {}).get("max_frames", 2000),
         timeout_speed=cfg.get("episode", {}).get("timeout_speed", 0.1),
-        timeout_duration=cfg.get("episode", {}).get("timeout_duration", 180),
+        timeout_duration=cfg.get("episode", {}).get("timeout_duration", 75),
         fps=cfg.get("carla", {}).get("fps", 20),
         camera_width=cam_cfg.get("per_camera_width", 640),
         camera_height=cam_cfg.get("per_camera_height", 320),
