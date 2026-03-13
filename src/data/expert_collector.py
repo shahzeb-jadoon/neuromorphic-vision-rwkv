@@ -748,9 +748,29 @@ class ExpertDataCollector:
                 life_time=life,
             )
 
-        # 4. Detection corridor — magenta polygon outline
-        corridor = getattr(expert, "_corridor", None)
-        if corridor is not None and len(corridor) >= 3:
+        # 4. Detection corridor — magenta outline
+        corridor: Any | None = None
+        corridor_3d = getattr(expert, "_corridor_3d_segments", None)
+        if corridor_3d:
+            MAGENTA = carla.Color(255, 0, 255)
+            for quad in corridor_3d:
+                if len(quad) != 4:
+                    continue
+                for i in range(4):
+                    p1 = quad[i]
+                    p2 = quad[(i + 1) % 4]
+                    debug.draw_line(
+                        carla.Location(float(p1[0]), float(p1[1]), float(p1[2])),
+                        carla.Location(float(p2[0]), float(p2[1]), float(p2[2])),
+                        thickness=0.04,
+                        color=MAGENTA,
+                        life_time=life,
+                    )
+        else:
+            corridor = getattr(expert, "_corridor", None)
+            if corridor is None or len(corridor) < 3:
+                corridor = None
+        if corridor is not None:
             MAGENTA = carla.Color(255, 0, 255)
             z = ego_loc.z + 0.3
             n = len(corridor)
@@ -789,14 +809,18 @@ class ExpertDataCollector:
                 elif obb_flag:
                     color = V_ORANGE
 
-                # Draw a marker at the vehicle's longitudinal/lateral
-                # offset relative to ego.  We approximate world position
-                # from ego transform + the offset vector.
-                fwd = vehicle.get_transform().get_forward_vector()
-                right = carla.Vector3D(-fwd.y, fwd.x, 0)
-                vx = ego_loc.x + fwd.x * v_info["longitudinal"] + right.x * v_info["lateral"]
-                vy = ego_loc.y + fwd.y * v_info["longitudinal"] + right.y * v_info["lateral"]
-                vz = ego_loc.z + 1.5
+                # Draw marker at the detected vehicle's true world position
+                # when available; fallback to ego-relative reconstruction.
+                if all(k in v_info for k in ("world_x", "world_y", "world_z")):
+                    vx = float(v_info["world_x"])
+                    vy = float(v_info["world_y"])
+                    vz = float(v_info["world_z"]) + 1.2
+                else:
+                    fwd = vehicle.get_transform().get_forward_vector()
+                    right = carla.Vector3D(-fwd.y, fwd.x, 0)
+                    vx = ego_loc.x + fwd.x * v_info["longitudinal"] + right.x * v_info["lateral"]
+                    vy = ego_loc.y + fwd.y * v_info["longitudinal"] + right.y * v_info["lateral"]
+                    vz = ego_loc.z + 1.5
                 debug.draw_point(
                     carla.Location(vx, vy, vz),
                     size=0.15,
@@ -849,7 +873,7 @@ class ExpertDataCollector:
 
         # Lead vehicle distance from nearby_vehicles (union check)
         lead_str = "--"
-        half_w = expert.config.lane_half_width
+        half_w = getattr(expert, "_cached_half_lane", expert.config.lane_half_width)
         if info is not None:
             for v_info in info.nearby_vehicles:
                 is_ahead_same = v_info["is_ahead"] and v_info["same_direction"]

@@ -117,6 +117,7 @@ class ExpertConfig:
     lane_half_width: float = 2.5  # metres — lateral fallback (used only when ego_wp unavailable)
     corridor_margin_max: float = 0.7  # metres — max SAT corridor bleed into adjacent lane
     corridor_margin_min: float = 0.3  # metres — min SAT corridor bleed into adjacent lane
+    corridor_max_vertical_separation: float = 2.5  # metres — reject SAT hits on stacked roads
     pedestrian_lane_half_width: float = 3.0  # metres — wider lateral band for pedestrians
 
     # --- Stop signs ---
@@ -345,6 +346,7 @@ class PrivilegedExpert:
 
         # Corridor polygon for debug drawing (set each tick)
         self._corridor: np.ndarray | None = None
+        self._corridor_3d_segments: list[np.ndarray] = []
         self._cached_half_lane: float = self.config.lane_half_width
 
         # Number of corridor segments built (for diagnostics)
@@ -1564,7 +1566,7 @@ class PrivilegedExpert:
         ego_loc: "carla.Location",
         cutoff: float,
         half_lane: float,
-    ) -> Tuple[np.ndarray, List[np.ndarray]]:
+    ) -> Tuple[np.ndarray, List[np.ndarray], List[np.ndarray]]:
         """Build a lane corridor that follows the planned route.
 
         Instead of projecting a straight rectangle ahead of the ego,
@@ -1572,19 +1574,21 @@ class PrivilegedExpert:
         metres and offsets each by ± *half_lane* perpendicular to the
         waypoint's heading.
 
-        Returns ``(polygon, segments)``:
+        Returns ``(polygon, segments, segments_3d)``:
 
         * **polygon** — full corridor outline for debug drawing.
         * **segments** — list of convex quadrilaterals (one per
           consecutive waypoint pair).  SAT overlap must be tested
           per-segment because the full polygon is non-convex on
           curved roads.
+                * **segments_3d** — list of corridor quads with per-point
+                    world Z for debug drawing on slopes.
 
         Falls back to a single rectangle when no route waypoints
         are available.
         """
         # Collect centre-line samples from the route
-        samples: list[tuple[np.ndarray, np.ndarray]] = []
+        samples: list[tuple[np.ndarray, np.ndarray, float]] = []
         ego_xy = np.array([ego_loc.x, ego_loc.y])
 
         for wp, _cmd in self._wp_buffer:
@@ -1599,7 +1603,7 @@ class PrivilegedExpert:
             fwd_2d /= norm
             right_2d = np.array([-fwd_2d[1], fwd_2d[0]])
             centre = np.array([wloc.x, wloc.y])
-            samples.append((centre, right_2d))
+            samples.append((centre, right_2d, float(wloc.z)))
 
         if not samples:
             # Fallback: straight rectangle using ego heading
@@ -1615,7 +1619,16 @@ class PrivilegedExpert:
                     ego_xy + fwd_2d * cutoff - right_2d * half_lane,
                 ]
             )
-            return rect, [rect]
+            z = float(ego_loc.z) + 0.3
+            rect_3d = np.array(
+                [
+                    [rect[0][0], rect[0][1], z],
+                    [rect[1][0], rect[1][1], z],
+                    [rect[2][0], rect[2][1], z],
+                    [rect[3][0], rect[3][1], z],
+                ]
+            )
+            return rect, [rect], [rect_3d]
 
         # Build corridor as individual convex quad segments + full polygon.
         # Each segment is a perfect rectangle aligned to the vector
@@ -1626,8 +1639,10 @@ class PrivilegedExpert:
         left_boundary: list[np.ndarray] = []
         right_boundary: list[np.ndarray] = []
         segments: list[np.ndarray] = []
+        segments_3d: list[np.ndarray] = []
+        prev_z = float(ego_loc.z)
 
-        for centre, _right_2d in samples:
+        for centre, _right_2d, centre_z in samples:
             seg_vec = centre - prev_center
             seg_len = np.linalg.norm(seg_vec)
             if seg_len < 1e-6:
@@ -1642,9 +1657,22 @@ class PrivilegedExpert:
 
             # Perfectly convex rectangle aligned to segment direction
             segments.append(np.array([prev_l, prev_r, cur_r, cur_l]))
+            z_prev = prev_z + 0.3
+            z_cur = float(centre_z) + 0.3
+            segments_3d.append(
+                np.array(
+                    [
+                        [prev_l[0], prev_l[1], z_prev],
+                        [prev_r[0], prev_r[1], z_prev],
+                        [cur_r[0], cur_r[1], z_cur],
+                        [cur_l[0], cur_l[1], z_cur],
+                    ]
+                )
+            )
             left_boundary.append(prev_l)
             right_boundary.append(prev_r)
             prev_center = centre
+            prev_z = float(centre_z)
 
         # Close out the last segment's far edge for the debug polygon
         if segments:
@@ -1657,7 +1685,7 @@ class PrivilegedExpert:
             polygon = np.array(left_boundary + right_boundary[::-1])
         else:
             polygon = np.array([ego_xy])
-        return polygon, segments
+        return polygon, segments, segments_3d
 
     def _detect_vehicles(
         self,
@@ -1695,12 +1723,13 @@ class PrivilegedExpert:
         # Build a curve-aware lane corridor by sampling waypoints
         # along the planned route.  This follows the actual path
         # through turns instead of projecting a straight rectangle.
-        corridor_poly, corridor_segs = self._build_route_corridor(
+        corridor_poly, corridor_segs, corridor_segs_3d = self._build_route_corridor(
             ego_loc,
             cutoff,
             half_lane,
         )
         self._corridor = corridor_poly  # expose for debug drawing
+        self._corridor_3d_segments = corridor_segs_3d  # slope-aware debug rendering
         self._n_corridor_segments = len(corridor_segs)  # diagnostic
 
         nearby: list[dict[str, Any]] = []
@@ -1746,6 +1775,11 @@ class PrivilegedExpert:
             # curved roads, which breaks SAT).
             v_corners = self._get_actor_obb_2d(v)
             obb_in_lane = any(self._sat_overlap(seg, v_corners) for seg in corridor_segs)
+            # Reject SAT overlaps with large vertical separation
+            # (e.g. overpass/underpass lanes that overlap in XY).
+            vertical_sep = abs(v_bb_center.z - ego_bb_center.z)
+            if obb_in_lane and vertical_sep > self.config.corridor_max_vertical_separation:
+                obb_in_lane = False
 
             # Diagnostic: warn if SAT misses a vehicle that the
             # lateral-distance heuristic would catch.
@@ -1774,6 +1808,10 @@ class PrivilegedExpert:
                     "longitudinal": round(longitudinal, 2),
                     "lateral": round(lateral, 2),
                     "speed_kmh": round(v_speed, 1),
+                    "world_x": round(v_bb_center.x, 2),
+                    "world_y": round(v_bb_center.y, 2),
+                    "world_z": round(v_bb_center.z, 2),
+                    "vertical_sep": round(vertical_sep, 2),
                     "is_ahead": longitudinal > 0,
                     "same_direction": heading_dot > -0.5,
                     "obb_in_lane": obb_in_lane,
