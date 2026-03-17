@@ -36,6 +36,7 @@ expert:
   vehicle_hazard_distance: 25.0
   pedestrian_hazard_distance: 15.0
   turn_speed_factor: 0.45
+  steering_noise_sigma: 0.05
 
 # Towns for training data collection
 towns:

@@ -73,6 +73,7 @@ def _episode_config_hash(config: EpisodeConfig) -> str:
         f"_vhd{ec.vehicle_hazard_distance}"
         f"_phd{ec.pedestrian_hazard_distance}"
         f"_tsf{ec.turn_speed_factor}"
+        f"_sns{ec.steering_noise_sigma}"
     )
     return hashlib.sha256(blob.encode()).hexdigest()[:16]
 
@@ -132,6 +133,8 @@ def build_campaign(
         )
     if "turn_speed_factor" in expert_cfg_dict:
         expert_kw["turn_speed_factor"] = float(expert_cfg_dict["turn_speed_factor"])
+    if "steering_noise_sigma" in expert_cfg_dict:
+        expert_kw["steering_noise_sigma"] = float(expert_cfg_dict["steering_noise_sigma"])
     expert_config = ExpertConfig(**expert_kw)
 
     ep_template = EpisodeConfig(
