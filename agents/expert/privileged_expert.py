@@ -126,6 +126,7 @@ class ExpertConfig:
     stop_sign_comfort_decel: float = 1.5  # m/s² — comfortable deceleration
     stop_sign_creep_speed: float = 8.0  # km/h — Phase 1 floor; car creeps until trigger volume
     stop_sign_wait_ticks: int = 40  # ~2 s at 20 Hz — minimum pause
+    stop_sign_route_proximity: float = 3.5  # metres — 2D horizontal sign-to-route threshold
 
     # --- Yield signs ---
     yield_scan_distance: float = 35.0  # metres — start checking for yield ahead
@@ -1597,17 +1598,36 @@ class PrivilegedExpert:
             if fwd.x * dx + fwd.y * dy <= 0:
                 continue
 
-            # Route-proximity check — ensure the sign is close to our
-            # planned path.  This replaces road_id / lane_id / sign-
-            # orientation checks which are all unreliable in CARLA:
-            # opposite-direction signs share the same road_id, lane_ids
-            # are inconsistent at junctions, and sign forward vectors
-            # vary by map.  A 2 m threshold keeps same-lane signs
-            # (pole is ~1-2 m from lane centre) while filtering
-            # opposite-lane signs (~6+ m from our route).
+            # Route-proximity check — 2D horizontal distance from
+            # both the sign pole AND the trigger volume center to
+            # our planned route.  Using 2D (ignoring z) avoids false
+            # rejections from curb/elevation offsets between the sign
+            # and road-surface waypoints.
+            #
+            # We check two reference points:
+            #  1. Sign pole location (ss_loc) — works for road-surface
+            #     stop markings (e.g. Town03).
+            #  2. Trigger volume center in world space — works for
+            #     pole-mounted signs (e.g. Town07) where the trigger
+            #     volume may be on the road even though the pole isn't.
+            ss_tf = ss.get_transform()
+            tv = ss.trigger_volume
+            # Trigger volume location is in actor-local space; convert
+            # to world coordinates.
+            tv_world = ss_tf.transform(tv.location)
+
             sign_near_route = False
             for rwp, _ in self._wp_buffer:
-                if ss_loc.distance(rwp.transform.location) < 2.0:
+                rwp_loc = rwp.transform.location
+                # 2D horizontal distance (pole)
+                dx_p = ss_loc.x - rwp_loc.x
+                dy_p = ss_loc.y - rwp_loc.y
+                pole_dist_2d = math.sqrt(dx_p * dx_p + dy_p * dy_p)
+                # 2D horizontal distance (trigger volume center)
+                dx_t = tv_world.x - rwp_loc.x
+                dy_t = tv_world.y - rwp_loc.y
+                tv_dist_2d = math.sqrt(dx_t * dx_t + dy_t * dy_t)
+                if min(pole_dist_2d, tv_dist_2d) < cfg.stop_sign_route_proximity:
                     sign_near_route = True
                     break
             if not sign_near_route:
