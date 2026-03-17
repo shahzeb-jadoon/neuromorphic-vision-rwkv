@@ -57,7 +57,7 @@ class NavigationFusion(nn.Module):
 
         Args:
             visual_features: (B, T, visual_dim) from RWKV encoder.
-            nav_command: (B, T) int64, navigation command IDs (0-3).
+            nav_command: (B, T) int64, navigation command IDs (0-5).
 
         Returns:
             (B, T, fused_dim) fused feature tensor.

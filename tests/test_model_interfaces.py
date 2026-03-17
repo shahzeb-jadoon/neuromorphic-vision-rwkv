@@ -51,6 +51,7 @@ class TestModelConfig:
         """Mismatch between encoder and fusion visual_dim should raise."""
         with pytest.raises(AssertionError, match="Encoder embed_dim"):
             ModelConfig(
+                tokenizer=TokenizerConfig(embed_dim=384),
                 encoder=RWKVEncoderConfig(embed_dim=384),
                 fusion=FusionConfig(visual_dim=256),
             )
@@ -59,7 +60,9 @@ class TestModelConfig:
         """Mismatch between fusion fused_dim and policy input_dim should raise."""
         with pytest.raises(AssertionError, match="Fusion fused_dim"):
             ModelConfig(
-                fusion=FusionConfig(fused_dim=384),
+                tokenizer=TokenizerConfig(embed_dim=384),
+                encoder=RWKVEncoderConfig(embed_dim=384),
+                fusion=FusionConfig(visual_dim=384, fused_dim=384),
                 policy_head=PolicyHeadConfig(input_dim=256),
             )
 
@@ -169,7 +172,7 @@ class TestNavigationFusion:
     def test_fusion_forward_raises(self) -> None:
         config = FusionConfig()
         module = NavigationFusion(config)
-        visual = torch.randn(1, 4, 384)
+        visual = torch.randn(1, 4, config.visual_dim)
         nav = torch.zeros(1, 4, dtype=torch.long)
         with pytest.raises(NotImplementedError, match="NavigationFusion"):
             module(visual, nav)
@@ -195,12 +198,12 @@ class TestPolicyHead:
     def test_policy_head_forward_raises(self) -> None:
         config = PolicyHeadConfig()
         module = PolicyHead(config)
-        x = torch.randn(1, 4, 384)
+        x = torch.randn(1, 4, 768)
         with pytest.raises(NotImplementedError, match="PolicyHead"):
             module(x)
 
     def test_policy_head_output_size(self) -> None:
-        config = PolicyHeadConfig(input_dim=64, hidden_dim=32, n_outputs=2)
+        config = PolicyHeadConfig(input_dim=64, hidden_dims=(32, 16), n_outputs=2)
         module = PolicyHead(config)
         # Check final layer before tanh is the Linear layer
         final_linear = module.mlp[-2]
@@ -236,8 +239,12 @@ class TestVisionRWKVDriver:
             model(images, nav)
 
     def test_model_initial_state(self) -> None:
-        config = ModelConfig(encoder=RWKVEncoderConfig(n_layers=3, embed_dim=384))
-        # Need consistent dims
+        config = ModelConfig(
+            tokenizer=TokenizerConfig(embed_dim=384),
+            encoder=RWKVEncoderConfig(n_layers=3, embed_dim=384),
+            fusion=FusionConfig(visual_dim=384, fused_dim=384),
+            policy_head=PolicyHeadConfig(input_dim=384),
+        )
         model = VisionRWKVDriver(config)
         state = model.initial_state(batch_size=2, device=torch.device("cpu"))
         assert len(state) == 3

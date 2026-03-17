@@ -35,7 +35,7 @@ from src.models.config import PolicyHeadConfig
 class PolicyHead(nn.Module):
     """MLP policy head for driving control prediction.
 
-    Architecture: Linear → ReLU → Dropout → Linear → tanh
+    Architecture: D→256→ReLU→Drop→64→ReLU→Drop→2→tanh (3-layer MLP)
     - Steering:     tanh (output ∈ [-1, 1])
     - Acceleration: tanh (output ∈ [-1, 1]), positive = throttle, negative = brake
 
@@ -47,13 +47,20 @@ class PolicyHead(nn.Module):
         super().__init__()
         self.config = config
 
-        self.mlp = nn.Sequential(
-            nn.Linear(config.input_dim, config.hidden_dim),
-            nn.ReLU(),
-            nn.Dropout(config.dropout),
-            nn.Linear(config.hidden_dim, config.n_outputs),
-            nn.Tanh(),
-        )
+        layers: list[nn.Module] = []
+        in_dim = config.input_dim
+        for h_dim in config.hidden_dims:
+            layers.extend(
+                [
+                    nn.Linear(in_dim, h_dim),
+                    nn.ReLU(),
+                    nn.Dropout(config.dropout),
+                ]
+            )
+            in_dim = h_dim
+        layers.append(nn.Linear(in_dim, config.n_outputs))
+        layers.append(nn.Tanh())
+        self.mlp = nn.Sequential(*layers)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """Predict driving controls from fused features.

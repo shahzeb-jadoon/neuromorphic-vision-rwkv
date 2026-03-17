@@ -24,7 +24,7 @@ class TokenizerConfig:
     img_width: int = 1920
     in_channels: int = 3
     patch_size: int = 16  # Divides image into (H/P × W/P) = 20×120 = 2400 patches
-    embed_dim: int = 384  # Dimension of each patch token
+    embed_dim: int = 768  # Dimension of each patch token (384 for debug/ablation)
     use_qshift: bool = True  # Apply Q-Shift spatial mixing
 
 
@@ -36,10 +36,10 @@ class RWKVEncoderConfig:
     maintaining a recurrent state for temporal context.
     """
 
-    embed_dim: int = 384
+    embed_dim: int = 768
     n_layers: int = 12
-    n_heads: int = 6  # For multi-head state in RWKV-7
-    ffn_dim: int = 1536  # Feed-forward hidden dimension (4x embed)
+    n_heads: int = 12  # For multi-head state in RWKV-7
+    ffn_dim: int = 3072  # Feed-forward hidden dimension (4x embed)
     dropout: float = 0.1
     rwkv_version: int = 7  # 6 or 7 (fallback to 6 if 7 fails)
 
@@ -52,12 +52,10 @@ class FusionConfig:
     concatenation, linear projection, and learned sigmoid gating.
     """
 
-    visual_dim: int = 384
+    visual_dim: int = 768
     nav_embed_dim: int = 64
-    n_nav_commands: int = (
-        4  # LEFT=0, RIGHT=1, STRAIGHT=2, LANEFOLLOW=3 (remapped from RoadOption 1-4)
-    )
-    fused_dim: int = 384
+    n_nav_commands: int = 6  # LEFT..CHANGELANERIGHT (remapped from RoadOption 1-6 → 0-5)
+    fused_dim: int = 768
     dropout: float = 0.1
 
 
@@ -82,8 +80,8 @@ class PolicyHeadConfig:
             brake    = max(0, -acceleration)
     """
 
-    input_dim: int = 384
-    hidden_dim: int = 128
+    input_dim: int = 768
+    hidden_dims: tuple[int, ...] = (256, 64)  # 3-layer: D→256→64→2
     n_outputs: int = 2  # [steering, acceleration]
     dropout: float = 0.1
 
