@@ -115,8 +115,8 @@ class ExpertConfig:
     pedestrian_hazard_distance: float = 15.0
     pedestrian_emergency_distance: float = 5.0
     lane_half_width: float = 2.5  # metres — lateral fallback (used only when ego_wp unavailable)
-    corridor_margin_max: float = 0.7  # metres — max SAT corridor bleed into adjacent lane
-    corridor_margin_min: float = 0.3  # metres — min SAT corridor bleed into adjacent lane
+    corridor_margin_max: float = 0.1  # metres — max SAT corridor bleed into adjacent lane
+    corridor_margin_min: float = 0.0  # metres — min SAT corridor bleed into adjacent lane
     corridor_max_vertical_separation: float = 2.5  # metres — reject SAT hits on stacked roads
     pedestrian_lane_half_width: float = 3.0  # metres — wider lateral band for pedestrians
 
