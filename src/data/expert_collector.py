@@ -790,7 +790,7 @@ class ExpertDataCollector:
         #    Orange = in corridor but further away
         #    Yellow = detected but not in lane / not ahead
         RED = carla.Color(255, 0, 0)
-        V_ORANGE = carla.Color(255, 140, 0)
+        V_ORANGE = carla.Color(101, 67, 33)
         YELLOW = carla.Color(255, 255, 0)
 
         if info is not None:
