@@ -6,8 +6,9 @@
 >
 > **⚠️ Schema v3 Update:** Input dimensions changed from (B,T,3,224,224) to
 > (B,T,3,320,1920). Patch grid is now 120×20 = 2400 tokens (was 14×14 = 196).
-> Navigation commands use RoadOption enum (5 values: 0-4) not old 4-class mapping.
-> See `src/models/config.py` for current defaults.
+> Navigation commands use 6-class RoadOption enum (1-6: LEFT, RIGHT, STRAIGHT,
+> LANEFOLLOW, CHANGELANELEFT, CHANGELANERIGHT), remapped to 0-5 for embedding.
+> See `src/models/config.py` for current defaults (D=768, burn_in=8).
 
 ---
 
@@ -18,8 +19,23 @@ This is the core ML engineering phase. You will:
 - **Vision encoder** — Implement patch tokenization with Q-Shift (3 stages: frozen pretrained → fine-tuned → from-scratch)
 - **RWKV encoder** — Build the RWKV-7 encoder with data-dependent decay (attempt-first-then-pivot to RWKV-6)
 - **Full pipeline** — Assemble tokenizer → encoder → NavigationFusion → policy head
+- **Auxiliary losses** — Speed prediction, driving mode classification, future waypoint prediction
 - **Training** — Implement TBPTT with burn-in, steering noise injection for implicit recovery, crash-safe checkpointing
 - **Baselines** — Train CNN, Transformer, and LSTM baselines with identical protocol
+
+### Architecture Approach: Staged A→C→B
+
+Implementation proceeds in three independently publishable stages:
+
+| Stage | Vision Encoder | Spatial Reduction | Temporal | Est. VRAM (B=8) |
+|-------|---------------|-------------------|----------|-----------------|
+| **1 (A)** | Frozen CLIP ViT-B/16 CLS token | Single CLS vector per frame | RWKV-7 temporal | ~2.7 GB |
+| **2 (C)** | CLIP patch tokens + hierarchical pooling | 2400→300→37 patches via Conv1d | RWKV-7 temporal | ~7 GB |
+| **3 (B)** | From-scratch PatchEmbed + Spatial RWKV | Spatial RWKV reduces within frame | RWKV-7 temporal | ~13 GB (B=4) |
+
+- **Stage 1** validates the temporal RWKV + fusion + policy head pipeline works, independent of vision quality
+- **Stage 2** recovers spatial detail lost by CLS-only, while remaining tractable on 16 GB
+- **Stage 3** is the full Vision-RWKV architecture (if time permits); may require batch size reduction
 
 ### Branching Strategy for Concurrent Experiments
 
@@ -121,16 +137,37 @@ class RWKVEncoder(nn.Module):
 
 **Tasks:**
 - [ ] Implement `NavigationFusion` (gated linear fusion): fuses visual features with nav command embedding
-  - Nav command → learned embedding (dim 64)
+  - 6 nav commands → learned embedding (dim 64): LEFT, RIGHT, STRAIGHT, LANEFOLLOW, CHANGELANELEFT, CHANGELANERIGHT
   - Gated linear fusion: concatenate visual + nav embeddings, linear projection with learned sigmoid gate
 - [ ] Implement `PolicyHead`: MLP that outputs [steer, acceleration]
   - Architecture: Linear(D, 256) → ReLU → Linear(256, 64) → ReLU → Linear(64, 2)
   - Steering: tanh activation (range [-1, 1])
   - Acceleration: tanh activation (range [-1, 1]), where positive = throttle, negative = brake
   - This merged axis avoids the throttle-brake conflict in expert data and follows standard practice in imitation learning literature
-- [ ] Optional: velocity prediction auxiliary head for improved representation learning
-
 **Key code artifacts:** `src/models/fusion.py`, `src/models/policy_head.py`
+
+### 2.3b — Auxiliary Loss Heads (Week 5–6)
+
+**Objective:** Add auxiliary prediction heads that leverage existing HDF5 data to improve representation learning (MILE-style intermediate supervision).
+
+**Phase 2 auxiliary losses (all data already collected):**
+- [ ] **SpeedHead**: `Linear(D, 1)` → predicts `target_speed` (MSE loss, km/h)
+- [ ] **ModeHead**: `Linear(D, 8)` → predicts `driving_mode` (8-class cross-entropy: NORMAL, FOLLOW, APPROACH_TL, STOP_TL, STOP_SIGN, STOP_SIGN_CREEP, HAZARD_STOP, HAZARD_SLOW)
+- [ ] **WaypointHead**: `MLP(D, 128, 2*K)` → predicts future (x,y) positions at K=4 offsets (e.g., t+5, t+10, t+15, t+20 frames), L1 loss. Future positions are extrapolated from existing `position` field in HDF5.
+
+**Loss weighting:**
+```
+L_total = L_control + λ_speed * L_speed + λ_mode * L_mode + λ_wp * L_waypoint
+```
+Start with λ_speed=0.1, λ_mode=0.1, λ_wp=0.5 (waypoints weighted higher per TransFuser convention).
+
+**Phase 3 ablation losses (documented as comments for future implementation):**
+- Traffic light state classification (from `traffic_light_state`)
+- Traffic light distance regression (from `traffic_light_distance`)
+- Stop sign distance regression (from `stop_sign_distance`)
+- Nearby vehicle/pedestrian detection (from `nearby_vehicles`, `nearby_pedestrians`)
+
+**Key code artifact:** `src/models/vision_rwkv_driver.py` (auxiliary heads added to main model)
 
 ### 2.4 — Full Model Assembly (Week 6)
 
@@ -193,8 +230,9 @@ class VisionRWKVDriver(nn.Module):
 
 **Tasks:**
 - [ ] Implement `Trainer` class with TBPTT
-- [ ] Burn-in: first K=20 frames of each clip run forward-only (no gradient) to warm up state
-- [ ] Loss: MSE on steering + acceleration predictions (after burn-in frames only)\n  - Training target: `acceleration = expert_throttle - expert_brake`
+- [ ] Burn-in: first K=8 frames of each clip run forward-only (no gradient) to warm up state
+- [ ] Loss: MSE on steering + acceleration predictions (after burn-in frames only), plus auxiliary losses (speed MSE, mode CE, waypoint L1) — see Step 2.3b
+  - Training target: `acceleration = expert_throttle - expert_brake`
 - [ ] Optimizer: AdamW, lr=1e-4, weight_decay=0.01
 - [ ] LR schedule: linear warmup (1000 steps) + cosine decay
 - [ ] Gradient clipping: max_norm=1.0
@@ -205,12 +243,12 @@ class VisionRWKVDriver(nn.Module):
 
 **TBPTT burn-in explained:**
 ```
-Frame:  [1  2  3  ... 20  21  22  ... 32]
+Frame:  [1  2  3  ... 8   9  10  ... 32]
          ←— burn-in —→  ←— loss computed —→
          (state warmup)   (gradients flow)
 ```
 
-This prevents the model from being penalized on the first frames of a clip where the recurrent state is cold (zero-initialized at clip boundaries).
+With K=8 and T=32, 25% of frames are used for state warm-up (no gradient), and 75% contribute to the loss. This prevents the model from being penalized on the first frames of a clip where the recurrent state is cold (zero-initialized at clip boundaries).
 
 #### Training Crash Recovery
 
@@ -303,14 +341,16 @@ python -m src.training.trainer --config configs/vrwkv_base.yaml
 > tractable, but VRAM is still dominated by activation storage during
 > backpropagation.
 >
-> | Config | d_model | n_layers | Params (est.) | 2400 tok × 32 seq FP16 VRAM (est.) | Target GPU |
-> |--------|---------|----------|---------------|-----------------------------------|------------|
-> | Debug  | 256     | 6        | ~8 M          | ~4 GB                             | laptop GPU (16 GB) |
-> | Base   | 768     | 12       | ~85 M         | ~18 GB                            | workstation GPU (24 GB) |
+> | Config | d_model | n_layers | Params (est.) | VRAM est. (B=8, FP16) | Target GPU |
+> |--------|---------|----------|---------------|-----------------------|------------|
+> | Debug  | 384     | 6        | ~15 M         | ~4 GB                 | laptop GPU (16 GB) |
+> | Base   | 768     | 12       | ~85 M         | ~7 GB (Stage 2)       | laptop GPU (16 GB) or workstation GPU (24 GB) |
+> | Full   | 768     | 12       | ~85 M         | ~13 GB (Stage 3, B=4) | workstation GPU (24 GB) |
 >
-> Start with Debug config on the laptop for rapid iteration, then scale to
-> Base on the 24 GB workstation GPU.  If Base exceeds memory, reduce `batch_size` or
-> `seq_len` before reducing `d_model`.
+> Stage 1 (CLIP CLS → temporal RWKV) fits comfortably on 16 GB at ~2.7 GB.
+> Stage 2 (hierarchical pooling) fits on 16 GB at ~7 GB with B=8.
+> Stage 3 (full Spatial RWKV) may require B=4 on 16 GB or full B=8 on 24 GB.
+> Start with Debug config for rapid iteration, then scale to Base.
 
 Create these YAML configs in `configs/`:
 
@@ -318,7 +358,7 @@ Create these YAML configs in `configs/`:
 # configs/vrwkv_base.yaml
 model:
   name: "VisionRWKVDriver"
-  d_model: 768           # Explicit: code default is 384 (lightweight for dev/test)
+  d_model: 768           # Matches code default in config.py
   n_layers: 12
   patch_size: 16
   img_height: 320
@@ -330,7 +370,7 @@ model:
 training:
   batch_size: 16
   seq_len: 32
-  burn_in: 20
+  burn_in: 8
   lr: 1e-4
   weight_decay: 0.01
   max_epochs: 100
