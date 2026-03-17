@@ -182,6 +182,7 @@ class _FakeFrameInfo:
         self.traffic_light_state = 0
         self.traffic_light_distance = -1.0
         self.stop_sign_distance = -1.0
+        self.yield_sign_distance = -1.0
         self.target_speed = 8.33
         self.driving_mode = 0
         self.nearby_vehicles: list[dict[str, Any]] = []

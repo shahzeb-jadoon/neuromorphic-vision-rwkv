@@ -231,6 +231,9 @@ class _StreamingEpisodeWriter:
         self._ds_ss = self._h5.create_dataset(
             S.STOP_SIGN_DISTANCE, shape=(max_frames,), dtype=np.float32, maxshape=(None,)
         )
+        self._ds_ys = self._h5.create_dataset(
+            S.YIELD_SIGN_DISTANCE, shape=(max_frames,), dtype=np.float32, maxshape=(None,)
+        )
         self._ds_ts = self._h5.create_dataset(
             S.TARGET_SPEED, shape=(max_frames,), dtype=np.float32, maxshape=(None,)
         )
@@ -303,6 +306,7 @@ class _StreamingEpisodeWriter:
         self._ds_tl[i] = info.traffic_light_state
         self._ds_tl_dist[i] = info.traffic_light_distance
         self._ds_ss[i] = info.stop_sign_distance
+        self._ds_ys[i] = info.yield_sign_distance
         self._ds_ts[i] = info.target_speed
         self._ds_dm[i] = info.driving_mode
         self._ds_ncorr[i] = info.n_corridor_segments

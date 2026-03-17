@@ -59,6 +59,7 @@ ROTATION = "rotation"  # (N, 3)  float32  degrees (pitch, yaw, roll)
 TRAFFIC_LIGHT_STATE = "traffic_light_state"  # (N,)    int32  0=None 1=G 2=Y 3=R
 TRAFFIC_LIGHT_DISTANCE = "traffic_light_distance"  # (N,)  float32  metres (-1 if none)
 STOP_SIGN_DISTANCE = "stop_sign_distance"  # (N,)    float32  metres (-1 if none)
+YIELD_SIGN_DISTANCE = "yield_sign_distance"  # (N,)   float32  metres (-1 if none)
 TARGET_SPEED = "target_speed"  # (N,)    float32  km/h
 DRIVING_MODE = "driving_mode"  # (N,)    int32  DrivingMode enum
 NEARBY_VEHICLES = "nearby_vehicles"  # JSON string per frame

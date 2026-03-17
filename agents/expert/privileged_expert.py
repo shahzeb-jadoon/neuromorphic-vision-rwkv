@@ -127,6 +127,16 @@ class ExpertConfig:
     stop_sign_creep_speed: float = 8.0  # km/h — Phase 1 floor; car creeps until trigger volume
     stop_sign_wait_ticks: int = 40  # ~2 s at 20 Hz — minimum pause
 
+    # --- Yield signs ---
+    yield_scan_distance: float = 35.0  # metres — start checking for yield ahead
+    yield_route_proximity: float = 4.0  # metres — max sign-to-route 2D distance
+    yield_slow_speed: float = 12.0  # km/h — creep speed while checking for conflicts
+    yield_comfort_decel: float = 1.5  # m/s² — comfortable deceleration for yield
+    yield_conflict_distance: float = 25.0  # metres — scan radius for cross-traffic
+    yield_conflict_angle_deg: float = 30.0  # degrees — heading divergence to count as cross-traffic
+    yield_wait_ticks: int = 20  # ~1 s at 20 Hz — hold after conflict clears before proceeding
+    yield_clear_behind_m: float = 3.0  # metres — sign behind ego by this much → clear
+
     # --- Turn behaviour ---
     turn_speed_factor: float = 0.45  # target speed multiplier for turns
 
@@ -188,6 +198,7 @@ class DrivingMode(IntEnum):
     PEDESTRIAN_STOP = auto()
     EMERGENCY_STOP = auto()
     STOP_SIGN_STOP = auto()
+    YIELD_STOP = auto()
 
 
 @dataclass
@@ -216,6 +227,7 @@ class FrameInfo:
     traffic_light_state: int  # 0=None, 1=Green, 2=Yellow, 3=Red
     traffic_light_distance: float  # metres (−1 if none)
     stop_sign_distance: float = -1.0  # metres (−1 if none)
+    yield_sign_distance: float = -1.0  # metres (−1 if none)
 
     # Nearby actors (serialisable lists of dicts)
     nearby_vehicles: List[Dict[str, Any]] = field(default_factory=list)
@@ -366,6 +378,12 @@ class PrivilegedExpert:
         self._stop_sign_wait_counter: int = 0
         self._stop_sign_active: int | None = None  # actor ID
 
+        # Yield sign state
+        self._cleared_yield_signs: set[int] = set()
+        self._yield_active: int | None = None  # actor ID of yield we're currently handling
+        self._yield_wait_counter: int = 0  # frames waited after conflict cleared
+        self._yield_has_conflict: bool = False  # cross-traffic detected this tick
+
         # Rate limiter — previous target for smooth transitions
         self._prev_target: float = self.config.target_speed
 
@@ -380,6 +398,7 @@ class PrivilegedExpert:
             DrivingMode.PEDESTRIAN_STOP,
             DrivingMode.EMERGENCY_STOP,
             DrivingMode.STOP_SIGN_STOP,
+            DrivingMode.YIELD_STOP,
         })
 
         # P3-D: track consecutive TURNING frames so we can reset the
@@ -405,6 +424,10 @@ class PrivilegedExpert:
         self._cleared_stop_signs.clear()
         self._stop_sign_wait_counter = 0
         self._stop_sign_active = None
+        self._cleared_yield_signs.clear()
+        self._yield_active = None
+        self._yield_wait_counter = 0
+        self._yield_has_conflict = False
         self._gap_fill_rpcs = 0
         self._gap_fill_diverged = 0
         self._gap_fill_budget_exhausted = False
@@ -463,6 +486,7 @@ class PrivilegedExpert:
         # --- 3.  Privileged perception ---
         tl_state, tl_distance = self._check_traffic_light(transform)
         ss_distance, ss_committed = self._check_stop_signs(transform, speed_kmh)
+        ys_distance, ys_has_conflict = self._check_yield_signs(transform, speed_kmh)
         nearby_vehicles = self._detect_vehicles(transform)
         nearby_pedestrians = self._detect_pedestrians(transform)
         lead_distance = self._lead_vehicle_distance(nearby_vehicles)
@@ -479,6 +503,8 @@ class PrivilegedExpert:
             lead_distance,
             ped_dist,
             base_target,
+            ys_distance,
+            ys_has_conflict,
         )
 
         # Reset speed PID integral when leaving a stop/hold mode.
@@ -565,6 +591,7 @@ class PrivilegedExpert:
             traffic_light_state=self._encode_tl(tl_state),
             traffic_light_distance=(tl_distance if tl_distance is not None else -1.0),
             stop_sign_distance=(ss_distance if ss_distance is not None else -1.0),
+            yield_sign_distance=(ys_distance if ys_distance is not None else -1.0),
             nearby_vehicles=nearby_vehicles,
             nearby_pedestrians=nearby_pedestrians,
             n_corridor_segments=self._n_corridor_segments,
@@ -895,6 +922,8 @@ class PrivilegedExpert:
         lead_distance: float | None,
         ped_dist: float | None,
         base_target: float | None = None,
+        ys_distance: float | None = None,
+        ys_has_conflict: bool = False,
     ) -> Tuple[float, DrivingMode]:
         """Determine target speed and driving mode from hazards."""
         cfg = self.config
@@ -1043,6 +1072,26 @@ class PrivilegedExpert:
             # commits to target=0 for a full stop.
             ss_target = max(v_ms * 3.6, cfg.stop_sign_creep_speed)
             target = min(target, ss_target)
+
+        # --- Yield sign ---
+        # Unlike stop signs, yield does not require a full stop when the
+        # intersection is clear.  The ego slows to yield_slow_speed while
+        # approaching, and stops only if cross-traffic conflict exists.
+        if ys_distance is not None and 0 < ys_distance < cfg.yield_scan_distance:
+            if ys_has_conflict:
+                # Conflict detected — kinematic ramp to 0, same as stop sign
+                mode = DrivingMode.YIELD_STOP
+                d = max(ys_distance - self._ego_half_length, 0.0)
+                v_ms = math.sqrt(2.0 * cfg.yield_comfort_decel * d)
+                target = min(target, v_ms * 3.6)
+            else:
+                # No conflict — slow to creep speed and proceed
+                d = max(ys_distance - self._ego_half_length, 0.0)
+                v_ms = math.sqrt(2.0 * cfg.yield_comfort_decel * d)
+                ys_target = max(v_ms * 3.6, cfg.yield_slow_speed)
+                if ys_target < target:
+                    mode = DrivingMode.YIELD_STOP
+                    target = ys_target
 
         # --- Lead vehicle ---
         # Scale safety distances with current speed (kinematic braking
@@ -1568,6 +1617,177 @@ class PrivilegedExpert:
                 best_dist = dist
 
         return best_dist, False
+
+    # --- Yield sign handling -----------------------------------------------
+
+    def _check_yield_signs(
+        self,
+        transform: "carla.Transform",
+        speed_kmh: float,
+    ) -> tuple[float | None, bool]:
+        """Return (approach_dist, has_conflict) for yield sign handling.
+
+        Yield signs require slowing and checking for cross-traffic, but
+        NOT a mandatory full stop when the intersection is clear.
+
+        State machine:
+        1. **Scan**: Find nearest yield sign ahead on our route within
+           ``yield_scan_distance``.
+        2. **Approach**: Kinematic ramp to ``yield_slow_speed``.
+        3. **Conflict check**: Scan for vehicles whose heading diverges
+           from ours by more than ``yield_conflict_angle_deg`` within
+           ``yield_conflict_distance``.  If conflict → ramp to 0.
+        4. **Clear**: Once ego passes the sign, add to cleared set.
+
+        Returns:
+            (distance_to_yield, has_conflict):
+            - distance is None when no yield sign is relevant.
+            - has_conflict is True when cross-traffic blocks our path.
+        """
+        cfg = self.config
+        ego_loc = transform.location
+        fwd = transform.get_forward_vector()
+
+        # ---- Active yield sign: check if we've passed it ----
+        if self._yield_active is not None:
+            ys_actor = self.world.get_actor(self._yield_active)
+            if ys_actor is None:
+                # Destroyed — clear
+                self._yield_active = None
+                self._yield_wait_counter = 0
+                self._yield_has_conflict = False
+            else:
+                ys_loc = ys_actor.get_transform().location
+                dx = ys_loc.x - ego_loc.x
+                dy = ys_loc.y - ego_loc.y
+                behind = (fwd.x * dx + fwd.y * dy) < -cfg.yield_clear_behind_m
+
+                if behind:
+                    # Drove past — clear
+                    self._cleared_yield_signs.add(self._yield_active)
+                    self._yield_active = None
+                    self._yield_wait_counter = 0
+                    self._yield_has_conflict = False
+                    return None, False
+
+                dist = ego_loc.distance(ys_loc)
+                has_conflict = self._yield_conflict_check(transform)
+                self._yield_has_conflict = has_conflict
+
+                if has_conflict:
+                    self._yield_wait_counter = 0
+                    return dist, True
+
+                # No conflict — but wait a short period before proceeding
+                # to avoid darting into a gap that's too small.
+                self._yield_wait_counter += 1
+                if self._yield_wait_counter < cfg.yield_wait_ticks:
+                    return dist, False
+                # Waited long enough with no conflict — proceed
+                return dist, False
+
+        # ---- Scan for new yield signs ----
+        best_dist: float | None = None
+        best_id: int | None = None
+
+        for ys in self.world.get_actors().filter("*yield*"):
+            if ys.id in self._cleared_yield_signs:
+                continue
+
+            ys_loc = ys.get_transform().location
+            dist = ego_loc.distance(ys_loc)
+            if dist > cfg.yield_scan_distance:
+                continue
+
+            # Ahead check
+            dx = ys_loc.x - ego_loc.x
+            dy = ys_loc.y - ego_loc.y
+            if fwd.x * dx + fwd.y * dy <= 0:
+                continue
+
+            # Route-proximity check — 2D horizontal distance to filter
+            # signs on opposite or adjacent roads.
+            sign_near_route = False
+            for rwp, _ in self._wp_buffer:
+                rwp_loc = rwp.transform.location
+                dx_r = ys_loc.x - rwp_loc.x
+                dy_r = ys_loc.y - rwp_loc.y
+                horiz_dist = math.sqrt(dx_r * dx_r + dy_r * dy_r)
+                if horiz_dist < cfg.yield_route_proximity:
+                    sign_near_route = True
+                    break
+            if not sign_near_route:
+                continue
+
+            if best_dist is None or dist < best_dist:
+                best_dist = dist
+                best_id = ys.id
+
+        # Activate the nearest yield sign if found
+        if best_id is not None:
+            self._yield_active = best_id
+            self._yield_wait_counter = 0
+            has_conflict = self._yield_conflict_check(transform)
+            self._yield_has_conflict = has_conflict
+            return best_dist, has_conflict
+
+        return None, False
+
+    def _yield_conflict_check(self, transform: "carla.Transform") -> bool:
+        """Check for cross-traffic that would conflict with our path.
+
+        Scans for nearby vehicles whose heading diverges from ours by
+        more than ``yield_conflict_angle_deg``, indicating they are on
+        a crossing or merging path.  Only considers vehicles within
+        ``yield_conflict_distance`` that are ahead or to the side.
+
+        Returns:
+            True if a conflicting vehicle is detected.
+        """
+        cfg = self.config
+        ego_loc = transform.location
+        ego_fwd = transform.get_forward_vector()
+        ego_heading_rad = math.atan2(ego_fwd.y, ego_fwd.x)
+
+        threshold_rad = math.radians(cfg.yield_conflict_angle_deg)
+
+        for veh in self.world.get_actors().filter("*vehicle*"):
+            if veh.id == self.vehicle.id:
+                continue
+
+            veh_loc = veh.get_transform().location
+            dist = ego_loc.distance(veh_loc)
+            if dist > cfg.yield_conflict_distance:
+                continue
+
+            # Only check vehicles that are roughly ahead or to our side
+            dx = veh_loc.x - ego_loc.x
+            dy = veh_loc.y - ego_loc.y
+            dot_ahead = ego_fwd.x * dx + ego_fwd.y * dy
+            if dot_ahead < -5.0:
+                # Well behind us — ignore
+                continue
+
+            # Check heading divergence
+            veh_fwd = veh.get_transform().get_forward_vector()
+            veh_heading_rad = math.atan2(veh_fwd.y, veh_fwd.x)
+            angle_diff = abs(ego_heading_rad - veh_heading_rad)
+            # Normalise to [0, π]
+            angle_diff = angle_diff % (2.0 * math.pi)
+            if angle_diff > math.pi:
+                angle_diff = 2.0 * math.pi - angle_diff
+
+            # Cross-traffic: heading differs significantly from ours
+            # (not same direction, not oncoming on a straight road)
+            if threshold_rad < angle_diff < (math.pi - threshold_rad):
+                # This vehicle is crossing our path — check if it's
+                # actually moving (stationary vehicles aren't a conflict)
+                veh_vel = veh.get_velocity()
+                veh_speed = math.sqrt(veh_vel.x**2 + veh_vel.y**2)
+                if veh_speed > 0.5:  # m/s — moving
+                    return True
+
+        return False
 
     # --- Curve-aware corridor -------------------------------------------
 
