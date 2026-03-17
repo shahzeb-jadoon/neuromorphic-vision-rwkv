@@ -242,10 +242,14 @@ class DrivingSequenceDataset(Dataset):
                     W_total = n_cameras * per_camera_width (panoramic).
                 controls: (seq_len, 2) float32 [steering, acceleration]
                     acceleration = throttle - brake  ∈ [-1, 1]
-                nav_command: (seq_len,) int64  (RoadOption values)
-                velocity: (seq_len, 3) float32
+                nav_command: (seq_len,) int64  (RoadOption values, 0-indexed)
+                velocity: (seq_len, 3) float32  (z-score normalised)
                 loss_weight: (seq_len,) float32 — per-frame weight
                     (1.0 for moving frames, 0.1 for stationary)
+                target_speed: (seq_len,) float32  (km/h, for aux loss)
+                driving_mode: (seq_len,) int64  (DrivingMode enum, for aux loss)
+                future_waypoints: (seq_len, 4, 2) float32  (relative x,y offsets
+                    at t+5, t+10, t+15, t+20 frames, for aux loss)
         """
         ep_idx, start = self.clips[idx]
         end = start + self.seq_len
@@ -258,6 +262,11 @@ class DrivingSequenceDataset(Dataset):
         nav_cmd = f[S.NAV_COMMAND][start:end]
         velocity = f[S.VELOCITY][start:end]
 
+        # Auxiliary loss targets
+        target_speed = f[S.TARGET_SPEED][start:end]
+        driving_mode = f[S.DRIVING_MODE][start:end]
+        position = f[S.POSITION][start:end]
+
         # Convert images: uint8 HWC → float32 CHW [0, 1]
         images = torch.from_numpy(images.copy()).permute(0, 3, 1, 2).float() / 255.0
 
@@ -268,8 +277,10 @@ class DrivingSequenceDataset(Dataset):
         controls = torch.stack([steering, acceleration], dim=-1)
 
         nav_cmd = torch.from_numpy(nav_cmd.copy()).long()
-        # Remap RoadOption values 1-4 → 0-3 for nn.Embedding(4, dim).
-        # Schema v3 guarantees values ∈ {1,2,3,4} (LEFT..LANEFOLLOW).
+        # Remap RoadOption values 1-6 → 0-5 for nn.Embedding(6, dim).
+        # Schema v3 values ∈ {1..4} (LEFT..LANEFOLLOW), extended to {1..6}
+        # with CHANGELANELEFT=5, CHANGELANERIGHT=6 via extrapolation or
+        # future expert collections.
         nav_cmd = nav_cmd - 1
         velocity = torch.from_numpy(velocity.copy())
 
@@ -292,12 +303,39 @@ class DrivingSequenceDataset(Dataset):
         # ImageNet normalization (after augmentation so jitter operates on real intensities)
         images = (images - IMAGENET_MEAN) / IMAGENET_STD
 
+        # Auxiliary targets
+        target_speed_t = torch.from_numpy(target_speed.copy())
+        driving_mode_t = torch.from_numpy(driving_mode.copy()).long()
+        position_t = torch.from_numpy(position.copy())
+
+        # Future waypoints: relative (x, y) offsets at t+5, t+10, t+15, t+20.
+        # Read a contiguous slice covering the furthest future offset, then
+        # index into it.  Clamp to episode length for frames near the end.
+        wp_offsets = [5, 10, 15, 20]
+        max_offset = max(wp_offsets)
+        ep_len = f[S.POSITION].shape[0]
+        # Read from clip start to (clip end + max_offset), clamped to ep length
+        future_end = min(end + max_offset, ep_len)
+        all_pos = torch.from_numpy(f[S.POSITION][start:future_end].copy())
+        future_wps = []
+        for offset in wp_offsets:
+            # Indices relative to `start` in the all_pos buffer
+            future_idx = torch.arange(self.seq_len) + offset
+            future_idx = future_idx.clamp(max=all_pos.shape[0] - 1)
+            future_pos = all_pos[future_idx]
+            rel = future_pos[:, :2] - position_t[:, :2]
+            future_wps.append(rel)
+        future_waypoints = torch.stack(future_wps, dim=1)  # (T, K, 2)
+
         return {
             "images": images,
             "controls": controls,
             "nav_command": nav_cmd,
             "velocity": velocity,
             "loss_weight": loss_weight,
+            "target_speed": target_speed_t,
+            "driving_mode": driving_mode_t,
+            "future_waypoints": future_waypoints,
         }
 
     def _augment(

@@ -33,7 +33,8 @@ BRAKE = "brake"
 NAV_COMMAND = "nav_command"
 
 # Valid nav command IDs for schema v3 (used by validation / analysis scripts).
-VALID_NAV_COMMANDS = {1, 2, 3, 4}
+# 1-4 are from RoadOption enum; 5-6 added for lane change support.
+VALID_NAV_COMMANDS = {1, 2, 3, 4, 5, 6}
 
 # Human-readable names for reporting and visualisation.
 NAV_COMMAND_NAMES: dict[int, str] = {
@@ -41,6 +42,8 @@ NAV_COMMAND_NAMES: dict[int, str] = {
     2: "Right",
     3: "Straight",
     4: "LaneFollow",
+    5: "ChangeLaneLeft",
+    6: "ChangeLaneRight",
 }
 
 # Legacy aliases kept for backward-compatible readers of v2 files.

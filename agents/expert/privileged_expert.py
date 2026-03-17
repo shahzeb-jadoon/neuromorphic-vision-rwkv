@@ -458,7 +458,7 @@ class PrivilegedExpert:
 
         # --- 2.  Route progress ---
         self._advance_route(transform)
-        target_wp, nav_command = self._get_target(transform)
+        target_wp, nav_label, nav_command = self._get_target(transform)
 
         # --- 3.  Privileged perception ---
         tl_state, tl_distance = self._check_traffic_light(transform)
@@ -554,7 +554,7 @@ class PrivilegedExpert:
         )
 
         info = FrameInfo(
-            nav_command=int(nav_command),
+            nav_command=int(nav_label),
             route_completion=self.route_completion,
             target_speed=target_speed,
             current_speed=speed_kmh,
@@ -817,33 +817,43 @@ class PrivilegedExpert:
         ego_loc = transform.location
 
         # --- Determine nav command with anticipation ---
-        # Scan for the first LEFT/RIGHT in the buffer.  A STRAIGHT
-        # command alone does not trigger the turn-speed ramp (going
-        # straight through a junction needs no deceleration), but a
-        # STRAIGHT immediately *followed* by a LEFT/RIGHT means the
-        # turn waypoint is just past the STRAIGHT — we must still
-        # see and anticipate it.  So we skip STRAIGHT and keep
-        # scanning (up to one additional actionable command).
+        # Two separate outputs:
+        #   nav_label   — first actionable command for HDF5 recording
+        #                 (includes STRAIGHT, CHANGELANELEFT, CHANGELANERIGHT)
+        #   nav_command — LEFT/RIGHT for turn-speed ramp (STRAIGHT doesn't
+        #                 need deceleration), used by _plan_speed()
+        #
+        # Scan for the first non-LANEFOLLOW/VOID command.  Record it
+        # as nav_label.  If it's LEFT/RIGHT, also use it for turn
+        # anticipation.  If it's STRAIGHT or lane-change, continue
+        # scanning for a LEFT/RIGHT behind it (a STRAIGHT followed
+        # by LEFT means the turn is just past the junction entry).
+        nav_label = RoadOption.LANEFOLLOW
         nav_command = RoadOption.LANEFOLLOW
         self._turn_distance = None
         for wp, cmd in self._wp_buffer:
+            if cmd in (RoadOption.LANEFOLLOW, RoadOption.VOID):
+                continue
+            dist = ego_loc.distance(wp.transform.location)
             if cmd in (
-                RoadOption.LANEFOLLOW,
-                RoadOption.VOID,
+                RoadOption.STRAIGHT,
                 RoadOption.CHANGELANELEFT,
                 RoadOption.CHANGELANERIGHT,
             ):
+                # Record as nav label if it's the first actionable command
+                if nav_label == RoadOption.LANEFOLLOW:
+                    if dist < self.config.turn_anticipation_distance:
+                        nav_label = cmd
+                # Keep scanning for LEFT/RIGHT behind it
                 continue
-            if cmd == RoadOption.STRAIGHT:
-                # STRAIGHT through a junction — skip it but keep
-                # scanning for a LEFT/RIGHT behind it.
-                continue
-            dist = ego_loc.distance(wp.transform.location)
+            # cmd is LEFT or RIGHT
             if dist < self.config.turn_anticipation_distance:
                 nav_command = cmd
                 self._turn_distance = dist
-            # Found a LEFT/RIGHT (or it was beyond anticipation
-            # distance).  Either way, stop scanning here.
+                # If no earlier actionable command was recorded, this
+                # LEFT/RIGHT is the nav label too
+                if nav_label == RoadOption.LANEFOLLOW:
+                    nav_label = cmd
             break
 
         # --- Pick target waypoint at desired follow distance ---
@@ -868,7 +878,7 @@ class PrivilegedExpert:
                 target_wp = wp
                 break
 
-        return target_wp, nav_command
+        return target_wp, nav_label, nav_command
 
     # ------------------------------------------------------------------
     # Internal — speed planning
