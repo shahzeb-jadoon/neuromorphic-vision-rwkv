@@ -41,7 +41,9 @@ echo "============================================================"
 # --- Configuration ---
 # Towns to collect from (must match configs/collection.yaml towns list).
 # Town02 is held out for evaluation — do NOT add it here.
-TOWNS=("Town01" "Town03" "Town04" "Town05" "Town06" "Town07" "Town10" "Town12" "Town15")
+# Town10HD is the correct CARLA 0.9.16 name for Town10.
+# Town06, Town07, Town12, Town15 require the AdditionalMaps package.
+TOWNS=("Town01" "Town03" "Town04" "Town05" "Town06" "Town07" "Town10HD" "Town12" "Town15")
 
 # Episodes per (town, weather, traffic-density) combination.
 # Weathers (10) and traffic densities (3) come from collection.yaml
