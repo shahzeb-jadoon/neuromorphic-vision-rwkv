@@ -126,11 +126,12 @@ class ExpertConfig:
     stop_sign_comfort_decel: float = 1.5  # m/s² — comfortable deceleration
     stop_sign_creep_speed: float = 8.0  # km/h — Phase 1 floor; car creeps until trigger volume
     stop_sign_wait_ticks: int = 40  # ~2 s at 20 Hz — minimum pause
-    stop_sign_route_proximity: float = 3.5  # metres — 2D horizontal sign-to-route threshold
+    stop_sign_route_proximity: float = 2.5  # metres — 2D horizontal TV-center-to-route threshold
+    stop_sign_commit_radius: float = 4.0  # metres — 2D ego-to-TV-center triggers Phase 2 full stop
 
     # --- Yield signs ---
     yield_scan_distance: float = 35.0  # metres — start checking for yield ahead
-    yield_route_proximity: float = 4.0  # metres — max sign-to-route 2D distance
+    yield_route_proximity: float = 2.5  # metres — max TV-center-to-route 2D distance
     yield_slow_speed: float = 12.0  # km/h — creep speed while checking for conflicts
     yield_comfort_decel: float = 1.5  # m/s² — comfortable deceleration for yield
     yield_conflict_distance: float = 25.0  # metres — scan radius for cross-traffic
@@ -1585,52 +1586,58 @@ class PrivilegedExpert:
             if dist > cfg.stop_sign_brake_distance:
                 continue
 
-            # Phase 2: Trigger Volume Commitment (Perfect lane matching)
-            if ss.trigger_volume.contains(ego_loc, ss.get_transform()):
+            # Compute trigger volume center in world space.
+            # The TV center sits on (or very near) the road surface
+            # in both Town03 (road-painted stops) and Town07
+            # (pole-mounted signs with road-level trigger volumes).
+            ss_tf = ss.get_transform()
+            tv = ss.trigger_volume
+            tv_world = ss_tf.transform(tv.location)
+
+            # Route-proximity check — 2D horizontal distance from the
+            # trigger volume center to our planned route.  Using the
+            # TV center (not the pole) and 2D (ignoring z) avoids
+            # false positives from adjacent-lane signs and false
+            # rejections from curb/elevation z-offsets.
+            #
+            # This check runs BEFORE Phase 2 commitment so that
+            # adjacent-lane signs (e.g. opposite-direction road-painted
+            # stops in Town03) cannot trigger a full-stop commitment.
+            sign_near_route = False
+            for rwp, _ in self._wp_buffer:
+                rwp_loc = rwp.transform.location
+                dx_t = tv_world.x - rwp_loc.x
+                dy_t = tv_world.y - rwp_loc.y
+                tv_dist_2d = math.sqrt(dx_t * dx_t + dy_t * dy_t)
+                if tv_dist_2d < cfg.stop_sign_route_proximity:
+                    sign_near_route = True
+                    break
+            if not sign_near_route:
+                continue
+
+            # Phase 2: Commitment — ego is close to the stop line.
+            # Two complementary checks (either triggers commitment):
+            #  1. trigger_volume.contains() — works for road-surface
+            #     stops (Town03) where the car drives over the TV box.
+            #  2. 2D distance from ego to TV center — works for pole-
+            #     mounted signs (Town07) where the TV box is too small
+            #     for contains() but the center is on the road surface.
+            ego_to_tv_2d = math.sqrt(
+                (ego_loc.x - tv_world.x) ** 2 + (ego_loc.y - tv_world.y) ** 2
+            )
+            if (
+                ego_to_tv_2d < cfg.stop_sign_commit_radius
+                or ss.trigger_volume.contains(ego_loc, ss_tf)
+            ):
                 self._stop_sign_active = ss.id
                 self._stop_sign_wait_counter = 0
                 return 0.0, True
 
             # Phase 1: Horizon Scan (Smooth approach)
-            # Ahead check
+            # Ahead check — only approach signs in front of us.
             dx = ss_loc.x - ego_loc.x
             dy = ss_loc.y - ego_loc.y
             if fwd.x * dx + fwd.y * dy <= 0:
-                continue
-
-            # Route-proximity check — 2D horizontal distance from
-            # both the sign pole AND the trigger volume center to
-            # our planned route.  Using 2D (ignoring z) avoids false
-            # rejections from curb/elevation offsets between the sign
-            # and road-surface waypoints.
-            #
-            # We check two reference points:
-            #  1. Sign pole location (ss_loc) — works for road-surface
-            #     stop markings (e.g. Town03).
-            #  2. Trigger volume center in world space — works for
-            #     pole-mounted signs (e.g. Town07) where the trigger
-            #     volume may be on the road even though the pole isn't.
-            ss_tf = ss.get_transform()
-            tv = ss.trigger_volume
-            # Trigger volume location is in actor-local space; convert
-            # to world coordinates.
-            tv_world = ss_tf.transform(tv.location)
-
-            sign_near_route = False
-            for rwp, _ in self._wp_buffer:
-                rwp_loc = rwp.transform.location
-                # 2D horizontal distance (pole)
-                dx_p = ss_loc.x - rwp_loc.x
-                dy_p = ss_loc.y - rwp_loc.y
-                pole_dist_2d = math.sqrt(dx_p * dx_p + dy_p * dy_p)
-                # 2D horizontal distance (trigger volume center)
-                dx_t = tv_world.x - rwp_loc.x
-                dy_t = tv_world.y - rwp_loc.y
-                tv_dist_2d = math.sqrt(dx_t * dx_t + dy_t * dy_t)
-                if min(pole_dist_2d, tv_dist_2d) < cfg.stop_sign_route_proximity:
-                    sign_near_route = True
-                    break
-            if not sign_near_route:
                 continue
 
             if best_dist is None or dist < best_dist:
@@ -1725,13 +1732,19 @@ class PrivilegedExpert:
             if fwd.x * dx + fwd.y * dy <= 0:
                 continue
 
-            # Route-proximity check — 2D horizontal distance to filter
-            # signs on opposite or adjacent roads.
+            # Route-proximity check — use trigger volume center (road-
+            # level) instead of pole location, same approach as stop
+            # signs.  Yield poles sit 2.5–5.4 m from the road in Town07,
+            # so pole-based proximity misses many signs.
+            ys_tf = ys.get_transform()
+            tv = ys.trigger_volume
+            tv_world = ys_tf.transform(tv.location)
+
             sign_near_route = False
             for rwp, _ in self._wp_buffer:
                 rwp_loc = rwp.transform.location
-                dx_r = ys_loc.x - rwp_loc.x
-                dy_r = ys_loc.y - rwp_loc.y
+                dx_r = tv_world.x - rwp_loc.x
+                dy_r = tv_world.y - rwp_loc.y
                 horiz_dist = math.sqrt(dx_r * dx_r + dy_r * dy_r)
                 if horiz_dist < cfg.yield_route_proximity:
                     sign_near_route = True
