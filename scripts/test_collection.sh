@@ -45,7 +45,7 @@ echo ""
 python scripts/collect_data.py \
     --config configs/collection.yaml \
     --output "${OUTPUT_DIR}" \
-    --town Town07 Town10HD \
+    --town Town03 Town04 Town05 Town06 Town07 Town10HD \
     --weather ClearNoon \
     --episodes 1 \
     --spectator \
