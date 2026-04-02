@@ -612,7 +612,7 @@ class PrivilegedExpert:
     # Internal — route buffer
     # ------------------------------------------------------------------
 
-    def _fill_buffer(self) -> None:
+    def _fill_buffer(self, transform: "carla.Transform" | None = None) -> None:
         """Refill the waypoint look-ahead buffer from the route.
 
         When the planned route is exhausted but the buffer is below
@@ -635,7 +635,7 @@ class PrivilegedExpert:
         # and degrades SAT coverage, curvature estimation, and follow-
         # distance adaptation.  Detect these large gaps and fill them
         # with intermediate waypoints queried from the HD map.
-        self._fill_junction_gaps()
+        self._fill_junction_gaps(transform)
 
         # --- Route-end extension ---
         # If the planned route is consumed and the buffer is running
@@ -657,7 +657,10 @@ class PrivilegedExpert:
             except (AttributeError, RuntimeError):
                 pass  # graceful degradation if map query fails
 
-    def _fill_junction_gaps(self) -> None:
+        if transform is not None:
+            self._refresh_tl_stop_loc(transform)
+
+    def _fill_junction_gaps(self, transform: "carla.Transform" | None = None) -> None:
         """Insert intermediate waypoints where the buffer has large gaps.
 
         The ``GlobalRoutePlanner`` emits only two waypoints for
@@ -808,6 +811,9 @@ class PrivilegedExpert:
             for entry in rebuilt[:maxlen]:
                 self._wp_buffer.append(entry)
 
+        if transform is not None:
+            self._refresh_tl_stop_loc(transform)
+
     def _advance_route(self, transform: "carla.Transform") -> None:
         """Pop consumed waypoints (closer than *min_follow_distance* or behind ego)."""
         location = transform.location
@@ -826,7 +832,7 @@ class PrivilegedExpert:
                 self._wp_buffer.popleft()
             else:
                 break
-        self._fill_buffer()
+        self._fill_buffer(transform)
 
     def _get_target(
         self,
@@ -1531,6 +1537,19 @@ class PrivilegedExpert:
         except (AttributeError, RuntimeError):
             pass
         return None, None
+
+    def _refresh_tl_stop_loc(self, transform: "carla.Transform") -> None:
+        """Refresh the stored stop-line location after buffer changes."""
+        if self._tl_waiting is None:
+            return
+
+        tl_actor = self.world.get_actor(self._tl_waiting)
+        if tl_actor is None:
+            self._tl_stop_loc = None
+            return
+
+        _, stop_loc = self._stop_line_distance(tl_actor, transform)
+        self._tl_stop_loc = stop_loc
 
     # --- Stop sign detection --------------------------------------------
 
