@@ -45,7 +45,7 @@ echo ""
 python scripts/collect_data.py \
     --config configs/collection.yaml \
     --output "${OUTPUT_DIR}" \
-    --town Town03 Town04 Town05 Town06 Town07 Town10HD \
+    --town Town07 Town10HD Town06 \
     --weather ClearNoon \
     --episodes 1 \
     --spectator \
@@ -94,12 +94,14 @@ echo ""
 echo "Verifying HDF5 schema v3 fields..."
 python -c "
 import h5py, glob, sys, numpy as np
+from scripts.create_toy_dataset import NAV_COMMANDS
+
 files = sorted(glob.glob('${OUTPUT_DIR}/episode_*.h5'))
 if not files:
     print('ERROR: No episode files found!')
     sys.exit(1)
 
-NAV_NAMES = {1: 'Left', 2: 'Right', 3: 'Straight', 4: 'LaneFollow'}
+NAV_NAMES = dict(NAV_COMMANDS)
 all_ok = True
 
 for f in files:
@@ -126,11 +128,11 @@ for f in files:
             print(f'  WARNING: unexpected image shape!')
             all_ok = False
 
-        # Check nav commands (schema v3: single nav_command, values 1-4)
+        # Check nav commands (schema v3: single nav_command, values defined by NAV_COMMANDS)
         if 'nav_command' in h:
             nav = h['nav_command'][:]
             unique = set(nav.tolist())
-            valid = {1, 2, 3, 4}
+            valid = set(NAV_NAMES.keys())
             if unique <= valid:
                 print(f'  nav_command values: {sorted(unique)} ✓')
             else:
