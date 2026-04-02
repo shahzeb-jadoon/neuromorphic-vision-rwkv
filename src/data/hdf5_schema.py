@@ -74,6 +74,8 @@ WP_BUFFER_SIZE = "wp_buffer_size"  # (N,) int32
 WP_BUFFER_HEAD_DIST = "wp_buffer_head_dist"  # (N,) float32 metres
 SAT_DETECTIONS = "sat_detections"  # (N,) int32
 LATERAL_DETECTIONS = "lateral_detections"  # (N,) int32
+GAP_FILL_DIVERGED = "gap_fill_diverged"  # (N,) int32 count of junction gaps that diverged
+ROUTE_COMPLETION = "route_completion"  # (N,) float32 route progress 0.0–1.0
 
 # --- Metadata group and attribute names ---
 METADATA_GROUP = "metadata"
