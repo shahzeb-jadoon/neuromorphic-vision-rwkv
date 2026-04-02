@@ -440,6 +440,8 @@ class _StreamingEpisodeWriter:
             int(RoadOption.LEFT): "Left",
             int(RoadOption.RIGHT): "Right",
             int(RoadOption.STRAIGHT): "Straight",
+            int(RoadOption.CHANGELANELEFT): "ChangeLaneLeft",
+            int(RoadOption.CHANGELANERIGHT): "ChangeLaneRight",
         }
         # Re-open briefly to read the trimmed nav dataset
         with h5py.File(self.filepath, "r") as f:
