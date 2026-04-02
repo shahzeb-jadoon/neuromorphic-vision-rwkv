@@ -255,6 +255,12 @@ class _StreamingEpisodeWriter:
         self._ds_lat = self._h5.create_dataset(
             S.LATERAL_DETECTIONS, shape=(max_frames,), dtype=np.int32, maxshape=(None,)
         )
+        self._ds_gap_fill_diverged = self._h5.create_dataset(
+            S.GAP_FILL_DIVERGED, shape=(max_frames,), dtype=np.int32, maxshape=(None,)
+        )
+        self._ds_route_completion = self._h5.create_dataset(
+            S.ROUTE_COMPLETION, shape=(max_frames,), dtype=np.float32, maxshape=(None,)
+        )
 
         # Variable-length string datasets for actor JSON
         dt_str = h5py.string_dtype()
@@ -314,6 +320,8 @@ class _StreamingEpisodeWriter:
         self._ds_wpbh[i] = info.wp_buffer_head_dist
         self._ds_sat[i] = info.sat_detections
         self._ds_lat[i] = info.lateral_detections
+        self._ds_gap_fill_diverged[i] = info.gap_fill_diverged
+        self._ds_route_completion[i] = info.route_completion
         self._ds_nveh[i] = json.dumps(info.nearby_vehicles)
         self._ds_nped[i] = json.dumps(info.nearby_pedestrians)
 
@@ -361,6 +369,8 @@ class _StreamingEpisodeWriter:
             self._ds_wpbh,
             self._ds_sat,
             self._ds_lat,
+            self._ds_gap_fill_diverged,
+            self._ds_route_completion,
             self._ds_nveh,
             self._ds_nped,
         ]:
