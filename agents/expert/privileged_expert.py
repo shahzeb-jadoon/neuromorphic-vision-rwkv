@@ -492,7 +492,7 @@ class PrivilegedExpert:
         nearby_vehicles = self._detect_vehicles(transform)
         nearby_pedestrians = self._detect_pedestrians(transform)
         lead_distance, lead_speed, lead_lateral = self._lead_vehicle_info(nearby_vehicles)
-        ped_dist = self._closest_pedestrian_distance(nearby_pedestrians)
+        ped_dist = self._closest_pedestrian_distance(nearby_pedestrians, transform)
 
         # --- 4.  Target speed & driving mode ---
         target_speed, mode = self._plan_speed(
@@ -2330,6 +2330,7 @@ class PrivilegedExpert:
     def _closest_pedestrian_distance(
         self,
         nearby: List[Dict[str, Any]],
+        transform: "carla.Transform",
     ) -> float | None:
         """Distance to the closest pedestrian hazard ahead **in our lane corridor**.
 
@@ -2341,7 +2342,7 @@ class PrivilegedExpert:
         This enables early braking for pedestrians about to step off
         the pavement into the vehicle's path.
         """
-        half_w = self.config.pedestrian_lane_half_width
+        half_w = self._dynamic_half_lane(transform)
         for p in nearby:
             current_in_lane = p["is_ahead"] and abs(p["lateral"]) < half_w
             predicted_in_lane = p.get("predicted_ahead", False) and abs(
