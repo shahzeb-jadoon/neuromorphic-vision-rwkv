@@ -491,7 +491,7 @@ class PrivilegedExpert:
         ys_distance, ys_has_conflict = self._check_yield_signs(transform, speed_kmh)
         nearby_vehicles = self._detect_vehicles(transform)
         nearby_pedestrians = self._detect_pedestrians(transform)
-        lead_distance, lead_speed = self._lead_vehicle_info(nearby_vehicles)
+        lead_distance, lead_speed, lead_lateral = self._lead_vehicle_info(nearby_vehicles)
         ped_dist = self._closest_pedestrian_distance(nearby_pedestrians)
 
         # --- 4.  Target speed & driving mode ---
@@ -504,6 +504,7 @@ class PrivilegedExpert:
             ss_committed,
             lead_distance,
             lead_speed,
+            lead_lateral,
             ped_dist,
             base_target,
             ys_distance,
@@ -930,6 +931,7 @@ class PrivilegedExpert:
         ss_committed: bool,
         lead_distance: float | None,
         lead_speed: float | None,
+        lead_lateral: float | None,
         ped_dist: float | None,
         base_target: float | None = None,
         ys_distance: float | None = None,
@@ -1124,8 +1126,12 @@ class PrivilegedExpert:
 
         if lead_distance is not None:
             if mode == DrivingMode.TURNING and lead_speed is not None and lead_speed < 0.5:
-                # During a turn, a stopped lead vehicle should not deadlock us.
-                lead_distance = None
+                # During turns, only treat near-centerline stopped vehicles as blockers.
+                # Off-axis stopped vehicles (adjacent lane/shoulder) should not deadlock us.
+                ego_half_width = self.vehicle.bounding_box.extent.y
+                turning_block_lateral = ego_half_width + 0.05
+                if lead_lateral is not None and abs(lead_lateral) > turning_block_lateral:
+                    lead_distance = None
 
         if lead_distance is not None:
             if lead_distance < dyn_emergency:
@@ -2268,8 +2274,8 @@ class PrivilegedExpert:
     def _lead_vehicle_info(
         self,
         nearby: List[Dict[str, Any]],
-    ) -> Tuple[float | None, float | None]:
-        """Return distance and speed of the closest vehicle ahead in our lane.
+    ) -> Tuple[float | None, float | None, float | None]:
+        """Return distance, speed, and lateral offset of closest vehicle ahead.
 
         A vehicle is considered "in lane" if **either** the OBB/SAT
         corridor overlap test says so, **or** its centre-point lateral
@@ -2295,8 +2301,8 @@ class PrivilegedExpert:
             obb_flag = v.get("obb_in_lane", False)
             lateral_flag = abs(v["lateral"]) < self._cached_half_lane
             if obb_flag or lateral_flag:
-                return v["distance"], v.get("speed_kmh")
-            return None, None
+                return v["distance"], v.get("speed_kmh"), v.get("lateral")
+        return None, None, None
 
     def _dynamic_half_lane(self, transform: "carla.Transform") -> float:
         """Compute corridor half-width from the current lane width.
