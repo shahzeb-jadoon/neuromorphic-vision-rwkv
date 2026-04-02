@@ -192,6 +192,8 @@ class _FakeFrameInfo:
         self.wp_buffer_head_dist = 3.5
         self.sat_detections = 0
         self.lateral_detections = 0
+        self.gap_fill_diverged = 0
+        self.gap_fill_rpcs = 0
         self.current_speed = speed_kmh
         self.route_completion = 0.5
 
