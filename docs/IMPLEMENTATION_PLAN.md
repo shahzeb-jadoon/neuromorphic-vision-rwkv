@@ -53,7 +53,7 @@ The issues are grouped by risk level. Work through tier by tier, running
 
 | # | Task | Effort | Issue File | Description |
 |---|------|--------|------------|-------------|
-| F1 | Fix `stop_sign_route_proximity` | 5 min | [ISSUE-05](issues/ISSUE-05-stop-sign-proximity.md) | Change `2.5` → `4.0` in `configs/collection.yaml`. Fixes missed stop signs on curved approaches. |
+| F1 | Fix `stop_sign_route_proximity` | 5 min | [ISSUE-05](issues/ISSUE-05-stop-sign-proximity.md) | **User-deferred (2026-04-02):** keep `2.5` to avoid adjacent-lane false stops observed when value > 3.0. |
 | F2 | Fix `timeout_duration` | 2 min | [ISSUE-06](issues/ISSUE-06-monitoring-instrumentation.md) | Change `75` → `80` in `configs/collection.yaml`. Eliminates spurious timeouts. |
 | F3 | Write `gap_fill_diverged` to HDF5 | 15 min | [ISSUE-01](issues/ISSUE-01-junction-waypoints.md) | `FrameInfo` has the field; `expert_collector.py` never writes it. Add 2 lines to dataset creation loop. Required to verify all junction fixes. |
 | F4 | Write `route_completion` to HDF5 | 10 min | [ISSUE-01](issues/ISSUE-01-junction-waypoints.md) | Computed as `_route_index / _route_length` but never persisted. Enables post-hoc correlation of bug timing with route stage. |

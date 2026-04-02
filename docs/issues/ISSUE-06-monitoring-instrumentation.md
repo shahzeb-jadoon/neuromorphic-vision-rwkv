@@ -21,6 +21,13 @@ Four small instrumentation and configuration problems grouped here because they 
 
 *(F1 is documented in full in [ISSUE-05](ISSUE-05-stop-sign-proximity.md). Included in the table above for completeness.)*
 
+### User decision (2026-04-02)
+
+F1 is intentionally deferred for this project branch. The user chose to keep
+`stop_sign_route_proximity=2.5` after repeated observations that values above
+3.0 can trigger invalid stops for adjacent lanes. Treat this as an explicit
+scope decision, not an unimplemented oversight.
+
 ---
 
 ## F2 — Timeout Duration (75 s → 80 s)
