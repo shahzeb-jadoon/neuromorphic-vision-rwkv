@@ -893,6 +893,12 @@ class PrivilegedExpert:
                     nav_label = cmd
             break
 
+        if nav_command in (RoadOption.LEFT, RoadOption.RIGHT) and nav_label in (
+            RoadOption.CHANGELANELEFT,
+            RoadOption.CHANGELANERIGHT,
+        ):
+            nav_label = RoadOption.LANEFOLLOW
+
         # --- Pick target waypoint at desired follow distance ---
         # Adapt follow distance smoothly using EMA-smoothed curvature.
         # Curved roads tagged LANEFOLLOW still need a shorter look-ahead
