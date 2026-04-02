@@ -115,7 +115,7 @@ class ExpertConfig:
     pedestrian_hazard_distance: float = 15.0
     pedestrian_emergency_distance: float = 5.0
     lane_half_width: float = 2.5  # metres — lateral fallback (used only when ego_wp unavailable)
-    corridor_margin_max: float = 0.1  # metres — max SAT corridor bleed into adjacent lane
+    corridor_margin_max: float = 0.0  # metres — max SAT corridor bleed into adjacent lane
     corridor_margin_min: float = 0.0  # metres — min SAT corridor bleed into adjacent lane
     corridor_max_vertical_separation: float = 2.5  # metres — reject SAT hits on stacked roads
     pedestrian_lane_half_width: float = 3.0  # metres — wider lateral band for pedestrians
@@ -1107,11 +1107,21 @@ class PrivilegedExpert:
             cfg.vehicle_emergency_distance,
             speed_ms * cfg.vehicle_emergency_time,
         )
+        tl_forces_stop = (
+            tl_state in (carla.TrafficLightState.Red, carla.TrafficLightState.Yellow)
+            and tl_distance is not None
+            and 0 < tl_distance < cfg.traffic_light_brake_distance
+            and not self._tl_proceed_committed
+        )
 
         if lead_distance is not None:
             if lead_distance < dyn_emergency:
                 mode = DrivingMode.EMERGENCY_STOP
                 target = 0.0
+            elif tl_forces_stop:
+                # Red/yellow traffic lights outrank lead-vehicle following.
+                # Keep the traffic-light stop target already computed above.
+                pass
             elif lead_distance < dyn_hazard:
                 mode = DrivingMode.VEHICLE_FOLLOWING
                 # Kinematic braking profile: v = sqrt(2 * a * d)
