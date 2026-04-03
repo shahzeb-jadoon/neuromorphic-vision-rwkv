@@ -104,6 +104,8 @@ class ExpertConfig:
     # --- Safety thresholds ---
     traffic_light_brake_distance: float = 80.0  # metres — start braking
     traffic_light_stop_distance: float = 6.0  # metres — full stop
+    traffic_light_route_match_distance: float = 6.0  # metres — AWP-to-route tolerance for Tier 3
+    traffic_light_route_match_yaw_deg: float = 40.0  # degrees — AWP/route heading alignment gate
     tl_comfort_decel: float = 1.5  # m/s² — comfortable deceleration for TL
     tl_clearance_margin: float = 8.0  # m — must clear stop line by this to commit on yellow
     turn_comfort_decel: float = 1.5  # m/s² — gentler braking for turn approach
@@ -354,6 +356,7 @@ class PrivilegedExpert:
         self._tl_waiting: int | None = None  # actor-id of TL we're watching/waiting for
         self._tl_stop_loc = None  # stored carla.Location of the stop-line waypoint
         self._tl_proceed_committed: bool = False  # yellow dilemma commitment
+        self._route_tl_candidates: set[int] = set()  # Tier-3 pre-associated TL ids
 
         # Smoothed curvature estimate (EMA)
         self._smoothed_curvature: float = 0.0
@@ -423,6 +426,7 @@ class PrivilegedExpert:
         self.mode = DrivingMode.FOLLOW_LANE
         self._tl_waiting = None
         self._tl_stop_loc = None
+        self._route_tl_candidates.clear()
         self._cleared_stop_signs.clear()
         self._stop_sign_wait_counter = 0
         self._stop_sign_active = None
@@ -434,6 +438,12 @@ class PrivilegedExpert:
         self._gap_fill_diverged = 0
         self._gap_fill_budget_exhausted = False
         self._gap_fill_tried = set()
+
+        try:
+            self._refresh_route_tl_candidates(self.vehicle.get_transform())
+        except RuntimeError:
+            # World not ready yet — cache will be refreshed in run_step.
+            self._route_tl_candidates.clear()
 
     def set_destination(self, start: "carla.Location", end: "carla.Location") -> None:
         """Plan and load a route from *start* to *end*."""
@@ -660,6 +670,7 @@ class PrivilegedExpert:
 
         if transform is not None:
             self._refresh_tl_stop_loc(transform)
+            self._refresh_route_tl_candidates(transform)
 
     def _fill_junction_gaps(self, transform: "carla.Transform" | None = None) -> None:
         """Insert intermediate waypoints where the buffer has large gaps.
@@ -1452,10 +1463,24 @@ class PrivilegedExpert:
         # previous single-element look-ahead only matched TLs on
         # the ego's current or next road segment (~4-12 m range).
         route_road_ids: set[int] = {ego_wp.road_id}
+        route_lane_keys: set[tuple[int, int]] = {(ego_wp.road_id, ego_wp.lane_id)}
         for _bwp, _bcmd in self._wp_buffer:
             route_road_ids.add(_bwp.road_id)
+            route_lane_keys.add((_bwp.road_id, _bwp.lane_id))
 
-        for tl in self.world.get_actors().filter("*traffic_light*"):
+        match_dist = self.config.traffic_light_route_match_distance
+        match_yaw = self.config.traffic_light_route_match_yaw_deg
+
+        if self._route_tl_candidates:
+            candidate_tls = [
+                self.world.get_actor(tl_id)
+                for tl_id in self._route_tl_candidates
+            ]
+            tls = [tl for tl in candidate_tls if tl is not None]
+        else:
+            tls = self.world.get_actors().filter("*traffic_light*")
+
+        for tl in tls:
             tl_loc = tl.get_transform().location
             pole_dist = ego_loc.distance(tl_loc)
             if pole_dist > pole_cutoff:
@@ -1474,36 +1499,38 @@ class PrivilegedExpert:
 
             try:
                 for awp in tl.get_affected_lane_waypoints():
-                    if awp.lane_id == ego_wp.lane_id and (
-                        awp.road_id in route_road_ids
-                    ):
+                    if awp.road_id not in route_road_ids:
+                        continue
+
+                    lane_semantic_match = (
+                        (awp.road_id, awp.lane_id) in route_lane_keys
+                        or (awp.road_id, awp.lane_id - 1) in route_lane_keys
+                        or (awp.road_id, awp.lane_id + 1) in route_lane_keys
+                    )
+                    if not lane_semantic_match:
+                        continue
+
                         # Verify the stop line is AHEAD of us, not behind.
-                        awp_loc = awp.transform.location
-                        sdx = awp_loc.x - ego_loc.x
-                        sdy = awp_loc.y - ego_loc.y
-                        if fwd.x * sdx + fwd.y * sdy <= 0:
-                            continue  # stop line is behind us
+                    awp_loc = awp.transform.location
+                    sdx = awp_loc.x - ego_loc.x
+                    sdy = awp_loc.y - ego_loc.y
+                    if fwd.x * sdx + fwd.y * sdy <= 0:
+                        continue  # stop line is behind us
 
-                        # Route-proximity + heading check: the stop-line
-                        # waypoint must be within 4 m of a route waypoint
-                        # AND heading-aligned (< 40°).  Proximity alone
-                        # fails in Town03 where perpendicular stop-lines
-                        # sit < 4 m from route waypoints at narrow junctions.
-                        # Heading alignment rejects them because the
-                        # perpendicular lane's yaw differs by ~90°.
-                        awp_yaw = awp.transform.rotation.yaw
-                        on_route = any(
-                            awp_loc.distance(rwp.transform.location) < 4.0
-                            and abs((awp_yaw - rwp.transform.rotation.yaw + 180) % 360 - 180) < 40.0
-                            for rwp, _ in self._wp_buffer
-                        )
-                        if not on_route:
-                            continue
+                    # Route-proximity + heading check.
+                    awp_yaw = awp.transform.rotation.yaw
+                    on_route = any(
+                        awp_loc.distance(rwp.transform.location) < match_dist
+                        and abs((awp_yaw - rwp.transform.rotation.yaw + 180) % 360 - 180) < match_yaw
+                        for rwp, _ in self._wp_buffer
+                    )
+                    if not on_route:
+                        continue
 
-                        affects_us = True
-                        stop_dist = ego_loc.distance(awp_loc)
-                        stop_loc_candidate = awp_loc
-                        break
+                    affects_us = True
+                    stop_dist = ego_loc.distance(awp_loc)
+                    stop_loc_candidate = awp_loc
+                    break
             except (AttributeError, RuntimeError):
                 # Fallback for older CARLA builds.
                 tl_wp = self.map.get_waypoint(tl_loc)
@@ -1578,6 +1605,62 @@ class PrivilegedExpert:
 
         _, stop_loc = self._stop_line_distance(tl_actor, transform)
         self._tl_stop_loc = stop_loc
+
+    def _refresh_route_tl_candidates(self, transform: "carla.Transform") -> None:
+        """Pre-associate traffic lights that plausibly affect the route buffer.
+
+        Tier-3 detection still does full ahead/distance/state checks; this cache
+        is only a candidate pre-filter to reduce misses on left-turn geometries.
+        """
+        ego_wp = self.map.get_waypoint(transform.location)
+        if ego_wp is None:
+            self._route_tl_candidates.clear()
+            return
+
+        route_refs: list[tuple[Any, float]] = []
+        route_lane_keys: set[tuple[int, int]] = set()
+        route_refs.append((ego_wp, ego_wp.transform.rotation.yaw))
+        route_lane_keys.add((ego_wp.road_id, ego_wp.lane_id))
+        for rwp, _ in self._wp_buffer:
+            route_refs.append((rwp, rwp.transform.rotation.yaw))
+            route_lane_keys.add((rwp.road_id, rwp.lane_id))
+
+        max_dist = self.config.traffic_light_route_match_distance
+        max_yaw = self.config.traffic_light_route_match_yaw_deg
+        candidates: set[int] = set()
+
+        for tl in self.world.get_actors().filter("*traffic_light*"):
+            try:
+                awps = tl.get_affected_lane_waypoints()
+            except (AttributeError, RuntimeError):
+                continue
+
+            matched = False
+            for awp in awps:
+                lane_semantic_match = (
+                    (awp.road_id, awp.lane_id) in route_lane_keys
+                    or (awp.road_id, awp.lane_id - 1) in route_lane_keys
+                    or (awp.road_id, awp.lane_id + 1) in route_lane_keys
+                )
+                if not lane_semantic_match:
+                    continue
+
+                awp_loc = awp.transform.location
+                awp_yaw = awp.transform.rotation.yaw
+                for rwp, rwp_yaw in route_refs:
+                    if awp.road_id != rwp.road_id:
+                        continue
+                    yaw_diff = abs((awp_yaw - rwp_yaw + 180) % 360 - 180)
+                    if yaw_diff >= max_yaw:
+                        continue
+                    if awp_loc.distance(rwp.transform.location) < max_dist:
+                        candidates.add(tl.id)
+                        matched = True
+                        break
+                if matched:
+                    break
+
+        self._route_tl_candidates = candidates
 
     # --- Stop sign detection --------------------------------------------
 
