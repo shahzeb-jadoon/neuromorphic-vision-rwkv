@@ -371,6 +371,7 @@ class PrivilegedExpert:
 
         # Distance to the upcoming turn waypoint (set by _get_target)
         self._turn_distance: float | None = None
+        self._prev_lane_wp = None
 
         # Stop sign state
         self._cleared_stop_signs: set[int] = set()
@@ -438,6 +439,7 @@ class PrivilegedExpert:
         self._gap_fill_diverged = 0
         self._gap_fill_budget_exhausted = False
         self._gap_fill_tried = set()
+        self._prev_lane_wp = None
 
         try:
             self._refresh_route_tl_candidates(self.vehicle.get_transform())
@@ -849,7 +851,7 @@ class PrivilegedExpert:
     def _get_target(
         self,
         transform: "carla.Transform",
-    ) -> Tuple["carla.Waypoint", RoadOption]:
+    ) -> Tuple["carla.Waypoint", RoadOption, RoadOption]:
         """Return the target waypoint and the current nav command.
 
         Navigation command logic:
@@ -858,11 +860,13 @@ class PrivilegedExpert:
             command so the model (and the speed planner) can anticipate
             the upcoming turn.  Otherwise report LANEFOLLOW.
         """
-        if not self._wp_buffer:
-            wp = self.map.get_waypoint(transform.location)
-            return wp, RoadOption.LANEFOLLOW
-
         ego_loc = transform.location
+        ego_wp = self.map.get_waypoint(ego_loc)
+
+        if not self._wp_buffer:
+            wp = ego_wp if ego_wp is not None else self.map.get_waypoint(transform.location)
+            self._prev_lane_wp = wp
+            return wp, RoadOption.LANEFOLLOW, RoadOption.LANEFOLLOW
 
         # --- Determine nav command with anticipation ---
         # Two separate outputs:
@@ -910,6 +914,37 @@ class PrivilegedExpert:
         ):
             nav_label = RoadOption.LANEFOLLOW
 
+        # F12: physical lane-change override from map lane IDs.
+        # Route labels alone can miss unplanned physical lane shifts.
+        if ego_wp is not None and self._prev_lane_wp is not None:
+            same_road = ego_wp.road_id == self._prev_lane_wp.road_id
+            outside_junction = (not ego_wp.is_junction) and (not self._prev_lane_wp.is_junction)
+            if same_road and outside_junction and ego_wp.lane_id != self._prev_lane_wp.lane_id:
+                moved_left = False
+                moved_right = False
+                try:
+                    left_wp = self._prev_lane_wp.get_left_lane()
+                    right_wp = self._prev_lane_wp.get_right_lane()
+                    if (
+                        left_wp is not None
+                        and left_wp.road_id == ego_wp.road_id
+                        and left_wp.lane_id == ego_wp.lane_id
+                    ):
+                        moved_left = True
+                    if (
+                        right_wp is not None
+                        and right_wp.road_id == ego_wp.road_id
+                        and right_wp.lane_id == ego_wp.lane_id
+                    ):
+                        moved_right = True
+                except RuntimeError:
+                    pass
+
+                if moved_left:
+                    nav_label = RoadOption.CHANGELANELEFT
+                elif moved_right:
+                    nav_label = RoadOption.CHANGELANERIGHT
+
         # --- Pick target waypoint at desired follow distance ---
         # Adapt follow distance smoothly using EMA-smoothed curvature.
         # Curved roads tagged LANEFOLLOW still need a shorter look-ahead
@@ -932,6 +967,7 @@ class PrivilegedExpert:
                 target_wp = wp
                 break
 
+        self._prev_lane_wp = ego_wp if ego_wp is not None else target_wp
         return target_wp, nav_label, nav_command
 
     # ------------------------------------------------------------------
@@ -2447,7 +2483,9 @@ class PrivilegedExpert:
         This enables early braking for pedestrians about to step off
         the pavement into the vehicle's path.
         """
-        half_w = self._dynamic_half_lane(transform)
+        # Hybrid width: keep map-adaptive lane sizing but never below
+        # the fixed 2.5 m floor used by prior tuned behavior.
+        half_w = max(self._dynamic_half_lane(transform), self.config.lane_half_width)
         for p in nearby:
             current_in_lane = p["is_ahead"] and abs(p["lateral"]) < half_w
             predicted_in_lane = p.get("predicted_ahead", False) and abs(
