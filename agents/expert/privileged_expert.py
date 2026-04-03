@@ -1655,19 +1655,60 @@ class PrivilegedExpert:
         """
         try:
             ego_wp = self.map.get_waypoint(transform.location)
+            if ego_wp is None:
+                return None, None
             # Use the vehicle's ACTUAL heading, not the map waypoint
             # yaw.  Inside junctions ego_wp can snap to a cross-street
             # internal road whose yaw is ~90° off from the vehicle's
             # true direction of travel.
             ego_yaw = transform.rotation.yaw
+
+            route_sources = self._route_waypoint_sources()
+            route_lane_keys: set[tuple[int, int]] = {(ego_wp.road_id, ego_wp.lane_id)}
+            route_refs: list[tuple[Any, float]] = [(ego_wp, ego_wp.transform.rotation.yaw)]
+            for rwp, _ in route_sources:
+                route_lane_keys.add((rwp.road_id, rwp.lane_id))
+                route_refs.append((rwp, rwp.transform.rotation.yaw))
+
+            match_dist = self.config.traffic_light_route_match_distance
+            match_yaw = self.config.traffic_light_route_match_yaw_deg
+
             for awp in tl.get_affected_lane_waypoints():
-                if awp.road_id == ego_wp.road_id and awp.lane_id == ego_wp.lane_id:
-                    # Heading gate: reject cross-street TLs whose
-                    # affected waypoint yaw differs by ~90° from ours.
-                    yaw_diff = abs((awp.transform.rotation.yaw - ego_yaw + 180) % 360 - 180)
-                    if yaw_diff > 40.0:
+                lane_semantic_match = (
+                    (awp.road_id, awp.lane_id) in route_lane_keys
+                    or (awp.road_id, awp.lane_id - 1) in route_lane_keys
+                    or (awp.road_id, awp.lane_id + 1) in route_lane_keys
+                )
+
+                # Heading gate: reject cross-street TLs whose
+                # affected waypoint yaw differs by ~90° from ours.
+                awp_yaw = awp.transform.rotation.yaw
+                ego_yaw_diff = abs((awp_yaw - ego_yaw + 180) % 360 - 180)
+                if ego_yaw_diff > 40.0:
+                    continue
+
+                awp_loc = awp.transform.location
+                on_route = any(
+                    awp_loc.distance(rwp.transform.location) < match_dist
+                    and abs((awp_yaw - rwp_yaw + 180) % 360 - 180) < match_yaw
+                    for rwp, rwp_yaw in route_refs
+                )
+                if not on_route:
+                    continue
+
+                # Preserve strong semantic preference but allow very
+                # close geometric fallback at junction seams.
+                near_route = any(
+                    awp_loc.distance(rwp.transform.location) < (0.5 * match_dist)
+                    for rwp, _ in route_refs
+                )
+                if lane_semantic_match or near_route:
+                    # Ensure the stop line is ahead of the ego.
+                    fwd = transform.get_forward_vector()
+                    sdx = awp_loc.x - transform.location.x
+                    sdy = awp_loc.y - transform.location.y
+                    if fwd.x * sdx + fwd.y * sdy <= 0:
                         continue
-                    awp_loc = awp.transform.location
                     return transform.location.distance(awp_loc), awp_loc
         except (AttributeError, RuntimeError):
             pass

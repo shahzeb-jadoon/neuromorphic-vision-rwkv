@@ -252,6 +252,26 @@ def test_refresh_tl_stop_loc_preserves_previous_when_unavailable() -> None:
     assert expert._tl_stop_loc is previous_stop
 
 
+def test_stop_line_distance_matches_route_aware_junction_seam() -> None:
+    expert = _build_expert()
+    ego_wp = _Waypoint(0.0, 0.0, road_id=10, lane_id=1, yaw=0.0)
+    route_wp = _Waypoint(8.0, 0.0, road_id=11, lane_id=1, yaw=0.0)
+    awp = _Waypoint(8.5, 0.0, road_id=11, lane_id=1, yaw=0.0)
+
+    expert.map = SimpleNamespace(get_waypoint=lambda _loc: ego_wp)
+    expert._wp_buffer = deque([(route_wp, RoadOption.LANEFOLLOW)])
+
+    tl_actor = SimpleNamespace(get_affected_lane_waypoints=lambda: [awp])
+    dist, stop_loc = PrivilegedExpert._stop_line_distance(
+        expert,
+        tl_actor,
+        _Transform(_Loc(0.0, 0.0), yaw=0.0),
+    )
+
+    assert dist is not None
+    assert stop_loc is awp.transform.location
+
+
 def test_get_target_overrides_with_physical_lane_change_label() -> None:
     expert = _build_expert()
 
