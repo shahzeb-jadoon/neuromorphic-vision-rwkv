@@ -61,6 +61,10 @@ def _build_expert() -> PrivilegedExpert:
     expert._turn_distance = None
     expert._smoothed_curvature = 0.0
     expert._wp_buffer = deque()
+    expert._route = []
+    expert._route_index = 0
+    expert._route_length = 0
+    expert._route_tl_candidates = set()
     expert._prev_lane_wp = None
     expert._prev_target = 30.0
     expert._cached_half_lane = expert.config.lane_half_width
@@ -129,6 +133,63 @@ def test_plan_speed_stopped_lead_yields_to_red_tl(monkeypatch: MonkeyPatch) -> N
     assert target > 0.0
 
 
+def test_plan_speed_yellow_requires_junction_clearance(monkeypatch: MonkeyPatch) -> None:
+    expert = _build_expert()
+    expert._prev_target = 45.0
+    setattr(expert, "_estimate_junction_clearance_distance", lambda: 80.0)
+
+    fake_tl = SimpleNamespace(Green=1, Yellow=2, Red=3)
+    monkeypatch.setattr(
+        "agents.expert.privileged_expert.carla", SimpleNamespace(TrafficLightState=fake_tl)
+    )
+
+    target, mode = expert._plan_speed(
+        speed_kmh=40.0,
+        nav_command=RoadOption.LANEFOLLOW,
+        tl_state=fake_tl.Yellow,
+        tl_distance=20.0,
+        ss_distance=None,
+        ss_committed=False,
+        lead_distance=None,
+        lead_speed=None,
+        lead_lateral=None,
+        ped_dist=None,
+        base_target=45.0,
+    )
+
+    assert mode == DrivingMode.TRAFFIC_LIGHT_STOP
+    assert target >= 0.0
+
+
+def test_plan_speed_yellow_commit_respects_max_distance(monkeypatch: MonkeyPatch) -> None:
+    expert = _build_expert()
+    expert._prev_target = 60.0
+    setattr(expert, "_estimate_junction_clearance_distance", lambda: 10.0)
+
+    fake_tl = SimpleNamespace(Green=1, Yellow=2, Red=3)
+    monkeypatch.setattr(
+        "agents.expert.privileged_expert.carla", SimpleNamespace(TrafficLightState=fake_tl)
+    )
+
+    target, mode = expert._plan_speed(
+        speed_kmh=60.0,
+        nav_command=RoadOption.LANEFOLLOW,
+        tl_state=fake_tl.Yellow,
+        tl_distance=40.0,
+        ss_distance=None,
+        ss_committed=False,
+        lead_distance=None,
+        lead_speed=None,
+        lead_lateral=None,
+        ped_dist=None,
+        base_target=60.0,
+    )
+
+    assert mode == DrivingMode.TRAFFIC_LIGHT_STOP
+    assert expert._tl_proceed_committed is False
+    assert target < 60.0
+
+
 def test_check_traffic_light_uses_stop_line_not_pole_for_stale_clear() -> None:
     expert = _build_expert()
     expert._tl_waiting = 7
@@ -147,6 +208,48 @@ def test_check_traffic_light_uses_stop_line_not_pole_for_stale_clear() -> None:
     assert dist is not None
     assert round(dist, 1) == 20.0
     assert expert._tl_waiting == 7
+
+
+def test_check_traffic_light_does_not_return_pole_distance_when_stop_line_missing() -> None:
+    expert = _build_expert()
+    expert._tl_waiting = 9
+    setattr(expert, "_tl_stop_loc", None)
+
+    tl_actor = SimpleNamespace(
+        state=3,
+        get_transform=lambda: _Transform(_Loc(10.0, 0.0)),
+    )
+
+    class _Actors:
+        @staticmethod
+        def filter(_pattern: str) -> list[object]:
+            return []
+
+    expert.world = SimpleNamespace(
+        get_actor=lambda _id: tl_actor,
+        get_actors=lambda: _Actors(),
+    )
+
+    state, dist = expert._check_traffic_light(_Transform(_Loc(0.0, 0.0)))
+
+    assert state is None
+    assert dist is None
+    assert expert._tl_waiting == 9
+
+
+def test_refresh_tl_stop_loc_preserves_previous_when_unavailable() -> None:
+    expert = _build_expert()
+    expert._tl_waiting = 21
+    previous_stop = _Loc(30.0, 0.0)
+    setattr(expert, "_tl_stop_loc", previous_stop)
+    setattr(expert, "_stop_line_distance", lambda *_args, **_kwargs: (None, None))
+
+    tl_actor = SimpleNamespace(get_transform=lambda: _Transform(_Loc(80.0, 0.0)))
+    expert.world = SimpleNamespace(get_actor=lambda _id: tl_actor)
+
+    expert._refresh_tl_stop_loc(_Transform(_Loc(0.0, 0.0)))
+
+    assert expert._tl_stop_loc is previous_stop
 
 
 def test_get_target_overrides_with_physical_lane_change_label() -> None:

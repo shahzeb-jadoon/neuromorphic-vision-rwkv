@@ -107,7 +107,14 @@ class ExpertConfig:
     traffic_light_route_match_distance: float = 6.0  # metres — AWP-to-route tolerance for Tier 3
     traffic_light_route_match_yaw_deg: float = 40.0  # degrees — AWP/route heading alignment gate
     tl_comfort_decel: float = 1.5  # m/s² — comfortable deceleration for TL
+    tl_commit_decel: float = 2.8  # m/s² — deceleration threshold for yellow commitment
+    tl_commit_max_stop_distance: float = (
+        25.0  # m — max stop-line distance to allow yellow commitment
+    )
     tl_clearance_margin: float = 8.0  # m — must clear stop line by this to commit on yellow
+    tl_half_junction_clearance_factor: float = (
+        0.5  # require at least half-junction clearance on yellow commit
+    )
     turn_comfort_decel: float = 1.5  # m/s² — gentler braking for turn approach
     vehicle_hazard_distance: float = 25.0  # metres — start slowing (min)
     vehicle_emergency_distance: float = 5.0  # metres — emergency (min)
@@ -117,6 +124,9 @@ class ExpertConfig:
     pedestrian_hazard_distance: float = 15.0
     pedestrian_emergency_distance: float = 5.0
     lane_half_width: float = 2.5  # metres — lateral fallback (used only when ego_wp unavailable)
+    corridor_vehicle_half_width_margin: float = (
+        0.2  # metres — extra lateral margin beyond ego half-width
+    )
     corridor_margin_max: float = 0.0  # metres — max SAT corridor bleed into adjacent lane
     corridor_margin_min: float = 0.0  # metres — min SAT corridor bleed into adjacent lane
     corridor_max_vertical_separation: float = 2.5  # metres — reject SAT hits on stacked roads
@@ -1095,13 +1105,16 @@ class PrivilegedExpert:
                     proceed_yellow = False
                     if tl_state == carla.TrafficLightState.Yellow:
                         d_to_stop = max(tl_distance - effective_tl_stop, 0.0)
-                        min_brake_dist = speed_ms**2 / (2.0 * cfg.tl_comfort_decel)
-                        # Can we clear past the stop line at current speed?
-                        can_clear = (
-                            speed_ms > 0.5
-                            and tl_distance + cfg.tl_clearance_margin < min_brake_dist
+                        min_brake_dist = speed_ms**2 / (2.0 * cfg.tl_commit_decel)
+                        junction_clearance = self._estimate_junction_clearance_distance()
+                        min_clearance = max(
+                            cfg.tl_clearance_margin,
+                            cfg.tl_half_junction_clearance_factor * junction_clearance,
                         )
-                        if d_to_stop < min_brake_dist and can_clear:
+                        within_commit_window = d_to_stop <= cfg.tl_commit_max_stop_distance
+                        # Can we clear past the stop line at current speed?
+                        can_clear = speed_ms > 0.5 and tl_distance + min_clearance < min_brake_dist
+                        if within_commit_window and d_to_stop < min_brake_dist and can_clear:
                             proceed_yellow = True
                             self._tl_proceed_committed = True
 
@@ -1459,8 +1472,9 @@ class PrivilegedExpert:
                             )
                             return tl_actor.state, recovered_stop_dist
                     else:
-                        # Last resort: no stop-line available, keep pole
-                        # fallback to avoid total blindness.
+                        # Stop-line unavailable: do not drive stop behavior
+                        # from pole distance (can place stop on crosswalk).
+                        # Keep memory and defer to Tier 2/3 each tick.
                         dist = ego_loc.distance(tl_loc)
                         dx = tl_loc.x - ego_loc.x
                         dy = tl_loc.y - ego_loc.y
@@ -1477,12 +1491,12 @@ class PrivilegedExpert:
                             self._tl_proceed_committed = False
                         else:
                             logger.debug(
-                                "T1-POLE-FALLBACK: id=%d state=%s pole_dist=%.1f",
+                                "T1-POLE-FALLBACK: id=%d no stop-line, "
+                                "deferring to T2/T3 pole_dist=%.1f",
                                 self._tl_waiting,
-                                tl_actor.state,
                                 dist,
                             )
-                            return tl_actor.state, dist
+                            # Fall through to Tier 2 / Tier 3.
 
         # ---- Tier 2: CARLA built-in (close range) ----
         if self.vehicle.is_at_traffic_light():
@@ -1527,7 +1541,8 @@ class PrivilegedExpert:
         # the ego's current or next road segment (~4-12 m range).
         route_road_ids: set[int] = {ego_wp.road_id}
         route_lane_keys: set[tuple[int, int]] = {(ego_wp.road_id, ego_wp.lane_id)}
-        for _bwp, _bcmd in self._route_waypoint_sources():
+        route_sources = self._route_waypoint_sources()
+        for _bwp, _bcmd in route_sources:
             route_road_ids.add(_bwp.road_id)
             route_lane_keys.add((_bwp.road_id, _bwp.lane_id))
 
@@ -1570,7 +1585,7 @@ class PrivilegedExpert:
                     if not lane_semantic_match:
                         continue
 
-                        # Verify the stop line is AHEAD of us, not behind.
+                    # Verify the stop line is AHEAD of us, not behind.
                     awp_loc = awp.transform.location
                     sdx = awp_loc.x - ego_loc.x
                     sdy = awp_loc.y - ego_loc.y
@@ -1583,7 +1598,7 @@ class PrivilegedExpert:
                         awp_loc.distance(rwp.transform.location) < match_dist
                         and abs((awp_yaw - rwp.transform.rotation.yaw + 180) % 360 - 180)
                         < match_yaw
-                        for rwp, _ in self._wp_buffer
+                        for rwp, _ in route_sources
                     )
                     if not on_route:
                         continue
@@ -1613,8 +1628,12 @@ class PrivilegedExpert:
                 best_stop_loc = stop_loc_candidate
 
         if best_tl_id is not None:
+            prev_tl_id = self._tl_waiting
             self._tl_waiting = best_tl_id
-            self._tl_stop_loc = best_stop_loc
+            # Keep a previously valid stop-line location when a repeated
+            # match for the same TL only has pole-level fallback geometry.
+            if best_stop_loc is not None or prev_tl_id != best_tl_id:
+                self._tl_stop_loc = best_stop_loc
             logger.debug(
                 "T3: matched tl_id=%d state=%s dist=%.1f",
                 best_tl_id,
@@ -1665,7 +1684,8 @@ class PrivilegedExpert:
             return
 
         _, stop_loc = self._stop_line_distance(tl_actor, transform)
-        self._tl_stop_loc = stop_loc
+        if stop_loc is not None:
+            self._tl_stop_loc = stop_loc
 
     def _refresh_route_tl_candidates(self, transform: "carla.Transform") -> None:
         """Pre-associate traffic lights that plausibly affect the route buffer.
@@ -1703,18 +1723,18 @@ class PrivilegedExpert:
                     or (awp.road_id, awp.lane_id - 1) in route_lane_keys
                     or (awp.road_id, awp.lane_id + 1) in route_lane_keys
                 )
-                if not lane_semantic_match:
-                    continue
-
                 awp_loc = awp.transform.location
                 awp_yaw = awp.transform.rotation.yaw
                 for rwp, rwp_yaw in route_refs:
-                    if awp.road_id != rwp.road_id:
-                        continue
                     yaw_diff = abs((awp_yaw - rwp_yaw + 180) % 360 - 180)
                     if yaw_diff >= max_yaw:
                         continue
-                    if awp_loc.distance(rwp.transform.location) < max_dist:
+                    # Prefer lane-semantic matches, but allow strict geometric
+                    # fallback to preserve TL association across lane-id churn
+                    # around junction seams.
+                    route_dist = awp_loc.distance(rwp.transform.location)
+                    geom_fallback = route_dist < (0.5 * max_dist)
+                    if route_dist < max_dist and (lane_semantic_match or geom_fallback):
                         candidates.add(tl.id)
                         matched = True
                         break
@@ -2486,9 +2506,43 @@ class PrivilegedExpert:
         # Linear interpolation: 2.6m lane → margin_min, 3.5m lane → margin_max
         t = max(0.0, min(1.0, (lw - 2.6) / 0.9))
         margin = cfg.corridor_margin_min + t * (cfg.corridor_margin_max - cfg.corridor_margin_min)
-        half = float(lw / 2.0 + margin)
+        min_half = float(
+            self.vehicle.bounding_box.extent.y + cfg.corridor_vehicle_half_width_margin,
+        )
+        half = float(max(lw / 2.0 + margin, min_half))
         self._cached_half_lane = half
         return half
+
+    def _estimate_junction_clearance_distance(self) -> float:
+        """Estimate distance to clear the upcoming junction from stop line.
+
+        Uses contiguous junction waypoints in route lookahead. Falls
+        back to ``tl_clearance_margin`` when no reliable segment exists.
+        """
+        cfg = self.config
+        route_sources = self._route_waypoint_sources(lookahead=120)
+        if not route_sources:
+            return cfg.tl_clearance_margin
+
+        in_junction = False
+        first_wp = None
+        last_wp = None
+        for wp, _ in route_sources:
+            if wp.is_junction:
+                if not in_junction:
+                    in_junction = True
+                    first_wp = wp
+                    last_wp = wp
+                else:
+                    last_wp = wp
+            elif in_junction:
+                break
+
+        if first_wp is None or last_wp is None:
+            return cfg.tl_clearance_margin
+
+        clearance = first_wp.transform.location.distance(last_wp.transform.location)
+        return float(max(clearance, cfg.tl_clearance_margin))
 
     def _closest_pedestrian_distance(
         self,
