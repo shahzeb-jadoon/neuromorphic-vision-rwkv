@@ -1071,9 +1071,11 @@ class PrivilegedExpert:
                             d = max(tl_distance - effective_tl_stop, 0.0)
                             v_ms = math.sqrt(2.0 * cfg.tl_comfort_decel * d)
                             tl_target = v_ms * 3.6  # m/s → km/h
-                            if tl_target < target:
-                                mode = DrivingMode.TRAFFIC_LIGHT_STOP
-                                target = tl_target
+                            # Keep traffic-light arbitration active in
+                            # red/yellow brake window even when turn logic
+                            # already requested a lower speed.
+                            mode = DrivingMode.TRAFFIC_LIGHT_STOP
+                            target = min(target, tl_target)
 
         # --- Stop sign ---
         if ss_committed:
@@ -1331,68 +1333,82 @@ class PrivilegedExpert:
                 self._tl_proceed_committed = False
             else:
                 tl_loc = tl_actor.get_transform().location
-                dist = ego_loc.distance(tl_loc)
-
-                # Clear stale memory if:
-                #   (a) we drove far past the light (distance cutoff), OR
-                #   (b) the light is behind us (dot-product with forward).
                 fwd = transform.get_forward_vector()
-                dx = tl_loc.x - ego_loc.x
-                dy = tl_loc.y - ego_loc.y
-                tl_behind = (fwd.x * dx + fwd.y * dy) < 0
 
-                if dist > self.config.traffic_light_brake_distance * 1.5 or tl_behind:
-                    logger.debug(
-                        "T1: stale clear id=%d dist=%.1f behind=%s",
-                        self._tl_waiting, dist, tl_behind,
-                    )
-                    self._tl_waiting = None
-                    self._tl_stop_loc = None
-                    self._tl_proceed_committed = False
-                elif self._tl_stop_loc is not None:
-                    # Use stored stop-line location for accurate distance.
-                    # This handles far-side TLs (Town03) where the pole
-                    # is across the junction but the stop line is before
-                    # it.  Re-computing _stop_line_distance each frame
-                    # fails because the AWP road_id doesn't match the
-                    # ego's approach road.
+                # Use stop-line geometry whenever available. Pole-based
+                # stale clear can flip incorrectly on curved approaches.
+                if self._tl_stop_loc is not None:
                     stop_dist = ego_loc.distance(self._tl_stop_loc)
                     sdx = self._tl_stop_loc.x - ego_loc.x
                     sdy = self._tl_stop_loc.y - ego_loc.y
                     stop_behind = (fwd.x * sdx + fwd.y * sdy) <= 0
-                    if stop_behind:
+                    stale_far = stop_dist > self.config.traffic_light_brake_distance * 1.5
+                    if stale_far or stop_behind:
                         logger.debug(
-                            "T1-STORED: id=%d stop_line behind, clearing",
-                            self._tl_waiting,
+                            "T1-STORED: stale clear id=%d stop_dist=%.1f behind=%s",
+                            self._tl_waiting, stop_dist, stop_behind,
                         )
                         self._tl_waiting = None
                         self._tl_stop_loc = None
                         self._tl_proceed_committed = False
-                        # Fall through to Tier 2 / Tier 3
+                        # Fall through to Tier 2 / Tier 3.
                     else:
                         logger.debug(
                             "T1-STORED: id=%d state=%s "
                             "stop_dist=%.1f pole_dist=%.1f",
                             self._tl_waiting, tl_actor.state,
-                            stop_dist, dist,
+                            stop_dist, ego_loc.distance(tl_loc),
                         )
                         return tl_actor.state, stop_dist
                 else:
-                    # No stored stop-line location — use
-                    # _stop_line_distance or fall back to pole distance.
+                    # Recover stop-line location if possible.
                     stop_dist, stop_loc = self._stop_line_distance(
                         tl_actor, transform,
                     )
                     if stop_loc is not None:
                         self._tl_stop_loc = stop_loc
-                    logger.debug(
-                        "T1-FALLBACK: id=%d state=%s "
-                        "stop_dist=%s pole_dist=%.1f",
-                        self._tl_waiting, tl_actor.state,
-                        f"{stop_dist:.1f}" if stop_dist is not None else "None",
-                        dist,
-                    )
-                    return tl_actor.state, (stop_dist if stop_dist is not None else dist)
+                        sdx = stop_loc.x - ego_loc.x
+                        sdy = stop_loc.y - ego_loc.y
+                        stop_behind = (fwd.x * sdx + fwd.y * sdy) <= 0
+                        stale_far = stop_dist > self.config.traffic_light_brake_distance * 1.5
+                        if stale_far or stop_behind:
+                            logger.debug(
+                                "T1-RECOVERED: stale clear id=%d stop_dist=%.1f behind=%s",
+                                self._tl_waiting, stop_dist, stop_behind,
+                            )
+                            self._tl_waiting = None
+                            self._tl_stop_loc = None
+                            self._tl_proceed_committed = False
+                        else:
+                            logger.debug(
+                                "T1-RECOVERED: id=%d state=%s stop_dist=%.1f",
+                                self._tl_waiting, tl_actor.state, stop_dist,
+                            )
+                            return tl_actor.state, stop_dist
+                    else:
+                        # Last resort: no stop-line available, keep pole
+                        # fallback to avoid total blindness.
+                        dist = ego_loc.distance(tl_loc)
+                        dx = tl_loc.x - ego_loc.x
+                        dy = tl_loc.y - ego_loc.y
+                        tl_behind = (fwd.x * dx + fwd.y * dy) < 0
+                        if (
+                            dist > self.config.traffic_light_brake_distance * 1.5
+                            or tl_behind
+                        ):
+                            logger.debug(
+                                "T1-POLE-FALLBACK: stale clear id=%d dist=%.1f behind=%s",
+                                self._tl_waiting, dist, tl_behind,
+                            )
+                            self._tl_waiting = None
+                            self._tl_stop_loc = None
+                            self._tl_proceed_committed = False
+                        else:
+                            logger.debug(
+                                "T1-POLE-FALLBACK: id=%d state=%s pole_dist=%.1f",
+                                self._tl_waiting, tl_actor.state, dist,
+                            )
+                            return tl_actor.state, dist
 
         # ---- Tier 2: CARLA built-in (close range) ----
         if self.vehicle.is_at_traffic_light():
