@@ -33,7 +33,7 @@ import math
 from collections import deque
 from dataclasses import dataclass, field
 from enum import IntEnum, auto
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Tuple
 
 import numpy as np
 
@@ -69,7 +69,7 @@ class ExpertConfig:
     # Target cruising speed (used as fallback when road has no speed-limit sign)
     target_speed: float = 30.0
     max_speed: float = 50.0
-    ### speed_limit_margin: float = 0.90  # drive at 90% of posted limit
+    # speed_limit_margin: float = 0.90  # drive at 90% of posted limit
 
     # --- PID: longitudinal (speed) ---
     # NOTE: gains tuned for RAW km/h error (P4-C).  Previous gains
@@ -398,14 +398,16 @@ class PrivilegedExpert:
         # stop/hold mode.  Prevents stale integral from causing
         # overshoot on resumption.
         self._prev_mode: DrivingMode = DrivingMode.FOLLOW_LANE
-        self._RESET_FROM_MODES: frozenset = frozenset({
-            DrivingMode.TRAFFIC_LIGHT_STOP,
-            DrivingMode.VEHICLE_FOLLOWING,
-            DrivingMode.PEDESTRIAN_STOP,
-            DrivingMode.EMERGENCY_STOP,
-            DrivingMode.STOP_SIGN_STOP,
-            DrivingMode.YIELD_STOP,
-        })
+        self._RESET_FROM_MODES: frozenset = frozenset(
+            {
+                DrivingMode.TRAFFIC_LIGHT_STOP,
+                DrivingMode.VEHICLE_FOLLOWING,
+                DrivingMode.PEDESTRIAN_STOP,
+                DrivingMode.EMERGENCY_STOP,
+                DrivingMode.STOP_SIGN_STOP,
+                DrivingMode.YIELD_STOP,
+            }
+        )
 
         # P3-D: track consecutive TURNING frames so we can reset the
         # speed PID only after a real turn (>0.5 s), not a brief curve.
@@ -489,7 +491,10 @@ class PrivilegedExpert:
         cfg = self.config
         road_limit = self.vehicle.get_speed_limit()  # km/h
         if road_limit is not None and road_limit > 0:
-            base_target = min(road_limit, cfg.max_speed) # or min(road_limit * cfg.speed_limit_margin, cfg.max_speed)
+            base_target = min(
+                road_limit,
+                cfg.max_speed,
+            )  # or min(road_limit * cfg.speed_limit_margin, cfg.max_speed)
         else:
             base_target = cfg.target_speed
 
@@ -573,12 +578,6 @@ class PrivilegedExpert:
         )
 
         # --- 6.  Privileged info ---
-        # Corridor diagnostics (Option D)
-        n_segs = len(self._corridor) if isinstance(self._corridor, list) else 0
-        # _corridor is the polygon (np.ndarray), segments are not stored
-        # separately — count via the corridor builder's output.  We
-        # re-derive n_segs from the number of vehicles that passed SAT.
-        # Actually, count from the corridor_segs stored on the instance.
         buf_len = len(self._wp_buffer)
         buf_head_dist = -1.0
         if self._wp_buffer:
@@ -590,9 +589,7 @@ class PrivilegedExpert:
         lat_hits = sum(
             1
             for v in nearby_vehicles
-            if v["is_ahead"]
-            and v.get("same_direction", True)
-            and abs(v["lateral"]) < dynamic_half
+            if v["is_ahead"] and v.get("same_direction", True) and abs(v["lateral"]) < dynamic_half
         )
 
         info = FrameInfo(
@@ -634,9 +631,8 @@ class PrivilegedExpert:
         degeneration in the final ~200 frames of an episode where the
         buffer would otherwise shrink to 1–2 entries.
         """
-        while (
-            len(self._wp_buffer) < self._wp_buffer.maxlen and self._route_index < self._route_length
-        ):
+        buffer_maxlen = self._wp_buffer.maxlen or 40
+        while len(self._wp_buffer) < buffer_maxlen and self._route_index < self._route_length:
             self._wp_buffer.append(self._route[self._route_index])
             self._route_index += 1
 
@@ -663,7 +659,7 @@ class PrivilegedExpert:
             last_wp, _ = self._wp_buffer[-1]
             try:
                 nexts = last_wp.next(2.0)  # 2 m step
-                while nexts and len(self._wp_buffer) < self._wp_buffer.maxlen:
+                while nexts and len(self._wp_buffer) < buffer_maxlen:
                     nxt = nexts[0]  # follow the first (keep-lane) option
                     self._wp_buffer.append((nxt, RoadOption.LANEFOLLOW))
                     nexts = nxt.next(2.0)
@@ -673,6 +669,14 @@ class PrivilegedExpert:
         if transform is not None:
             self._refresh_tl_stop_loc(transform)
             self._refresh_route_tl_candidates(transform)
+
+    def _route_waypoint_sources(self, lookahead: int = 200) -> list[tuple[Any, RoadOption]]:
+        """Return the active buffer plus a capped lookahead from the planned route."""
+        sources = list(self._wp_buffer)
+        if self._route and self._route_index < self._route_length:
+            end = min(self._route_index + lookahead, self._route_length)
+            sources.extend(self._route[self._route_index : end])
+        return sources
 
     def _fill_junction_gaps(self, transform: "carla.Transform" | None = None) -> None:
         """Insert intermediate waypoints where the buffer has large gaps.
@@ -771,9 +775,7 @@ class PrivilegedExpert:
                     fills = 0
                     while nexts and fills < max_fills:
                         nxt = nexts[0]
-                        dist_to_target = nxt.transform.location.distance(
-                            wp_next.transform.location
-                        )
+                        dist_to_target = nxt.transform.location.distance(wp_next.transform.location)
                         if dist_to_target < _FILL_STEP:
                             converged = True
                             break  # close enough to the next original wp
@@ -1093,7 +1095,7 @@ class PrivilegedExpert:
                     proceed_yellow = False
                     if tl_state == carla.TrafficLightState.Yellow:
                         d_to_stop = max(tl_distance - effective_tl_stop, 0.0)
-                        min_brake_dist = speed_ms ** 2 / (2.0 * cfg.tl_comfort_decel)
+                        min_brake_dist = speed_ms**2 / (2.0 * cfg.tl_comfort_decel)
                         # Can we clear past the stop line at current speed?
                         can_clear = (
                             speed_ms > 0.5
@@ -1178,18 +1180,32 @@ class PrivilegedExpert:
             and 0 < tl_distance < cfg.traffic_light_brake_distance
             and not self._tl_proceed_committed
         )
+        turning_block_active = False
 
         if lead_distance is not None:
             if mode == DrivingMode.TURNING and lead_speed is not None and lead_speed < 0.5:
                 # During turns, only treat near-centerline stopped vehicles as blockers.
                 # Off-axis stopped vehicles (adjacent lane/shoulder) should not deadlock us.
                 ego_half_width = self.vehicle.bounding_box.extent.y
-                turning_block_lateral = ego_half_width + 0.05
+                turning_block_lateral = max(
+                    ego_half_width + 0.35,
+                    self._cached_half_lane,
+                )
                 if lead_lateral is not None and abs(lead_lateral) > turning_block_lateral:
                     lead_distance = None
+                else:
+                    turning_block_active = True
 
         if lead_distance is not None:
-            if lead_distance < dyn_emergency:
+            if turning_block_active and not tl_forces_stop:
+                mode = DrivingMode.EMERGENCY_STOP
+                target = 0.0
+            elif tl_forces_stop and lead_speed is not None and lead_speed < 0.5:
+                # A stopped lead vehicle ahead of a red/yellow light should
+                # not escalate to EMERGENCY_STOP; the traffic light already
+                # owns the stop decision.
+                pass
+            elif lead_distance < dyn_emergency:
                 mode = DrivingMode.EMERGENCY_STOP
                 target = 0.0
             elif tl_forces_stop:
@@ -1334,7 +1350,7 @@ class PrivilegedExpert:
             if speed_kmh > 5.0:
                 brake = 1.0
             elif speed_kmh < 0.5:
-                brake = 0.5           # firm hold when already stopped
+                brake = 0.5  # firm hold when already stopped
             else:
                 brake = speed_kmh / 5.0  # gradient in 0.5–5 km/h transition
 
@@ -1393,7 +1409,9 @@ class PrivilegedExpert:
                     if stale_far or stop_behind:
                         logger.debug(
                             "T1-STORED: stale clear id=%d stop_dist=%.1f behind=%s",
-                            self._tl_waiting, stop_dist, stop_behind,
+                            self._tl_waiting,
+                            stop_dist,
+                            stop_behind,
                         )
                         self._tl_waiting = None
                         self._tl_stop_loc = None
@@ -1401,27 +1419,33 @@ class PrivilegedExpert:
                         # Fall through to Tier 2 / Tier 3.
                     else:
                         logger.debug(
-                            "T1-STORED: id=%d state=%s "
-                            "stop_dist=%.1f pole_dist=%.1f",
-                            self._tl_waiting, tl_actor.state,
-                            stop_dist, ego_loc.distance(tl_loc),
+                            "T1-STORED: id=%d state=%s " "stop_dist=%.1f pole_dist=%.1f",
+                            self._tl_waiting,
+                            tl_actor.state,
+                            stop_dist,
+                            ego_loc.distance(tl_loc),
                         )
                         return tl_actor.state, stop_dist
                 else:
                     # Recover stop-line location if possible.
-                    stop_dist, stop_loc = self._stop_line_distance(
-                        tl_actor, transform,
+                    recovered_stop_dist, stop_loc = self._stop_line_distance(
+                        tl_actor,
+                        transform,
                     )
-                    if stop_loc is not None:
+                    if stop_loc is not None and recovered_stop_dist is not None:
                         self._tl_stop_loc = stop_loc
                         sdx = stop_loc.x - ego_loc.x
                         sdy = stop_loc.y - ego_loc.y
                         stop_behind = (fwd.x * sdx + fwd.y * sdy) <= 0
-                        stale_far = stop_dist > self.config.traffic_light_brake_distance * 1.5
+                        stale_far = (
+                            recovered_stop_dist > self.config.traffic_light_brake_distance * 1.5
+                        )
                         if stale_far or stop_behind:
                             logger.debug(
                                 "T1-RECOVERED: stale clear id=%d stop_dist=%.1f behind=%s",
-                                self._tl_waiting, stop_dist, stop_behind,
+                                self._tl_waiting,
+                                recovered_stop_dist,
+                                stop_behind,
                             )
                             self._tl_waiting = None
                             self._tl_stop_loc = None
@@ -1429,9 +1453,11 @@ class PrivilegedExpert:
                         else:
                             logger.debug(
                                 "T1-RECOVERED: id=%d state=%s stop_dist=%.1f",
-                                self._tl_waiting, tl_actor.state, stop_dist,
+                                self._tl_waiting,
+                                tl_actor.state,
+                                recovered_stop_dist,
                             )
-                            return tl_actor.state, stop_dist
+                            return tl_actor.state, recovered_stop_dist
                     else:
                         # Last resort: no stop-line available, keep pole
                         # fallback to avoid total blindness.
@@ -1439,13 +1465,12 @@ class PrivilegedExpert:
                         dx = tl_loc.x - ego_loc.x
                         dy = tl_loc.y - ego_loc.y
                         tl_behind = (fwd.x * dx + fwd.y * dy) < 0
-                        if (
-                            dist > self.config.traffic_light_brake_distance * 1.5
-                            or tl_behind
-                        ):
+                        if dist > self.config.traffic_light_brake_distance * 1.5 or tl_behind:
                             logger.debug(
                                 "T1-POLE-FALLBACK: stale clear id=%d dist=%.1f behind=%s",
-                                self._tl_waiting, dist, tl_behind,
+                                self._tl_waiting,
+                                dist,
+                                tl_behind,
                             )
                             self._tl_waiting = None
                             self._tl_stop_loc = None
@@ -1453,7 +1478,9 @@ class PrivilegedExpert:
                         else:
                             logger.debug(
                                 "T1-POLE-FALLBACK: id=%d state=%s pole_dist=%.1f",
-                                self._tl_waiting, tl_actor.state, dist,
+                                self._tl_waiting,
+                                tl_actor.state,
+                                dist,
                             )
                             return tl_actor.state, dist
 
@@ -1467,9 +1494,9 @@ class PrivilegedExpert:
                 # RED detection during turns.
                 stop_dist, stop_loc = self._stop_line_distance(tl, transform)
                 logger.debug(
-                    "T2: is_at_tl=True tl_id=%d state=%s "
-                    "stop_dist=%s",
-                    tl.id, tl.state,
+                    "T2: is_at_tl=True tl_id=%d state=%s " "stop_dist=%s",
+                    tl.id,
+                    tl.state,
                     f"{stop_dist:.1f}" if stop_dist is not None else "None",
                 )
                 if stop_dist is not None:
@@ -1500,7 +1527,7 @@ class PrivilegedExpert:
         # the ego's current or next road segment (~4-12 m range).
         route_road_ids: set[int] = {ego_wp.road_id}
         route_lane_keys: set[tuple[int, int]] = {(ego_wp.road_id, ego_wp.lane_id)}
-        for _bwp, _bcmd in self._wp_buffer:
+        for _bwp, _bcmd in self._route_waypoint_sources():
             route_road_ids.add(_bwp.road_id)
             route_lane_keys.add((_bwp.road_id, _bwp.lane_id))
 
@@ -1508,10 +1535,7 @@ class PrivilegedExpert:
         match_yaw = self.config.traffic_light_route_match_yaw_deg
 
         if self._route_tl_candidates:
-            candidate_tls = [
-                self.world.get_actor(tl_id)
-                for tl_id in self._route_tl_candidates
-            ]
+            candidate_tls = [self.world.get_actor(tl_id) for tl_id in self._route_tl_candidates]
             tls = [tl for tl in candidate_tls if tl is not None]
         else:
             tls = self.world.get_actors().filter("*traffic_light*")
@@ -1530,7 +1554,7 @@ class PrivilegedExpert:
 
             # ---- Lane matching via affected waypoints ----
             affects_us = False
-            stop_dist: float | None = None
+            stop_line_dist: float | None = None
             stop_loc_candidate = None
 
             try:
@@ -1557,14 +1581,15 @@ class PrivilegedExpert:
                     awp_yaw = awp.transform.rotation.yaw
                     on_route = any(
                         awp_loc.distance(rwp.transform.location) < match_dist
-                        and abs((awp_yaw - rwp.transform.rotation.yaw + 180) % 360 - 180) < match_yaw
+                        and abs((awp_yaw - rwp.transform.rotation.yaw + 180) % 360 - 180)
+                        < match_yaw
                         for rwp, _ in self._wp_buffer
                     )
                     if not on_route:
                         continue
 
                     affects_us = True
-                    stop_dist = ego_loc.distance(awp_loc)
+                    stop_line_dist = ego_loc.distance(awp_loc)
                     stop_loc_candidate = awp_loc
                     break
             except (AttributeError, RuntimeError):
@@ -1577,7 +1602,7 @@ class PrivilegedExpert:
                 continue
 
             # Prefer stop-line distance; fall back to pole distance.
-            effective_dist = stop_dist if stop_dist is not None else pole_dist
+            effective_dist = stop_line_dist if stop_line_dist is not None else pole_dist
             if effective_dist > self.config.traffic_light_brake_distance:
                 continue
 
@@ -1592,7 +1617,9 @@ class PrivilegedExpert:
             self._tl_stop_loc = best_stop_loc
             logger.debug(
                 "T3: matched tl_id=%d state=%s dist=%.1f",
-                best_tl_id, best_state, best_dist,
+                best_tl_id,
+                best_state,
+                best_dist,
             )
 
         return best_state, best_dist
@@ -1618,9 +1645,7 @@ class PrivilegedExpert:
                 if awp.road_id == ego_wp.road_id and awp.lane_id == ego_wp.lane_id:
                     # Heading gate: reject cross-street TLs whose
                     # affected waypoint yaw differs by ~90° from ours.
-                    yaw_diff = abs(
-                        (awp.transform.rotation.yaw - ego_yaw + 180) % 360 - 180
-                    )
+                    yaw_diff = abs((awp.transform.rotation.yaw - ego_yaw + 180) % 360 - 180)
                     if yaw_diff > 40.0:
                         continue
                     awp_loc = awp.transform.location
@@ -1657,7 +1682,7 @@ class PrivilegedExpert:
         route_lane_keys: set[tuple[int, int]] = set()
         route_refs.append((ego_wp, ego_wp.transform.rotation.yaw))
         route_lane_keys.add((ego_wp.road_id, ego_wp.lane_id))
-        for rwp, _ in self._wp_buffer:
+        for rwp, _ in self._route_waypoint_sources():
             route_refs.append((rwp, rwp.transform.rotation.yaw))
             route_lane_keys.add((rwp.road_id, rwp.lane_id))
 
@@ -1805,12 +1830,9 @@ class PrivilegedExpert:
             #  2. 2D distance from ego to TV center — works for pole-
             #     mounted signs (Town07) where the TV box is too small
             #     for contains() but the center is on the road surface.
-            ego_to_tv_2d = math.sqrt(
-                (ego_loc.x - tv_world.x) ** 2 + (ego_loc.y - tv_world.y) ** 2
-            )
-            if (
-                ego_to_tv_2d < cfg.stop_sign_commit_radius
-                or ss.trigger_volume.contains(ego_loc, ss_tf)
+            ego_to_tv_2d = math.sqrt((ego_loc.x - tv_world.x) ** 2 + (ego_loc.y - tv_world.y) ** 2)
+            if ego_to_tv_2d < cfg.stop_sign_commit_radius or ss.trigger_volume.contains(
+                ego_loc, ss_tf
             ):
                 self._stop_sign_active = ss.id
                 self._stop_sign_wait_counter = 0
@@ -2331,7 +2353,7 @@ class PrivilegedExpert:
         Returns ``True`` if the polygons overlap.
         """
 
-        def _project(vertices: np.ndarray, axis: np.ndarray):
+        def _project(vertices: np.ndarray, axis: np.ndarray) -> tuple[float, float]:
             dots = vertices @ axis
             return dots.min(), dots.max()
 
@@ -2459,12 +2481,12 @@ class PrivilegedExpert:
         ego_wp = self.map.get_waypoint(transform.location)
         if ego_wp is None:
             self._cached_half_lane = cfg.lane_half_width
-            return cfg.lane_half_width
+            return float(cfg.lane_half_width)
         lw = ego_wp.lane_width
         # Linear interpolation: 2.6m lane → margin_min, 3.5m lane → margin_max
         t = max(0.0, min(1.0, (lw - 2.6) / 0.9))
         margin = cfg.corridor_margin_min + t * (cfg.corridor_margin_max - cfg.corridor_margin_min)
-        half = lw / 2.0 + margin
+        half = float(lw / 2.0 + margin)
         self._cached_half_lane = half
         return half
 
@@ -2488,13 +2510,13 @@ class PrivilegedExpert:
         half_w = max(self._dynamic_half_lane(transform), self.config.lane_half_width)
         for p in nearby:
             current_in_lane = p["is_ahead"] and abs(p["lateral"]) < half_w
-            predicted_in_lane = p.get("predicted_ahead", False) and abs(
-                p.get("predicted_lateral", 999.0)
-            ) < half_w
+            predicted_in_lane = (
+                p.get("predicted_ahead", False) and abs(p.get("predicted_lateral", 999.0)) < half_w
+            )
             if current_in_lane or predicted_in_lane:
                 # Use whichever distance is shorter (current or predicted)
-                pred_dist = p.get("predicted_distance", p["distance"])
-                return min(p["distance"], pred_dist)
+                pred_dist = float(p.get("predicted_distance", p["distance"]))
+                return float(min(p["distance"], pred_dist))
         return None
 
     @staticmethod
