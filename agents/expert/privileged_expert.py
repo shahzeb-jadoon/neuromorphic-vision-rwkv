@@ -1213,10 +1213,15 @@ class PrivilegedExpert:
             if turning_block_active and not tl_forces_stop:
                 mode = DrivingMode.EMERGENCY_STOP
                 target = 0.0
-            elif tl_forces_stop and lead_speed is not None and lead_speed < 0.5:
+            elif (
+                tl_forces_stop
+                and lead_speed is not None
+                and lead_speed < 0.5
+                and lead_distance >= dyn_emergency
+            ):
                 # A stopped lead vehicle ahead of a red/yellow light should
-                # not escalate to EMERGENCY_STOP; the traffic light already
-                # owns the stop decision.
+                # not escalate to EMERGENCY_STOP when we're still outside
+                # the emergency range; the traffic light owns the stop.
                 pass
             elif lead_distance < dyn_emergency:
                 mode = DrivingMode.EMERGENCY_STOP
