@@ -240,6 +240,12 @@ class FrameInfo:
     # Traffic
     traffic_light_state: int  # 0=None, 1=Green, 2=Yellow, 3=Red
     traffic_light_distance: float  # metres (−1 if none)
+    traffic_light_actor_id: int = -1  # actor id of matched TL (−1 if none)
+    traffic_light_stop_line_position: Tuple[float, float, float] = (
+        -1.0,
+        -1.0,
+        -1.0,
+    )  # matched stop-line xyz (−1s if unknown)
     stop_sign_distance: float = -1.0  # metres (−1 if none)
     yield_sign_distance: float = -1.0  # metres (−1 if none)
 
@@ -613,6 +619,16 @@ class PrivilegedExpert:
             velocity=(velocity.x, velocity.y, velocity.z),
             traffic_light_state=self._encode_tl(tl_state),
             traffic_light_distance=(tl_distance if tl_distance is not None else -1.0),
+            traffic_light_actor_id=(self._tl_waiting if self._tl_waiting is not None else -1),
+            traffic_light_stop_line_position=(
+                (
+                    self._tl_stop_loc.x,
+                    self._tl_stop_loc.y,
+                    self._tl_stop_loc.z,
+                )
+                if self._tl_stop_loc is not None
+                else (-1.0, -1.0, -1.0)
+            ),
             stop_sign_distance=(ss_distance if ss_distance is not None else -1.0),
             yield_sign_distance=(ys_distance if ys_distance is not None else -1.0),
             nearby_vehicles=nearby_vehicles,

@@ -228,6 +228,15 @@ class _StreamingEpisodeWriter:
         self._ds_tl_dist = self._h5.create_dataset(
             S.TRAFFIC_LIGHT_DISTANCE, shape=(max_frames,), dtype=np.float32, maxshape=(None,)
         )
+        self._ds_tl_actor_id = self._h5.create_dataset(
+            S.TRAFFIC_LIGHT_ACTOR_ID, shape=(max_frames,), dtype=np.int32, maxshape=(None,)
+        )
+        self._ds_tl_stop_line = self._h5.create_dataset(
+            S.TRAFFIC_LIGHT_STOP_LINE_POSITION,
+            shape=(max_frames, 3),
+            dtype=np.float32,
+            maxshape=(None, 3),
+        )
         self._ds_ss = self._h5.create_dataset(
             S.STOP_SIGN_DISTANCE, shape=(max_frames,), dtype=np.float32, maxshape=(None,)
         )
@@ -311,6 +320,8 @@ class _StreamingEpisodeWriter:
         self._ds_vel[i] = np.array(info.velocity, dtype=np.float32)
         self._ds_tl[i] = info.traffic_light_state
         self._ds_tl_dist[i] = info.traffic_light_distance
+        self._ds_tl_actor_id[i] = info.traffic_light_actor_id
+        self._ds_tl_stop_line[i] = np.array(info.traffic_light_stop_line_position, dtype=np.float32)
         self._ds_ss[i] = info.stop_sign_distance
         self._ds_ys[i] = info.yield_sign_distance
         self._ds_ts[i] = info.target_speed
@@ -361,6 +372,9 @@ class _StreamingEpisodeWriter:
             self._ds_rot,
             self._ds_vel,
             self._ds_tl,
+            self._ds_tl_dist,
+            self._ds_tl_actor_id,
+            self._ds_tl_stop_line,
             self._ds_ss,
             self._ds_ts,
             self._ds_dm,

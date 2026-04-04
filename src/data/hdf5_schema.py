@@ -58,6 +58,10 @@ ROTATION = "rotation"  # (N, 3)  float32  degrees (pitch, yaw, roll)
 # --- Privileged / future-proofing (new in v3) ---
 TRAFFIC_LIGHT_STATE = "traffic_light_state"  # (N,)    int32  0=None 1=G 2=Y 3=R
 TRAFFIC_LIGHT_DISTANCE = "traffic_light_distance"  # (N,)  float32  metres (-1 if none)
+TRAFFIC_LIGHT_ACTOR_ID = "traffic_light_actor_id"  # (N,) int32 TL actor id (-1 if none)
+TRAFFIC_LIGHT_STOP_LINE_POSITION = (
+    "traffic_light_stop_line_position"  # (N,3) float32 stop-line xyz (-1s if unknown)
+)
 STOP_SIGN_DISTANCE = "stop_sign_distance"  # (N,)    float32  metres (-1 if none)
 YIELD_SIGN_DISTANCE = "yield_sign_distance"  # (N,)   float32  metres (-1 if none)
 TARGET_SPEED = "target_speed"  # (N,)    float32  km/h

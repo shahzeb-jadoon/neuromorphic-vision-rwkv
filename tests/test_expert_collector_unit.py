@@ -130,6 +130,9 @@ class TestHDF5Schema:
             S.POSITION,
             S.ROTATION,
             S.TRAFFIC_LIGHT_STATE,
+            S.TRAFFIC_LIGHT_DISTANCE,
+            S.TRAFFIC_LIGHT_ACTOR_ID,
+            S.TRAFFIC_LIGHT_STOP_LINE_POSITION,
             S.STOP_SIGN_DISTANCE,
             S.TARGET_SPEED,
             S.DRIVING_MODE,
@@ -181,6 +184,8 @@ class _FakeFrameInfo:
         self.velocity = [speed_kmh / 3.6, 0.0, 0.0]
         self.traffic_light_state = 0
         self.traffic_light_distance = -1.0
+        self.traffic_light_actor_id = -1
+        self.traffic_light_stop_line_position = [-1.0, -1.0, -1.0]
         self.stop_sign_distance = -1.0
         self.yield_sign_distance = -1.0
         self.target_speed = 8.33
