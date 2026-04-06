@@ -157,6 +157,7 @@ class EpisodeResult:
     error_message: str | None = None
     duration_seconds: float = 0.0
     recording_path: str | None = None
+    route_path: str | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -1026,6 +1027,7 @@ class ExpertDataCollector:
         episode_filepath = self.output_dir / episode_filename
         writer: _StreamingEpisodeWriter | None = None
         collision_frame: int | None = None
+        route_sidecar_path: Path | None = None
 
         try:
             assert self.world is not None
@@ -1266,10 +1268,21 @@ class ExpertDataCollector:
             # --- Start CARLA recorder if requested ---
             recording_path: str | None = None
             if config.record_simulation:
-                rec_name = f"episode_{int(time.time())}.log"
+                rec_name = f"episode_{episode_hash}.log"
                 recording_path = rec_name
                 self.client.start_recorder(rec_name, True)
                 logger.info("CARLA recorder started: %s", rec_name)
+
+            # Persist route geometry for deterministic diagnostics and
+            # future replay analysis.
+            route_sidecar_path = self._write_route_sidecar(
+                episode_hash=episode_hash,
+                config=config,
+                route=list(expert._route),
+                route_source=("provided" if route_waypoints else "generated"),
+            )
+            if route_sidecar_path is not None:
+                logger.info("Saved route sidecar: %s", route_sidecar_path.name)
 
             # --- Tick loop ---
             stuck_start: float | None = None
@@ -1441,6 +1454,7 @@ class ExpertDataCollector:
             result.collision_other_actor = collision_other_actor[0]
             result.duration_seconds = time.time() - start_time
             result.recording_path = recording_path
+            result.route_path = route_sidecar_path.name if route_sidecar_path is not None else None
             return result
 
         except Exception as e:
@@ -1455,6 +1469,9 @@ class ExpertDataCollector:
                     )
                     result.error_message = str(e)
                     result.duration_seconds = time.time() - start_time
+                    result.route_path = (
+                        route_sidecar_path.name if route_sidecar_path is not None else None
+                    )
                     return result
                 except Exception:
                     pass
@@ -1559,6 +1576,54 @@ class ExpertDataCollector:
         }
         return mapping.get(name, RoadOption.LANEFOLLOW)
 
+    def _write_route_sidecar(
+        self,
+        episode_hash: str,
+        config: EpisodeConfig,
+        route: list[tuple[Any, RoadOption]],
+        route_source: str,
+    ) -> Path | None:
+        """Write route waypoints used for this episode to a JSON sidecar."""
+        if not route:
+            return None
+
+        route_points: list[dict[str, Any]] = []
+        for idx, (wp, road_option) in enumerate(route):
+            tf = wp.transform
+            route_points.append(
+                {
+                    "index": idx,
+                    "x": float(tf.location.x),
+                    "y": float(tf.location.y),
+                    "z": float(tf.location.z),
+                    "pitch": float(tf.rotation.pitch),
+                    "yaw": float(tf.rotation.yaw),
+                    "roll": float(tf.rotation.roll),
+                    "road_option": str(road_option.name),
+                    "road_id": int(getattr(wp, "road_id", -1)),
+                    "lane_id": int(getattr(wp, "lane_id", -1)),
+                    "is_junction": bool(getattr(wp, "is_junction", False)),
+                }
+            )
+
+        payload = {
+            "episode_hash": episode_hash,
+            "town": config.town,
+            "weather": config.weather,
+            "n_vehicles": int(config.n_vehicles),
+            "n_walkers": int(config.n_walkers),
+            "fps": int(config.fps),
+            "max_frames": int(config.max_frames),
+            "route_source": route_source,
+            "n_waypoints": len(route_points),
+            "waypoints": route_points,
+            "created_utc": datetime.now(timezone.utc).isoformat(),
+        }
+
+        sidecar = self.output_dir / f"episode_{episode_hash}.route.json"
+        sidecar.write_text(json.dumps(payload, indent=2))
+        return sidecar
+
 
 class CollectionManifest:
     """Manages the collection_manifest.json for campaign resumption.
@@ -1589,6 +1654,7 @@ class CollectionManifest:
         entry = {
             "filename": result.filename,
             "hash": result.episode_hash,
+            "episode_hash": result.episode_hash,
             "town": result.town,
             "weather": result.weather,
             "n_vehicles": result.n_vehicles,
@@ -1601,6 +1667,8 @@ class CollectionManifest:
             "collision_other_actor": result.collision_other_actor,
             "duration_seconds": result.duration_seconds,
             "timestamp": datetime.now(timezone.utc).isoformat(),
+            "recording_path": result.recording_path,
+            "route_path": result.route_path,
         }
         if result.error_message:
             entry["error"] = result.error_message

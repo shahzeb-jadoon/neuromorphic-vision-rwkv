@@ -125,6 +125,10 @@ def build_campaign(
         expert_kw["traffic_light_brake_distance"] = float(
             expert_cfg_dict["traffic_light_brake_distance"]
         )
+    if "traffic_light_stop_distance" in expert_cfg_dict:
+        expert_kw["traffic_light_stop_distance"] = float(
+            expert_cfg_dict["traffic_light_stop_distance"]
+        )
     if "vehicle_hazard_distance" in expert_cfg_dict:
         expert_kw["vehicle_hazard_distance"] = float(expert_cfg_dict["vehicle_hazard_distance"])
     if "pedestrian_hazard_distance" in expert_cfg_dict:
