@@ -103,7 +103,7 @@ class ExpertConfig:
 
     # --- Safety thresholds ---
     traffic_light_brake_distance: float = 80.0  # metres — start braking
-    traffic_light_stop_distance: float = 6.0  # metres — full stop
+    traffic_light_stop_distance: float = 1.0  # metres — full stop
     traffic_light_route_match_distance: float = 6.0  # metres — AWP-to-route tolerance for Tier 3
     traffic_light_route_match_yaw_deg: float = 40.0  # degrees — AWP/route heading alignment gate
     traffic_light_stored_stop_max_yaw_diff_deg: float = (
