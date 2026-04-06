@@ -106,6 +106,12 @@ class ExpertConfig:
     traffic_light_stop_distance: float = 6.0  # metres — full stop
     traffic_light_route_match_distance: float = 6.0  # metres — AWP-to-route tolerance for Tier 3
     traffic_light_route_match_yaw_deg: float = 40.0  # degrees — AWP/route heading alignment gate
+    traffic_light_stored_stop_max_yaw_diff_deg: float = (
+        60.0  # degrees — reject stale stored stop-lines with large heading mismatch
+    )
+    traffic_light_stored_stop_lateral_margin: float = (
+        1.0  # metres — extra lateral tolerance beyond half-lane width
+    )
     tl_comfort_decel: float = 1.5  # m/s² — comfortable deceleration for TL
     tl_commit_decel: float = 2.8  # m/s² — deceleration threshold for yellow commitment
     tl_commit_max_stop_distance: float = (
@@ -1403,6 +1409,52 @@ class PrivilegedExpert:
     # Internal — privileged perception
     # ------------------------------------------------------------------
 
+    def _stored_tl_stop_plausibility(
+        self,
+        transform: "carla.Transform",
+        stop_loc: Any,
+    ) -> tuple[bool, float | None, float, float]:
+        """Check whether a stored TL stop-line still plausibly matches ego lane.
+
+        Returns ``(is_plausible, yaw_diff_deg, lateral_offset_m, lateral_limit_m)``.
+        ``yaw_diff_deg`` can be ``None`` when stop-line waypoint lookup is unavailable.
+        """
+        ego_loc = transform.location
+        dx = stop_loc.x - ego_loc.x
+        dy = stop_loc.y - ego_loc.y
+
+        right = transform.get_right_vector()
+        lateral_offset = float(right.x * dx + right.y * dy)
+
+        lane_width = float(self.config.lane_half_width * 2.0)
+        try:
+            ego_wp = self.map.get_waypoint(ego_loc)
+        except RuntimeError:
+            ego_wp = None
+        if ego_wp is not None:
+            lane_width = float(getattr(ego_wp, "lane_width", lane_width))
+
+        lateral_limit = (
+            0.5 * lane_width + self.config.traffic_light_stored_stop_lateral_margin
+        )
+
+        yaw_diff: float | None = None
+        try:
+            stop_wp = self.map.get_waypoint(stop_loc)
+        except RuntimeError:
+            stop_wp = None
+        if stop_wp is not None:
+            stop_yaw = float(stop_wp.transform.rotation.yaw)
+            ego_yaw = float(transform.rotation.yaw)
+            yaw_diff = abs((stop_yaw - ego_yaw + 180.0) % 360.0 - 180.0)
+
+        yaw_ok = (
+            yaw_diff is None
+            or yaw_diff <= self.config.traffic_light_stored_stop_max_yaw_diff_deg
+        )
+        lateral_ok = abs(lateral_offset) <= lateral_limit
+        return yaw_ok and lateral_ok, yaw_diff, lateral_offset, lateral_limit
+
     def _check_traffic_light(
         self,
         transform: "carla.Transform",
@@ -1416,7 +1468,8 @@ class PrivilegedExpert:
            road_id changes at the junction boundary.
         2. **Fast path** — CARLA's built-in ``is_at_traffic_light()``.
         3. **Junction-aware scan** — stop-line distance via
-           ``get_affected_lane_waypoints()`` for early braking.
+              ``get_stop_waypoints()`` (preferred) then
+              ``get_affected_lane_waypoints()`` for early braking.
         """
         ego_loc = transform.location
 
@@ -1440,12 +1493,22 @@ class PrivilegedExpert:
                     sdy = self._tl_stop_loc.y - ego_loc.y
                     stop_behind = (fwd.x * sdx + fwd.y * sdy) <= 0
                     stale_far = stop_dist > self.config.traffic_light_brake_distance * 1.5
-                    if stale_far or stop_behind:
+                    plausible, yaw_diff, lat_off, lat_lim = self._stored_tl_stop_plausibility(
+                        transform,
+                        self._tl_stop_loc,
+                    )
+                    yaw_txt = f"{yaw_diff:.1f}" if yaw_diff is not None else "None"
+                    if stale_far or stop_behind or not plausible:
                         logger.debug(
-                            "T1-STORED: stale clear id=%d stop_dist=%.1f behind=%s",
+                            "T1-STORED: stale clear id=%d stop_dist=%.1f "
+                            "behind=%s plausible=%s yaw_diff=%s lat=%.2f lat_lim=%.2f",
                             self._tl_waiting,
                             stop_dist,
                             stop_behind,
+                            plausible,
+                            yaw_txt,
+                            lat_off,
+                            lat_lim,
                         )
                         self._tl_waiting = None
                         self._tl_stop_loc = None
@@ -1453,11 +1516,15 @@ class PrivilegedExpert:
                         # Fall through to Tier 2 / Tier 3.
                     else:
                         logger.debug(
-                            "T1-STORED: id=%d state=%s " "stop_dist=%.1f pole_dist=%.1f",
+                            "T1-STORED: id=%d state=%s stop_dist=%.1f pole_dist=%.1f "
+                            "yaw_diff=%s lat=%.2f lat_lim=%.2f",
                             self._tl_waiting,
                             tl_actor.state,
                             stop_dist,
                             ego_loc.distance(tl_loc),
+                            yaw_txt,
+                            lat_off,
+                            lat_lim,
                         )
                         return tl_actor.state, stop_dist
                 else:
@@ -1474,22 +1541,36 @@ class PrivilegedExpert:
                         stale_far = (
                             recovered_stop_dist > self.config.traffic_light_brake_distance * 1.5
                         )
-                        if stale_far or stop_behind:
+                        plausible, yaw_diff, lat_off, lat_lim = self._stored_tl_stop_plausibility(
+                            transform,
+                            stop_loc,
+                        )
+                        yaw_txt = f"{yaw_diff:.1f}" if yaw_diff is not None else "None"
+                        if stale_far or stop_behind or not plausible:
                             logger.debug(
-                                "T1-RECOVERED: stale clear id=%d stop_dist=%.1f behind=%s",
+                                "T1-RECOVERED: stale clear id=%d stop_dist=%.1f "
+                                "behind=%s plausible=%s yaw_diff=%s lat=%.2f lat_lim=%.2f",
                                 self._tl_waiting,
                                 recovered_stop_dist,
                                 stop_behind,
+                                plausible,
+                                yaw_txt,
+                                lat_off,
+                                lat_lim,
                             )
                             self._tl_waiting = None
                             self._tl_stop_loc = None
                             self._tl_proceed_committed = False
                         else:
                             logger.debug(
-                                "T1-RECOVERED: id=%d state=%s stop_dist=%.1f",
+                                "T1-RECOVERED: id=%d state=%s stop_dist=%.1f "
+                                "yaw_diff=%s lat=%.2f lat_lim=%.2f",
                                 self._tl_waiting,
                                 tl_actor.state,
                                 recovered_stop_dist,
+                                yaw_txt,
+                                lat_off,
+                                lat_lim,
                             )
                             return tl_actor.state, recovered_stop_dist
                     else:
@@ -1671,7 +1752,7 @@ class PrivilegedExpert:
     ) -> tuple[float | None, Any]:
         """Distance from ego to the traffic-light's stop line.
 
-        Returns ``(distance, awp_location)`` or ``(None, None)`` if
+        Returns ``(distance, stop_location)`` or ``(None, None)`` if
         the API is unavailable or no stop waypoint matches our lane.
         """
         try:
@@ -1693,44 +1774,71 @@ class PrivilegedExpert:
 
             match_dist = self.config.traffic_light_route_match_distance
             match_yaw = self.config.traffic_light_route_match_yaw_deg
+            waypoint_groups: list[tuple[int, list[Any]]] = []
+            try:
+                stop_wps = list(tl.get_stop_waypoints())
+            except (AttributeError, RuntimeError):
+                stop_wps = []
+            if stop_wps:
+                waypoint_groups.append((0, stop_wps))
 
-            for awp in tl.get_affected_lane_waypoints():
-                lane_semantic_match = (
-                    (awp.road_id, awp.lane_id) in route_lane_keys
-                    or (awp.road_id, awp.lane_id - 1) in route_lane_keys
-                    or (awp.road_id, awp.lane_id + 1) in route_lane_keys
-                )
+            try:
+                affected_wps = list(tl.get_affected_lane_waypoints())
+            except (AttributeError, RuntimeError):
+                affected_wps = []
+            if affected_wps:
+                waypoint_groups.append((1, affected_wps))
 
-                # Heading gate: reject cross-street TLs whose
-                # affected waypoint yaw differs by ~90° from ours.
-                awp_yaw = awp.transform.rotation.yaw
-                ego_yaw_diff = abs((awp_yaw - ego_yaw + 180) % 360 - 180)
-                if ego_yaw_diff > 40.0:
-                    continue
+            best_match: tuple[int, float, Any] | None = None
+            for source_rank, waypoints in waypoint_groups:
+                for awp in waypoints:
+                    lane_semantic_match = (
+                        (awp.road_id, awp.lane_id) in route_lane_keys
+                        or (awp.road_id, awp.lane_id - 1) in route_lane_keys
+                        or (awp.road_id, awp.lane_id + 1) in route_lane_keys
+                    )
 
-                awp_loc = awp.transform.location
-                on_route = any(
-                    awp_loc.distance(rwp.transform.location) < match_dist
-                    and abs((awp_yaw - rwp_yaw + 180) % 360 - 180) < match_yaw
-                    for rwp, rwp_yaw in route_refs
-                )
-                if not on_route:
-                    continue
+                    # Heading gate: reject cross-street TLs whose
+                    # candidate waypoint yaw differs by ~90° from ours.
+                    awp_yaw = awp.transform.rotation.yaw
+                    ego_yaw_diff = abs((awp_yaw - ego_yaw + 180) % 360 - 180)
+                    if ego_yaw_diff > 40.0:
+                        continue
 
-                # Preserve strong semantic preference but allow very
-                # close geometric fallback at junction seams.
-                near_route = any(
-                    awp_loc.distance(rwp.transform.location) < (0.5 * match_dist)
-                    for rwp, _ in route_refs
-                )
-                if lane_semantic_match or near_route:
+                    awp_loc = awp.transform.location
+                    on_route = any(
+                        awp_loc.distance(rwp.transform.location) < match_dist
+                        and abs((awp_yaw - rwp_yaw + 180) % 360 - 180) < match_yaw
+                        for rwp, rwp_yaw in route_refs
+                    )
+                    if not on_route:
+                        continue
+
+                    # Preserve strong semantic preference but allow very
+                    # close geometric fallback at junction seams.
+                    near_route = any(
+                        awp_loc.distance(rwp.transform.location) < (0.5 * match_dist)
+                        for rwp, _ in route_refs
+                    )
+                    if not (lane_semantic_match or near_route):
+                        continue
+
                     # Ensure the stop line is ahead of the ego.
                     fwd = transform.get_forward_vector()
                     sdx = awp_loc.x - transform.location.x
                     sdy = awp_loc.y - transform.location.y
                     if fwd.x * sdx + fwd.y * sdy <= 0:
                         continue
-                    return transform.location.distance(awp_loc), awp_loc
+
+                    cand_dist = transform.location.distance(awp_loc)
+                    if best_match is None or (source_rank, cand_dist) < (
+                        best_match[0],
+                        best_match[1],
+                    ):
+                        best_match = (source_rank, cand_dist, awp_loc)
+
+            if best_match is not None:
+                return best_match[1], best_match[2]
         except (AttributeError, RuntimeError):
             pass
         return None, None
