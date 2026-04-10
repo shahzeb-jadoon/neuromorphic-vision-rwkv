@@ -710,11 +710,11 @@ class ExpertDataCollector:
         Renders several layers so you can see:
           1. **Planned route** — green dots along the remaining route
           2. **Actual position** — orange breadcrumb at current location
-          3. **Upcoming target** — cyan sphere at the expert's steering target
+          3. **Upcoming target** — sky-blue sphere at the expert's steering target
           4. **Detection corridor** — magenta outline of the curve-aware
              lane corridor used for vehicle detection
-          5. **Nearby vehicles** — red box for lead (in-lane) vehicles,
-             yellow box for nearby but out-of-lane vehicles
+             5. **Nearby actors** — white/yellow/red risk coloring for
+                 vehicles and pedestrians, plus INDIGO stop-target markers
           6. **HUD** — driving mode, speed, target speed, lead distance
 
         All markers use ``life_time=0.3`` so they refresh each tick without
@@ -759,15 +759,15 @@ class ExpertDataCollector:
             life_time=8.0,  # persist for 8s to form a visible trail
         )
 
-        # 3. Current steering target — cyan sphere
+        # 3. Current steering target — sky-blue sphere
         if expert._wp_buffer:
             target_wp = expert._wp_buffer[0]
             t_loc = target_wp[0].transform.location
-            CYAN = carla.Color(0, 255, 255)
+            SKY = carla.Color(0, 170, 255)
             debug.draw_point(
                 carla.Location(t_loc.x, t_loc.y, t_loc.z + 1.0),
                 size=0.15,
-                color=CYAN,
+                color=SKY,
                 life_time=life,
             )
             # Line from ego to target
@@ -775,7 +775,7 @@ class ExpertDataCollector:
                 carla.Location(ego_loc.x, ego_loc.y, ego_loc.z + 0.5),
                 carla.Location(t_loc.x, t_loc.y, t_loc.z + 1.0),
                 thickness=0.04,
-                color=CYAN,
+                color=SKY,
                 life_time=life,
             )
 
@@ -817,28 +817,236 @@ class ExpertDataCollector:
                 )
 
         # 5. Nearby vehicle bounding boxes
-        #    Red    = in corridor AND within emergency braking distance
-        #    Orange = in corridor but further away
-        #    Yellow = detected but not in lane / not ahead
+        #    Red    = emergency-risk actor
+        #    Yellow = SAT-overlap/risk actor
+        #    White  = nearby non-critical actor
         RED = carla.Color(255, 0, 0)
-        V_ORANGE = carla.Color(101, 67, 33)
         YELLOW = carla.Color(255, 255, 0)
+        WHITE = carla.Color(255, 255, 255)
+        INDIGO = carla.Color(102, 0, 255)
+        stop_search_radius = 70.0
+        junction_radius = 85.0
+        carla_map = world.get_map()
+
+        def _dot2(a: np.ndarray, b: np.ndarray) -> float:
+            return float(a[0] * b[0] + a[1] * b[1])
+
+        def _local_to_world_no_mutate(tf: Any, loc: Any) -> Any:
+            yaw = math.radians(float(tf.rotation.yaw))
+            cos_y = math.cos(yaw)
+            sin_y = math.sin(yaw)
+            x = cos_y * float(loc.x) - sin_y * float(loc.y) + float(tf.location.x)
+            y = sin_y * float(loc.x) + cos_y * float(loc.y) + float(tf.location.y)
+            z = float(loc.z) + float(tf.location.z)
+            return carla.Location(x=x, y=y, z=z)
+
+        def _circular_mean_deg(values: list[float]) -> float:
+            if not values:
+                return 0.0
+            s = sum(math.sin(math.radians(v)) for v in values)
+            c = sum(math.cos(math.radians(v)) for v in values)
+            return math.degrees(math.atan2(s, c))
+
+        def _collect_same_direction_lane_band(base_wp: Any) -> list[Any]:
+            band = [base_wp]
+            seen_ids = {int(base_wp.id)}
+            base_sign = 1 if int(getattr(base_wp, "lane_id", 1)) >= 0 else -1
+
+            def _walk(side: str) -> None:
+                current = base_wp
+                while True:
+                    next_wp = (
+                        current.get_left_lane() if side == "left" else current.get_right_lane()
+                    )
+                    if next_wp is None:
+                        return
+                    if next_wp.lane_type != carla.LaneType.Driving:
+                        return
+                    next_sign = 1 if int(getattr(next_wp, "lane_id", 1)) >= 0 else -1
+                    if next_sign != base_sign:
+                        return
+                    next_id = int(next_wp.id)
+                    if next_id in seen_ids:
+                        return
+                    seen_ids.add(next_id)
+                    band.append(next_wp)
+                    current = next_wp
+
+            _walk("left")
+            _walk("right")
+            return band
+
+        def _collect_road_driving_lane_band(base_wp: Any) -> list[Any]:
+            band = [base_wp]
+            seen_lane_ids = {int(getattr(base_wp, "lane_id", 0))}
+            base_road_id = int(getattr(base_wp, "road_id", -1))
+
+            def _walk(side: str) -> None:
+                current = base_wp
+                while True:
+                    next_wp = (
+                        current.get_left_lane() if side == "left" else current.get_right_lane()
+                    )
+                    if next_wp is None:
+                        return
+                    if next_wp.lane_type != carla.LaneType.Driving:
+                        return
+                    if int(getattr(next_wp, "road_id", -2)) != base_road_id:
+                        return
+                    lane_id = int(getattr(next_wp, "lane_id", 0))
+                    if lane_id in seen_lane_ids:
+                        return
+                    seen_lane_ids.add(lane_id)
+                    band.append(next_wp)
+                    current = next_wp
+
+            _walk("left")
+            _walk("right")
+            return band
+
+        def _compute_lane_zone(
+            waypoints: list[Any],
+            z_offset: float = 0.06,
+        ) -> tuple[Any, Any, float, float] | None:
+            if not waypoints:
+                return None
+
+            locs = [wp.transform.location for wp in waypoints]
+            yaws = [float(wp.transform.rotation.yaw) for wp in waypoints]
+            lane_widths = [float(getattr(wp, "lane_width", 3.5)) for wp in waypoints]
+
+            center = carla.Location(
+                x=float(np.mean([loc.x for loc in locs])),
+                y=float(np.mean([loc.y for loc in locs])),
+                z=float(np.mean([loc.z for loc in locs])) + z_offset,
+            )
+            yaw = _circular_mean_deg(yaws)
+            lane_w = max(2.6, float(np.mean(lane_widths)) if lane_widths else 3.5)
+
+            lane_span = 0.0
+            for i in range(len(locs)):
+                for j in range(i + 1, len(locs)):
+                    lane_span = max(lane_span, float(locs[i].distance(locs[j])))
+
+            total_width = lane_w if len(locs) == 1 else lane_span + lane_w
+            depth = max(1.2, min(2.2, lane_w * 0.6))
+            rot = carla.Rotation(pitch=0.0, yaw=float(yaw), roll=0.0)
+            return center, rot, total_width, depth
+
+        def _collect_tl_waypoints(tl: Any) -> list[Any]:
+            try:
+                swps = list(tl.get_stop_waypoints())
+            except (AttributeError, RuntimeError):
+                swps = []
+            if swps:
+                return swps
+            try:
+                return list(tl.get_affected_lane_waypoints())
+            except (AttributeError, RuntimeError):
+                return []
+
+        def _collect_sign_waypoints(sign: Any, trigger_loc: Any) -> list[Any]:
+            try:
+                affected = list(sign.get_affected_lane_waypoints())
+            except (AttributeError, RuntimeError):
+                affected = []
+
+            driving = [wp for wp in affected if wp.lane_type == carla.LaneType.Driving]
+            if driving:
+                return driving
+
+            base_wp = carla_map.get_waypoint(
+                trigger_loc,
+                project_to_road=True,
+                lane_type=carla.LaneType.Driving,
+            )
+            if base_wp is None:
+                return []
+            return _collect_same_direction_lane_band(base_wp)
+
+        def _road_id_at(loc: Any) -> int | None:
+            wp = carla_map.get_waypoint(
+                loc,
+                project_to_road=True,
+                lane_type=carla.LaneType.Driving,
+            )
+            if wp is None:
+                return None
+            return int(wp.road_id)
+
+        def _ego_road_width_cap() -> tuple[float, int | None]:
+            ego_wp = carla_map.get_waypoint(
+                ego_loc,
+                project_to_road=True,
+                lane_type=carla.LaneType.Driving,
+            )
+            if ego_wp is None:
+                return 12.0, None
+
+            band = _collect_road_driving_lane_band(ego_wp)
+            if not band:
+                return max(2.6, float(getattr(ego_wp, "lane_width", 3.5))), int(ego_wp.road_id)
+
+            total_width = sum(max(0.1, float(getattr(wp, "lane_width", 3.5))) for wp in band)
+            return max(2.6, float(total_width)), int(ego_wp.road_id)
+
+        def _trigger_edge_toward_junction(
+            sign_tf: Any,
+            trigger_center: Any,
+            trigger_extent_x: float,
+        ) -> Any:
+            yaw = math.radians(float(sign_tf.rotation.yaw))
+            fwd_x = math.cos(yaw)
+            fwd_y = math.sin(yaw)
+
+            cand_plus = carla.Location(
+                x=float(trigger_center.x) + fwd_x * trigger_extent_x,
+                y=float(trigger_center.y) + fwd_y * trigger_extent_x,
+                z=float(trigger_center.z),
+            )
+            cand_minus = carla.Location(
+                x=float(trigger_center.x) - fwd_x * trigger_extent_x,
+                y=float(trigger_center.y) - fwd_y * trigger_extent_x,
+                z=float(trigger_center.z),
+            )
+
+            def _junction_score(loc: Any) -> int:
+                wp = carla_map.get_waypoint(
+                    loc,
+                    project_to_road=True,
+                    lane_type=carla.LaneType.Driving,
+                )
+                if wp is None:
+                    return 2
+                return 0 if wp.is_junction else 1
+
+            plus_score = _junction_score(cand_plus)
+            minus_score = _junction_score(cand_minus)
+            if plus_score < minus_score:
+                return cand_plus
+            if minus_score < plus_score:
+                return cand_minus
+            return cand_plus
 
         if info is not None:
-            emrg_dist = expert.config.vehicle_emergency_distance
+            speed_ms = float(getattr(info, "current_speed", 0.0)) / 3.6
+            emrg_dist = max(
+                float(expert.config.vehicle_emergency_distance),
+                speed_ms * float(expert.config.vehicle_emergency_time),
+            )
 
-            for i, v_info in enumerate(info.nearby_vehicles):
+            for v_info in info.nearby_vehicles:
                 obb_flag = v_info.get("obb_in_lane", False)
                 is_ahead_same = v_info.get("is_ahead", False) and v_info.get("same_direction", True)
 
-                color = YELLOW
+                color = WHITE
                 if obb_flag and is_ahead_same:
                     if v_info["distance"] < emrg_dist:
                         color = RED
                     else:
-                        color = V_ORANGE
+                        color = YELLOW
                 elif obb_flag:
-                    color = V_ORANGE
+                    color = YELLOW
 
                 # Draw marker at the detected vehicle's true world position
                 # when available; fallback to ego-relative reconstruction.
@@ -868,18 +1076,45 @@ class ExpertDataCollector:
                 )
 
             # 5b. Nearby pedestrian markers
-            #     Red    = in lane corridor (ahead + lateral < ped half-width)
-            #     Yellow = nearby but out of lane
-            P_RED = carla.Color(255, 50, 50)
-            P_YELLOW = carla.Color(255, 255, 100)
+            #     Red    = emergency crossing risk
+            #     Yellow = in-lane / predicted crossing risk
+            #     White  = nearby non-critical
             ped_half_w = expert.config.pedestrian_lane_half_width
+            ped_emrg_dist = (
+                float(getattr(expert.config, "pedestrian_emergency_distance", 6.0)) + 5.0
+            )
             fwd = vehicle.get_transform().get_forward_vector()
             right = carla.Vector3D(-fwd.y, fwd.x, 0)
             for p_info in getattr(info, "nearby_pedestrians", []):
-                in_lane = p_info["is_ahead"] and abs(p_info["lateral"]) < ped_half_w
-                p_color = P_RED if in_lane else P_YELLOW
-                px = ego_loc.x + fwd.x * p_info["longitudinal"] + right.x * p_info["lateral"]
-                py = ego_loc.y + fwd.y * p_info["longitudinal"] + right.y * p_info["lateral"]
+                longitudinal = float(p_info.get("longitudinal", 0.0))
+                lateral = float(p_info.get("lateral", 0.0))
+                pred_ahead = bool(p_info.get("predicted_ahead", p_info.get("is_ahead", False)))
+                pred_lateral = float(p_info.get("predicted_lateral", lateral))
+                pred_dist = float(p_info.get("predicted_distance", p_info.get("distance", 0.0)))
+
+                in_lane_now = bool(p_info.get("is_ahead", False)) and abs(lateral) < ped_half_w
+                in_lane_pred = pred_ahead and abs(pred_lateral) < ped_half_w
+                risk = in_lane_now or in_lane_pred
+
+                pred_long_sq = max(0.0, pred_dist * pred_dist - pred_lateral * pred_lateral)
+                pred_long = math.sqrt(pred_long_sq)
+                if not pred_ahead:
+                    pred_long = -pred_long
+
+                emergency_now = in_lane_now and longitudinal <= ped_emrg_dist
+                emergency_pred = in_lane_pred and pred_long <= ped_emrg_dist
+                emergency_dist = risk and float(p_info.get("distance", 999.0)) <= ped_emrg_dist
+                emergency = emergency_now or emergency_pred or emergency_dist
+
+                if emergency:
+                    p_color = RED
+                elif risk:
+                    p_color = YELLOW
+                else:
+                    p_color = WHITE
+
+                px = ego_loc.x + fwd.x * longitudinal + right.x * lateral
+                py = ego_loc.y + fwd.y * longitudinal + right.y * lateral
                 pz = ego_loc.z + 1.0
                 debug.draw_point(
                     carla.Location(px, py, pz),
@@ -895,6 +1130,372 @@ class ExpertDataCollector:
                     life_time=life,
                 )
 
+                if in_lane_pred:
+                    pred_px = ego_loc.x + fwd.x * pred_long + right.x * pred_lateral
+                    pred_py = ego_loc.y + fwd.y * pred_long + right.y * pred_lateral
+                    pred_color = RED if emergency else YELLOW
+                    debug.draw_point(
+                        carla.Location(pred_px, pred_py, ego_loc.z + 1.0),
+                        size=0.08,
+                        color=pred_color,
+                        life_time=life,
+                    )
+
+            # 5c. Stop targets (traffic light/stop/yield) in INDIGO,
+            #     with WHITE highlight for the actively followed control.
+            actors = world.get_actors()
+            ego_tf = vehicle.get_transform()
+            ego_fwd = ego_tf.get_forward_vector()
+            ego_fwd_2d = np.array([float(ego_fwd.x), float(ego_fwd.y)], dtype=np.float64)
+            fwd_norm = np.linalg.norm(ego_fwd_2d)
+            if fwd_norm < 1e-6:
+                ego_fwd_2d = np.array([1.0, 0.0], dtype=np.float64)
+            else:
+                ego_fwd_2d /= fwd_norm
+
+            road_width_cap, _ = _ego_road_width_cap()
+            controls: list[dict[str, Any]] = []
+
+            def _ahead_longitudinal(target_loc: Any) -> float:
+                rel = np.array(
+                    [float(target_loc.x - ego_loc.x), float(target_loc.y - ego_loc.y)],
+                    dtype=np.float64,
+                )
+                return _dot2(rel, ego_fwd_2d)
+
+            for tl in actors.filter("traffic.traffic_light*"):
+                tl_loc = tl.get_transform().location
+                if tl_loc.distance(ego_loc) > stop_search_radius:
+                    continue
+
+                stop_wps = _collect_tl_waypoints(tl)
+                ahead_wps: list[tuple[Any, Any, float]] = []
+                for wp in stop_wps:
+                    loc = wp.transform.location
+                    if loc.distance(ego_loc) > stop_search_radius:
+                        continue
+                    longitudinal = _ahead_longitudinal(loc)
+                    if longitudinal <= 0.0:
+                        continue
+                    ahead_wps.append((wp, loc, longitudinal))
+                if not ahead_wps:
+                    continue
+
+                zone = _compute_lane_zone([wp for wp, _loc, _lon in ahead_wps], z_offset=0.85)
+                if zone is None:
+                    continue
+                zone_center, zone_rot, zone_width, zone_depth = zone
+                zone_width = min(zone_width, road_width_cap)
+
+                _best_wp, best_loc, best_long = min(
+                    ahead_wps,
+                    key=lambda item: float(item[1].distance(ego_loc)),
+                )
+                controls.append(
+                    {
+                        "kind": "TL",
+                        "actor_id": int(tl.id),
+                        "shape": "box",
+                        "box_center": zone_center,
+                        "box_rot": zone_rot,
+                        "box_depth": float(zone_depth),
+                        "box_width": float(zone_width),
+                        "box_height_half": 2.0,
+                        "anchor_loc": best_loc,
+                        "label_loc": carla.Location(
+                            x=float(tl_loc.x),
+                            y=float(tl_loc.y),
+                            z=float(tl_loc.z) + 2.8,
+                        ),
+                        "distance": float(best_loc.distance(ego_loc)),
+                        "longitudinal": float(best_long),
+                        "road_id": _road_id_at(best_loc),
+                    }
+                )
+
+            for sign in actors.filter("traffic.stop*"):
+                trigger = getattr(sign, "trigger_volume", None)
+                if trigger is None:
+                    continue
+
+                sign_tf = sign.get_transform()
+                trigger_loc = _local_to_world_no_mutate(sign_tf, trigger.location)
+                if trigger_loc.distance(ego_loc) > stop_search_radius:
+                    continue
+                longitudinal = _ahead_longitudinal(trigger_loc)
+                if longitudinal <= 0.0:
+                    continue
+
+                sign_wps = _collect_sign_waypoints(sign, trigger_loc)
+                zone = _compute_lane_zone(sign_wps, z_offset=0.06)
+                if zone is not None:
+                    zone_center, zone_rot, zone_width, zone_depth = zone
+                else:
+                    zone_center = carla.Location(
+                        x=float(trigger_loc.x),
+                        y=float(trigger_loc.y),
+                        z=float(trigger_loc.z) + 0.06,
+                    )
+                    zone_rot = carla.Rotation(
+                        pitch=0.0,
+                        yaw=float(sign_tf.rotation.yaw),
+                        roll=0.0,
+                    )
+                    zone_width = max(2.6, float(trigger.extent.y) * 2.0)
+                    zone_depth = max(1.2, float(trigger.extent.x) * 2.0)
+
+                zone_width = min(zone_width, road_width_cap)
+
+                sign_loc = sign_tf.location
+                controls.append(
+                    {
+                        "kind": "STOP",
+                        "actor_id": int(sign.id),
+                        "shape": "box",
+                        "box_center": zone_center,
+                        "box_rot": zone_rot,
+                        "box_depth": float(zone_depth),
+                        "box_width": float(zone_width),
+                        "box_height_half": 1.0,
+                        "anchor_loc": zone_center,
+                        "label_loc": carla.Location(
+                            x=float(sign_loc.x),
+                            y=float(sign_loc.y),
+                            z=float(sign_loc.z) + 2.4,
+                        ),
+                        "distance": float(zone_center.distance(ego_loc)),
+                        "longitudinal": float(longitudinal),
+                        "road_id": _road_id_at(zone_center),
+                    }
+                )
+
+            for sign in actors.filter("traffic.yield*"):
+                trigger = getattr(sign, "trigger_volume", None)
+                if trigger is None:
+                    continue
+
+                sign_tf = sign.get_transform()
+                trigger_loc = _local_to_world_no_mutate(sign_tf, trigger.location)
+                if trigger_loc.distance(ego_loc) > stop_search_radius:
+                    continue
+                longitudinal = _ahead_longitudinal(trigger_loc)
+                if longitudinal <= 0.0:
+                    continue
+
+                sign_wps = _collect_sign_waypoints(sign, trigger_loc)
+                zone = _compute_lane_zone(sign_wps, z_offset=0.06)
+                if zone is not None:
+                    _zone_center, zone_rot, zone_width, _zone_depth = zone
+                else:
+                    zone_rot = carla.Rotation(
+                        pitch=0.0,
+                        yaw=float(sign_tf.rotation.yaw),
+                        roll=0.0,
+                    )
+                    zone_width = max(2.6, float(trigger.extent.y) * 2.0)
+
+                zone_width = min(zone_width, road_width_cap)
+                line_center = _trigger_edge_toward_junction(
+                    sign_tf,
+                    trigger_loc,
+                    max(0.1, float(trigger.extent.x)),
+                )
+                yaw = math.radians(float(zone_rot.yaw))
+                right_x = -math.sin(yaw)
+                right_y = math.cos(yaw)
+                half_width = float(zone_width) * 0.5
+                line_z = float(line_center.z) + 0.03
+                p1 = carla.Location(
+                    x=float(line_center.x) - right_x * half_width,
+                    y=float(line_center.y) - right_y * half_width,
+                    z=line_z,
+                )
+                p2 = carla.Location(
+                    x=float(line_center.x) + right_x * half_width,
+                    y=float(line_center.y) + right_y * half_width,
+                    z=line_z,
+                )
+
+                sign_loc = sign_tf.location
+                line_longitudinal = _ahead_longitudinal(line_center)
+                controls.append(
+                    {
+                        "kind": "YIELD",
+                        "actor_id": int(sign.id),
+                        "shape": "line",
+                        "line_p1": p1,
+                        "line_p2": p2,
+                        "anchor_loc": line_center,
+                        "label_loc": carla.Location(
+                            x=float(sign_loc.x),
+                            y=float(sign_loc.y),
+                            z=float(sign_loc.z) + 2.4,
+                        ),
+                        "distance": float(line_center.distance(ego_loc)),
+                        "longitudinal": float(line_longitudinal),
+                        "road_id": _road_id_at(line_center),
+                    }
+                )
+
+            if controls:
+                active_control: dict[str, Any] | None = None
+
+                tl_following_id = int(getattr(info, "traffic_light_actor_id", -1))
+                if tl_following_id > 0:
+                    for c in controls:
+                        if c["kind"] == "TL" and int(c.get("actor_id", -1)) == tl_following_id:
+                            active_control = c
+                            break
+
+                if active_control is None:
+                    stop_following_id = getattr(expert, "_stop_sign_active", None)
+                    if stop_following_id is not None:
+                        for c in controls:
+                            if c["kind"] == "STOP" and int(c.get("actor_id", -1)) == int(
+                                stop_following_id
+                            ):
+                                active_control = c
+                                break
+
+                if active_control is None:
+                    yield_following_id = getattr(expert, "_yield_active", None)
+                    if yield_following_id is not None:
+                        for c in controls:
+                            if c["kind"] == "YIELD" and int(c.get("actor_id", -1)) == int(
+                                yield_following_id
+                            ):
+                                active_control = c
+                                break
+
+                # Show approach target before commit/activation so stop/yield
+                # visualisation appears as soon as planning starts slowing.
+                if active_control is None:
+                    stop_distance = float(getattr(info, "stop_sign_distance", -1.0))
+                    if stop_distance > 0.0:
+                        stop_controls = [
+                            c
+                            for c in controls
+                            if c["kind"] == "STOP" and float(c.get("longitudinal", -1.0)) > 0.0
+                        ]
+                        if stop_controls:
+                            active_control = min(
+                                stop_controls,
+                                key=lambda c: abs(float(c["distance"]) - stop_distance),
+                            )
+
+                if active_control is None:
+                    yield_distance = float(getattr(info, "yield_sign_distance", -1.0))
+                    if yield_distance > 0.0:
+                        yield_controls = [
+                            c
+                            for c in controls
+                            if c["kind"] == "YIELD" and float(c.get("longitudinal", -1.0)) > 0.0
+                        ]
+                        if yield_controls:
+                            active_control = min(
+                                yield_controls,
+                                key=lambda c: abs(float(c["distance"]) - yield_distance),
+                            )
+
+                if active_control is not None:
+                    if active_control["shape"] == "box":
+                        debug.draw_box(
+                            carla.BoundingBox(
+                                active_control["box_center"],
+                                carla.Vector3D(
+                                    x=float(active_control["box_depth"]) * 0.5,
+                                    y=float(active_control["box_width"]) * 0.5,
+                                    z=float(active_control["box_height_half"]),
+                                ),
+                            ),
+                            active_control["box_rot"],
+                            thickness=0.13,
+                            color=INDIGO,
+                            life_time=life,
+                        )
+                    else:
+                        debug.draw_line(
+                            active_control["line_p1"],
+                            active_control["line_p2"],
+                            thickness=0.12,
+                            color=INDIGO,
+                            life_time=life,
+                        )
+
+                    marker = active_control["label_loc"]
+                    kind = active_control["kind"]
+                    dist = float(active_control["distance"])
+                    debug.draw_point(
+                        marker,
+                        size=0.15,
+                        color=WHITE,
+                        life_time=life,
+                    )
+                    debug.draw_string(
+                        carla.Location(marker.x, marker.y, marker.z + 0.55),
+                        f"{kind} {dist:.1f}m",
+                        draw_shadow=True,
+                        color=WHITE,
+                        life_time=life,
+                    )
+                    debug.draw_line(
+                        marker,
+                        carla.Location(
+                            x=float(active_control["anchor_loc"].x),
+                            y=float(active_control["anchor_loc"].y),
+                            z=float(active_control["anchor_loc"].z) + 0.10,
+                        ),
+                        thickness=0.04,
+                        color=WHITE,
+                        life_time=life,
+                    )
+
+        # 5d. Junction bounds — draw only current or upcoming route junctions.
+        selected_junction_boxes: list[Any] = []
+        selected_junction_ids: set[int] = set()
+
+        ego_wp = carla_map.get_waypoint(
+            ego_loc,
+            project_to_road=True,
+            lane_type=carla.LaneType.Driving,
+        )
+        if ego_wp is not None and ego_wp.is_junction:
+            junction = ego_wp.get_junction()
+            if junction is not None:
+                jid = int(junction.id)
+                selected_junction_ids.add(jid)
+                selected_junction_boxes.append(junction.bounding_box)
+
+        route_sources_fn = getattr(expert, "_route_waypoint_sources", None)
+        if callable(route_sources_fn):
+            try:
+                for rwp, _ in route_sources_fn(lookahead=180):
+                    if not getattr(rwp, "is_junction", False):
+                        continue
+                    junction = rwp.get_junction()
+                    if junction is None:
+                        continue
+                    jid = int(junction.id)
+                    if jid in selected_junction_ids:
+                        continue
+                    selected_junction_ids.add(jid)
+                    selected_junction_boxes.append(junction.bounding_box)
+                    if len(selected_junction_boxes) >= 2:
+                        break
+            except (AttributeError, RuntimeError, TypeError):
+                pass
+
+        for bb in selected_junction_boxes:
+            if bb.location.distance(ego_loc) > junction_radius:
+                continue
+            debug.draw_box(
+                bb,
+                getattr(bb, "rotation", carla.Rotation()),
+                thickness=0.08,
+                color=GREEN,
+                life_time=life,
+            )
+
         # 6. HUD — frame, mode, speed, target speed
         from agents.expert.privileged_expert import DrivingMode
 
@@ -905,10 +1506,16 @@ class ExpertDataCollector:
         # Lead vehicle distance from nearby_vehicles (union check)
         lead_str = "--"
         half_w = getattr(expert, "_cached_half_lane", expert.config.lane_half_width)
+        allow_lateral_fallback = bool(
+            getattr(expert.config, "vehicle_allow_lateral_fallback", True)
+        )
         if info is not None:
             for v_info in info.nearby_vehicles:
                 is_ahead_same = v_info["is_ahead"] and v_info["same_direction"]
-                in_lane = v_info["obb_in_lane"] or abs(v_info["lateral"]) < half_w
+                if allow_lateral_fallback:
+                    in_lane = v_info["obb_in_lane"] or abs(v_info["lateral"]) < half_w
+                else:
+                    in_lane = bool(v_info["obb_in_lane"])
                 if is_ahead_same and in_lane:
                     lead_str = f"{v_info['distance']:.0f}m"
                     break
