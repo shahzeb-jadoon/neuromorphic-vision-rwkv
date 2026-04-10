@@ -7,6 +7,13 @@
 
 ---
 
+## Update (2026-04-10)
+
+F1 is intentionally deferred on this branch by user decision. Keep
+`stop_sign_route_proximity=2.5` for now to avoid adjacent-lane false stops.
+
+---
+
 ## Summary
 
 The stop sign detection Phase 1 gate uses `stop_sign_route_proximity` from `configs/collection.yaml` (currently set to `2.5` m) to determine whether a stop sign's trigger-volume center is "close enough" to any waypoint in the ego's buffer to be considered relevant.

@@ -1,23 +1,35 @@
 # ISSUE-06 — Monitoring & Instrumentation Gaps
 
-> **Status:** Not fixed
-> **Priority:** Tier 0 (F2, F3, F4, F5 — all trivial)
+> **Status:** Mostly fixed
+> **Priority:** Tier 0 complete; keep as historical reference + verification checklist
 > **Implementation plan tasks:** F2, F3, F4, F5
 > **Connected issues:** [ISSUE-01](ISSUE-01-junction-waypoints.md) (F3/F4 are required to verify ISSUE-01 fixes), [ISSUE-03](ISSUE-03-lane-change-mislabeling.md) (F5 makes manifest accurate for lane-change monitoring)
 
 ---
 
+## Update (2026-04-10)
+
+- **F2 DONE:** timeout is 80s in config.
+- **F3 DONE:** `gap_fill_diverged`/`gap_fill_rpcs` are written to HDF5.
+- **F4 DONE:** `route_completion` is written to HDF5.
+- **F5 DONE:** manifest/nav distribution includes classes 5 and 6.
+- **F1 DEFERRED:** explicit user scope decision.
+
+The sections below are preserved as historical forensic context.
+
+---
+
 ## Summary
 
-Four small instrumentation and configuration problems grouped here because they are all Tier 0 (zero risk, no logic changes) and should all be done in a single sitting before any other work.
+Four small instrumentation and configuration problems were grouped here because they were Tier 0 (zero risk, no logic changes).
 
 | # | Fix | File | What's wrong | What to change |
 |---|-----|------|-------------|----------------|
-| F1 | `stop_sign_route_proximity` | `configs/collection.yaml` | 2.5 m too tight for curved approaches | Change to 4.0 m |
-| F2 | `timeout_duration` | `configs/collection.yaml` | 75 s causes spurious timeouts | Change to 80 s |
-| F3 | `gap_fill_diverged` → HDF5 | `src/data/expert_collector.py` | Computed in `FrameInfo`, never written to HDF5 | Add 2 lines to dataset writer |
-| F4 | `route_completion` → HDF5 | `src/data/expert_collector.py` | Computed as property, never persisted | Add scalar dataset per episode |
-| F5 | Manifest `nav_distribution` | manifest writer | Only sums nav 1–4, hides classes 5+6 | Add nav 5 and 6 to the sum |
+| F1 | `stop_sign_route_proximity` | `configs/collection.yaml` | User-deferred; keep 2.5 for this branch | No change (explicit scope decision) |
+| F2 | `timeout_duration` | `configs/collection.yaml` | **DONE** (`017b71a`) | Set to 80 s |
+| F3 | `gap_fill_diverged` → HDF5 | `src/data/expert_collector.py` | **DONE** (`75b10c9`) | Persisted in dataset creation/write path |
+| F4 | `route_completion` → HDF5 | `src/data/expert_collector.py` | **DONE** (`75b10c9`) | Persisted per frame |
+| F5 | Manifest `nav_distribution` | manifest writer | **DONE** (`3baf485`, `77ed724`) | Includes nav 5 and 6 |
 
 *(F1 is documented in full in [ISSUE-05](ISSUE-05-stop-sign-proximity.md). Included in the table above for completeness.)*
 

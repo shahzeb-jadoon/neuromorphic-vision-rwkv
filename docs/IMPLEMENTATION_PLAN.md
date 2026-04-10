@@ -1,25 +1,27 @@
 # Implementation Plan — Remaining Work
 
-> **Last updated:** 2026-03-31
+> **Last updated:** 2026-04-10
 > **Schema:** v3.1 — 3-camera panoramic (3×640×320, 60° FOV, yaws −60/0/+60°),
 >   PrivilegedExpert agent, RoadOption nav commands, privileged metadata + corridor diagnostics per frame.
-> **Current branch:** `phase-1/stop-sign-trigger-fix`
-> **Latest commit on this branch:** `514a2b8` — `fix(expert): Town07-specific stop sign + yield TV-center route proximity`
-> **If revert needed:** `git checkout 514a2b8` or check out any commit in the log below.
+> **Current branch:** `feature/issue-01-bezier-arc`
+> **Latest verified baseline commit:** `1bda16c` — `feat(debug): add route-scoped overlays and visualization tooling`
+> **If revert needed:** use a commit from the verified log below.
 
-### Relevant commit log (branch `phase-1/stop-sign-trigger-fix`)
+### Relevant commit log (April sync window)
 
 ```
-514a2b8  fix(expert): Town07-specific stop sign + yield TV-center route proximity
-375ace4  feat(expert): trigger-centric + 2D distance stop sign detection
-9e8bffa  feat(expert): add yield sign detection and conflict-aware stopping
-b532b75  fix(collect): wire steering_noise_sigma from YAML to ExpertConfig
-5614351  feat(data): expand nav commands to 6 classes + trajectory extrapolation
-b3134f0  docs: update Phase 2 plan
-a854d38  fix(scripts): update test collection towns to Town07 + Town10HD
-474ad7d  feat(scripts): data maintenance utilities for manifest cleaning and duplicate deletion
-847e731  fix(collector): use dark brown debug marker for corridor vehicle visualization
-50bc5ed  fix(expert): tighten SAT corridor margins to prevent adjacent-lane false positives
+017b71a  fix(config): increase timeout_duration 75→80 seconds
+75b10c9  feat(data): write gap_fill_diverged and route_completion to HDF5
+3baf485  fix(manifest): include nav classes 5–6 in distribution
+77ed724  fix(data): include nav commands 5/6 in manifest distribution
+4b5c1e0  fix(expert): use dynamic lane width for pedestrian hazards
+fbf0939  fix(expert): suppress lane-change labels during turn approach
+f0e4549  fix(expert): ignore stopped lead vehicles while turning
+a24e48a  fix(expert): refine stopped-lead handling with lateral gate
+2c8b0e5  fix(expert): let red traffic lights outrank vehicle-follow mode
+ef3a25e  fix(expert): refresh TL stop line after buffer changes
+aabf657  fix(expert): harden TL persistence and hazard arbitration
+1bda16c  feat(debug): add route-scoped overlays and visualization tooling
 ```
 
 ---
@@ -32,7 +34,12 @@ a854d38  fix(scripts): update test collection towns to Town07 + Town10HD
 Schema v3.1 with corridor diagnostics
 Test collection run: 18 episodes across 6 towns
   Towns: Town03, Town04, Town05, Town06, Town07, Town10HD
-  Known issues found — documented below; re-collection blocked until resolved.
+  Remaining blockers are documented below.
+
+Recent hotfixes outside the original F1-F15 table:
+- Town06 TL-drop mitigation in Tier-1 TL memory persistence/recovery logic.
+- Stop/yield approach-phase control visualization before activation.
+- Junction overlay reduced to current/upcoming route junctions only.
 ```
 
 ---
@@ -46,6 +53,15 @@ Test collection run: 18 episodes across 6 towns
 The issues are grouped by risk level. Work through tier by tier, running
 `bash scripts/test_collection.sh` (smoke test) after each tier completes.
 
+### Status Snapshot (2026-04-10)
+
+| State | Items |
+|---|---|
+| Done | F2, F3, F4, F5, F6, F7, F8, F9, F13 |
+| Partially done | F12 (non-junction same-road lane_id override implemented; policy decisions OD-1/OD-2 still open) |
+| Pending | F9b, F10, F11, F14, F15 |
+| Deferred | F1 (user-requested defer) |
+
 ---
 
 ### Tier 0 — Zero-Risk: Config + Pure Instrumentation
@@ -54,10 +70,10 @@ The issues are grouped by risk level. Work through tier by tier, running
 | # | Task | Effort | Issue File | Description |
 |---|------|--------|------------|-------------|
 | F1 | Fix `stop_sign_route_proximity` | 5 min | [ISSUE-05](issues/ISSUE-05-stop-sign-proximity.md) | **User-deferred (2026-04-02):** keep `2.5` to avoid adjacent-lane false stops observed when value > 3.0. |
-| F2 | Fix `timeout_duration` | 2 min | [ISSUE-06](issues/ISSUE-06-monitoring-instrumentation.md) | Change `75` → `80` in `configs/collection.yaml`. Eliminates spurious timeouts. |
-| F3 | Write `gap_fill_diverged` to HDF5 | 15 min | [ISSUE-01](issues/ISSUE-01-junction-waypoints.md) | `FrameInfo` has the field; `expert_collector.py` never writes it. Add 2 lines to dataset creation loop. Required to verify all junction fixes. |
-| F4 | Write `route_completion` to HDF5 | 10 min | [ISSUE-01](issues/ISSUE-01-junction-waypoints.md) | Computed as `_route_index / _route_length` but never persisted. Enables post-hoc correlation of bug timing with route stage. |
-| F5 | Fix manifest `nav_distribution` | 15 min | [ISSUE-03](issues/ISSUE-03-lane-change-mislabeling.md) | Only sums nav values 1–4. Add classes 5 and 6 to the summary. Manifest is currently misleading for lane-change monitoring. |
+| F2 | Fix `timeout_duration` | 2 min | [ISSUE-06](issues/ISSUE-06-monitoring-instrumentation.md) | **DONE** (`017b71a`): `timeout_duration` is `80` in `configs/collection.yaml`. |
+| F3 | Write `gap_fill_diverged` to HDF5 | 15 min | [ISSUE-01](issues/ISSUE-01-junction-waypoints.md) | **DONE** (`75b10c9`): HDF5 dataset creation + per-frame write are present in `expert_collector.py`. |
+| F4 | Write `route_completion` to HDF5 | 10 min | [ISSUE-01](issues/ISSUE-01-junction-waypoints.md) | **DONE** (`75b10c9`): persisted per frame in HDF5. |
+| F5 | Fix manifest `nav_distribution` | 15 min | [ISSUE-03](issues/ISSUE-03-lane-change-mislabeling.md) | **DONE** (`3baf485`, `77ed724`): nav classes 5/6 are included in distribution output. |
 
 ---
 
@@ -66,10 +82,11 @@ The issues are grouped by risk level. Work through tier by tier, running
 
 | # | Task | Effort | Issue File | Description |
 |---|------|--------|------------|-------------|
-| F6 | Fix pedestrian lane half-width | 5 min | [ISSUE-04](issues/ISSUE-04-pedestrian-false-positives.md) | Replace `self.config.pedestrian_lane_half_width` (fixed 3.0 m) with `self._dynamic_half_lane()` (function already exists). 1-line change. Eliminates 38–43% false pedestrian stops. |
-| F7 | Suppress lane-change labels during TURNING | 30 min | [ISSUE-03](issues/ISSUE-03-lane-change-mislabeling.md) | In `_get_target()`, when mode is TURNING or APPROACHING_TURN, force nav label to LANEFOLLOW. Interim fix pending ground-truth `lane_id` detection (F12). |
-| F8 | Skip stopped lead vehicles during TURNING | 30 min | [ISSUE-02](issues/ISSUE-02-traffic-light-state-machine.md) | During TURNING mode, if lead vehicle speed < 0.5 m/s, ignore it for VEHICLE_FOLLOWING. Fixes confirmed Town03 deadlock timeouts. |
-| F9 | VEH_FOLLOW red-light TL override | 45 min | [ISSUE-02](issues/ISSUE-02-traffic-light-state-machine.md) | In VEHICLE_FOLLOWING mode, check persistent TL memory. If RED, override to TRAFFIC_LIGHT_STOP. Prevents confirmed "follow lead through red" violation pattern. |
+| F6 | Fix pedestrian lane half-width | 5 min | [ISSUE-04](issues/ISSUE-04-pedestrian-false-positives.md) | **DONE** (`4b5c1e0`): pedestrian hazard logic uses dynamic lane width. |
+| F7 | Suppress lane-change labels during TURNING | 30 min | [ISSUE-03](issues/ISSUE-03-lane-change-mislabeling.md) | **DONE** (`fbf0939`): TURNING transition behavior no longer emits persistent lane-change labels. |
+| F8 | Turning stopped-lead deadlock fix | 30 min | [ISSUE-02](issues/ISSUE-02-traffic-light-state-machine.md) | **DONE** (`f0e4549`, `a24e48a`, `ea5587d`): implemented lateral-gated blocker logic (not blanket lead skipping). |
+| F9 | VEH_FOLLOW red-light TL override | 45 min | [ISSUE-02](issues/ISSUE-02-traffic-light-state-machine.md) | **DONE** (`2c8b0e5`): red/yellow TL stop intent outranks vehicle-follow targeting. |
+| F9b | Clear yellow-commit on full stop | 20 min | [ISSUE-02](issues/ISSUE-02-traffic-light-state-machine.md) | **PENDING:** add explicit reset of `_tl_proceed_committed` when ego fully stops before the stop line. |
 
 ---
 
@@ -78,10 +95,10 @@ The issues are grouped by risk level. Work through tier by tier, running
 
 | # | Task | Effort | Issue File | Description |
 |---|------|--------|------------|-------------|
-| F10 | Heading-aligned `nexts[]` in `_fill_buffer()` | 2 hr | [ISSUE-01](issues/ISSUE-01-junction-waypoints.md) | Replace `nexts[0]` (arbitrary road-ID order) with `min(nexts, key=angle_to_heading)`. Fixes primary cause of Town07 ep1 fence collision at frame 641. |
-| F11 | Heading-aligned `nexts[]` in `_fill_junction_gaps()` | 1 hr | [ISSUE-01](issues/ISSUE-01-junction-waypoints.md) | Same fix for the gap-fill function. The same `nexts[0]` bug exists on line 755. Must be done alongside F10. |
-| F12 | Ground-truth `lane_id` lane-change detection | 2 hr | [ISSUE-03](issues/ISSUE-03-lane-change-mislabeling.md) | Use `carla.Map.get_waypoint(ego_pos).lane_id` to detect actual lane crossing frame. When F12 is done, F7 (suppression) becomes redundant. |
-| F13 | Fix `_tl_stop_loc` stale reference during TURNING | 3 hr | [ISSUE-02](issues/ISSUE-02-traffic-light-state-machine.md) | Re-evaluate stop-line position when gap-fill fires and buffer waypoints change. Fixes Town05 ep1 partial red-light crossing (55 frames of `tl=3 + speed > 1 km/h`). |
+| F10 | Replace `nexts[0]` in `_fill_buffer()` | 2 hr | [ISSUE-01](issues/ISSUE-01-junction-waypoints.md) | **PENDING:** route-end extension still uses `nexts[0]` (`privileged_expert.py` line 696). |
+| F11 | Replace `nexts[0]` in `_fill_junction_gaps()` | 1 hr | [ISSUE-01](issues/ISSUE-01-junction-waypoints.md) | **PENDING (higher urgency than F10):** live junction path still uses `nexts[0]` (`privileged_expert.py` line 810). |
+| F12 | Ground-truth `lane_id` lane-change detection | 2 hr | [ISSUE-03](issues/ISSUE-03-lane-change-mislabeling.md) | **PARTIAL:** non-junction, same-road lane_id crossing override exists. OD-1/OD-2 still required for final labeling policy. |
+| F13 | Fix `_tl_stop_loc` stale reference during TURNING | 3 hr | [ISSUE-02](issues/ISSUE-02-traffic-light-state-machine.md) | **DONE** (`ef3a25e`): stop-line reference refresh is called after buffer and gap-fill updates. |
 
 ---
 
@@ -90,7 +107,7 @@ The issues are grouped by risk level. Work through tier by tier, running
 
 | # | Task | Effort | Issue File | Description |
 |---|------|--------|------------|-------------|
-| F14 | Bezier/spline junction arcs | 2–3 days | [ISSUE-01](issues/ISSUE-01-junction-waypoints.md) | Replace `wp.next()` chaining with Bezier curve through junction interior using entry + exit tangent directions. Industry standard (TransFuser, MILE, UniAD). Eliminates the entire `nexts[]` class of bugs. |
+| F14 | Bezier/spline junction arcs | 2–3 days | [ISSUE-01](issues/ISSUE-01-junction-waypoints.md) | Replace `wp.next()` chaining with dense curve samples through junction interior. This approximates dense HD-map lane geometry and eliminates the `nexts[]` class of bugs. |
 | F15 | Road-surface pedestrian check | 3 hr | [ISSUE-04](issues/ISSUE-04-pedestrian-false-positives.md) | Use `carla.Map.get_waypoint(ped_pos)` to check if pedestrian is on a drivable tile. Complete replacement for lateral-distance threshold. Do after F6 is confirmed working. |
 
 ---
@@ -108,8 +125,8 @@ These two decisions require explicit user input. See issue files for full contex
 
 ### Post-Phase-0: Re-Collection Run
 
-Once Tier 0 and Tier 1 are complete and smoke-tested, re-run the full overnight collection.
-Tiers 2 and 3 can follow in the next collection cycle.
+Tier 0 is complete. Tier 1 is complete except F9b.
+Finish F9b, smoke-test, then proceed with Tier 2 (F11 first, then F10).
 
 | Task | Description | Time |
 |------|-------------|------|

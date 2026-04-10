@@ -1,8 +1,8 @@
 # ISSUE-01 — Junction Waypoint Bugs (`nexts[0]` + Gap Fill)
 
-> **Status:** Not fixed
+> **Status:** Partially fixed
 > **Priority:** Tier 2 (heading-aligned fix) → Tier 3 (Bezier arcs)
-> **Implementation plan tasks:** F3, F4, F10, F11, F14
+> **Implementation plan tasks:** F10, F11, F14 (F3/F4 already implemented)
 > **Connected issues:** [ISSUE-02](ISSUE-02-traffic-light-state-machine.md) (TL detection during turns is broken by bad waypoints), [ISSUE-06](ISSUE-06-monitoring-instrumentation.md) (monitoring fields needed to verify fix)
 
 ---
@@ -12,8 +12,8 @@
 The waypoint buffer system uses CARLA's `wp.next(2.0)` API to extend the route. At straight road segments, `nexts[0]` reliably returns the lane-continuation waypoint. At junction exits, `nexts` contains multiple branches (one per possible exit road), ordered by **internal CARLA road ID** — not by heading alignment to the ego vehicle. The code always picks `nexts[0]`, which at junction exits is the first branch alphabetically by road ID, i.e., arbitrary.
 
 This bug exists in **two places**:
-- `agents/expert/privileged_expert.py` line 649–657 (`_fill_buffer()` — route-end extension)
-- `agents/expert/privileged_expert.py` line 755 (`_fill_junction_gaps()` — junction gap filler)
+- `agents/expert/privileged_expert.py` line 696 (`_fill_buffer()` — route-end extension)
+- `agents/expert/privileged_expert.py` line 810 (`_fill_junction_gaps()` — junction gap filler)
 
 The result is that the waypoint buffer silently fills with waypoints from the **wrong exit road** at junction turns, causing the ego to accelerate toward the wrong road. The comment on line 651 (`# follow the first (keep-lane) option`) is **actively misleading** — it is only true on straight roads, not at junctions.
 
@@ -70,15 +70,16 @@ nxt = nexts[0]  # same bug, different function
 
 The comment "keep-lane option" was written assuming straight-road behavior (where nexts[0] IS the lane continuation). At junction exits, CARLA returns branches sorted by road ID, not heading.
 
-### Verification 4: gap_fill_diverged field (monitoring blind spot)
+### Verification 4: gap_fill_diverged instrumentation status
 
-`FrameInfo` in `expert_collector.py` has fields `gap_fill_diverged: bool` and `gap_fill_rpcs: int`. The HDF5 dataset creation loop in `expert_collector.py` does **not** write these fields. This means there is no post-hoc way to check how often gap fill diverges across episodes without adding the instrumentation first.
+`gap_fill_diverged` and `route_completion` are now persisted in HDF5
+(`75b10c9`). This monitoring prerequisite is complete, so F10/F11 can be
+verified directly after implementation.
 
-**This makes F3 (write gap_fill_diverged to HDF5) a prerequisite to verifying F10/F11.**
+### Verification 5: route_completion now available in HDF5
 
-### Verification 5: route_completion not in HDF5
-
-The `route_completion` property in `privileged_expert.py` (lines 450–454) computes `_route_index / _route_length`. This value is never written to HDF5. Without it, we cannot post-hoc determine at what stage in the route the nexts[0] divergence occurred (route-end extension is especially vulnerable since that code path uses `_fill_buffer` exclusively).
+`route_completion` is now written per-frame in `expert_collector.py`, so
+route-stage correlation for F10/F11 regressions is available.
 
 ---
 
@@ -89,8 +90,8 @@ The `route_completion` property in `privileged_expert.py` (lines 450–454) comp
 | `nexts[0]` ordering is by road ID, not heading | CARLA API docs + confirmed by observing that nav jumped LEFT→STRAIGHT in one frame (impossible if heading-aligned) | CONFIRMED |
 | The fence collision was caused by nexts[0] | Frame-by-frame data: speed/nav/position match the diverging-road pattern exactly | CONFIRMED |
 | The 5m jump guard would not catch this | Math: wrong road is 1.6m away, guard triggers at >5m | CONFIRMED |
-| gap_fill_diverged is not in HDF5 | Code inspection of expert_collector.py dataset creation | CONFIRMED |
-| route_completion is not in HDF5 | Code inspection of privileged_expert.py and expert_collector.py | CONFIRMED |
+| gap_fill_diverged is in HDF5 | Code inspection of expert_collector.py dataset creation + write path | RESOLVED |
+| route_completion is in HDF5 | Code inspection of expert_collector.py dataset creation + write path | RESOLVED |
 
 ---
 
@@ -231,17 +232,19 @@ After selecting `nexts[0]` (or heading-aligned), if the waypoint is more than 5 
 
 ## Required Monitoring (Do Before Verifying Fix)
 
-These must be done as part of F3 and F4 before implementing F10/F11, so you can confirm the fix works:
+These are now already in place. Use them as acceptance checks after
+implementing F10/F11:
 
-1. **F3:** Add `gap_fill_diverged` and `gap_fill_rpcs` to HDF5 writer in `expert_collector.py`. After implementing F10/F11, run test collection and check that `gap_fill_diverged` rate drops to near zero at junction turns.
-
-2. **F4:** Add `route_completion` to HDF5 writer. After implementing F10/F11, you can confirm that the nexts[0] bug no longer fires near route-end (where `_fill_buffer` is most active).
+1. `gap_fill_diverged` trend should not regress.
+2. `route_completion` should show stable behavior near route end after F10.
 
 ---
 
 ## Recommended Action
 
-**Immediate (Tier 2):** Implement Option A (F10 + F11) with the monitoring fields from F3/F4 already in place. This fixes the confirmed fence collision bug with low risk.
+**Immediate (Tier 2):** Implement F11 first, then F10, using route-aware
+branch selection (Option B or hybrid route+heading score). This prioritizes
+live junction correctness over route-end extension behavior.
 
 **Later (Tier 3):** Implement Option C (F14, Bezier arcs). This is the industry standard and eliminates the entire class of bugs. Schedule after Tier 0+1 data is validated.
 

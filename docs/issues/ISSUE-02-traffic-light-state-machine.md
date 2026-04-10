@@ -1,15 +1,33 @@
 # ISSUE-02 — Traffic Light State Machine Failures
 
-> **Status:** Not fixed
+> **Status:** Partially fixed
 > **Priority:** Tier 1 (VEH_FOLLOW fixes), Tier 2 (TL stop-line stale reference)
-> **Implementation plan tasks:** F8, F9, F13
+> **Implementation plan tasks:** F8, F9, F9b, F13
 > **Connected issues:** [ISSUE-01](ISSUE-01-junction-waypoints.md) (bad waypoints during turns corrupt TL detection — F13 is partly caused by ISSUE-01)
+
+---
+
+## Update (2026-04-10)
+
+The original forensic sections below are kept for historical traceability.
+Current code status is:
+
+- **DONE:** F8 (turning stopped-lead lateral gate)
+- **DONE:** F9 (red/yellow TL stop intent outranks vehicle-follow targeting)
+- **DONE:** F13 (`_tl_stop_loc` refresh after buffer/gap-fill updates)
+- **PENDING:** F9b (clear `_tl_proceed_committed` after full stop)
+
+This means Bug A/B are substantially mitigated in code, while the
+yellow-commit reset edge case remains open.
 
 ---
 
 ## Summary
 
 Three distinct bugs in the traffic light detection and driving mode state machine were confirmed during the test collection run. They are grouped here because they all involve the TL detection system or the VEHICLE_FOLLOWING mode interacting incorrectly with traffic lights.
+
+An additional follow-up bug (F9b) was later identified: committed-yellow
+state should be cleared if ego fully stops before the stop line.
 
 ### Bug A — TL Stop-Line Position Goes Stale During Turns (Town05 partial crossing)
 When gap fill fires and refills the waypoint buffer with junction arc waypoints, the `_tl_stop_loc` (the position of the stop line, stored during APPROACHING_TURN) is not re-evaluated. The TL distance calculation uses the stale reference, falls back to the TL pole distance (~79.9 m), and loses the "am I behind the stop line?" check. Result: the ego enters the junction before fully stopping, then detects the red light again partway through the crossing.
@@ -19,6 +37,13 @@ When the ego is in VEHICLE_FOLLOWING mode and the lead vehicle runs a red light,
 
 ### Bug C — VEH_FOLLOW Deadlock When Light Turns Green but Lead Doesn't Move
 When a traffic light turns GREEN but the lead vehicle remains stationary (parked car, NPC spawn glitch, or the lead is also stuck), the ego stays in VEHICLE_FOLLOWING mode with target_speed=0. The TL state in memory is cleared (GREEN → no active stop), so TRAFFIC_LIGHT_STOP mode is no longer triggered. Nothing breaks the VEH_FOLLOW lock. The episode times out.
+
+### Bug D — Yellow-Commit Flag Not Cleared on Full Stop (F9b)
+If `_tl_proceed_committed` is set during yellow dilemma handling, an
+intervening full stop before the stop line should clear that commitment.
+Current code clears the flag on green or stale TL-memory clears, but does
+not explicitly clear it on full stop. This can preserve stale proceed
+intent across stop/resume transitions.
 
 ---
 
@@ -281,4 +306,5 @@ for f in sorted(glob.glob('data/test_collection/episode_*.h5')):
 
 ## Open Questions for User
 
-None — all three bugs are confirmed and the fixes are well-defined. Implement F8, F9, F13 in Tier 1 / Tier 2 order as specified in the implementation plan.
+None — the remaining work is scoped. Implement F9b next, then validate
+with a focused replay covering yellow-commit interrupted by full stop.

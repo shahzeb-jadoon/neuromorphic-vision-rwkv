@@ -1,10 +1,21 @@
 # ISSUE-03 — Lane Change Mislabeling + Manifest Nav Distribution
 
-> **Status:** Not fixed
+> **Status:** Partially fixed
 > **Priority:** Tier 0 (manifest fix F5), Tier 1 (LC suppression F7), Tier 2 (ground-truth lane_id F12)
 > **Implementation plan tasks:** F5, F7, F12
 > **Open design decisions:** OD-1 (label window size), OD-2 (blind-spot check)
 > **Connected issues:** None directly — this is a labeling issue, not a physics issue
+
+---
+
+## Update (2026-04-10)
+
+- **F5 DONE:** manifest/nav distribution includes classes 5/6.
+- **F7 DONE:** TURNING transition behavior no longer emits persistent lane-change labels.
+- **F12 PARTIAL:** lane_id crossing override is implemented for same-road,
+  non-junction transitions; OD-1/OD-2 remain open for final policy.
+
+Historical forensic details below are preserved for traceability.
 
 ---
 

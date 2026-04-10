@@ -1,9 +1,19 @@
 # ISSUE-04 — Pedestrian False Positives (Fixed Lane Half-Width)
 
-> **Status:** Not fixed
+> **Status:** Partially fixed
 > **Priority:** Tier 1 (F6 — 1-line fix), Tier 3 (F15 — road-surface check)
 > **Implementation plan tasks:** F6, F15
 > **Connected issues:** None directly
+
+---
+
+## Update (2026-04-10)
+
+- **F6 DONE:** pedestrian hazard logic now uses dynamic lane-width context.
+- **F15 PENDING:** map road-surface check is still planned as the long-term
+    replacement/complement for lateral thresholding.
+
+The detailed forensic notes below are preserved as historical context.
 
 ---
 
