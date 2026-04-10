@@ -36,6 +36,9 @@ class _Transform:
     def get_forward_vector(self) -> SimpleNamespace:
         return SimpleNamespace(x=1.0, y=0.0)
 
+    def get_right_vector(self) -> SimpleNamespace:
+        return SimpleNamespace(x=0.0, y=1.0)
+
 
 class _Waypoint:
     def __init__(self, x: float, y: float, road_id: int, lane_id: int, yaw: float = 0.0) -> None:

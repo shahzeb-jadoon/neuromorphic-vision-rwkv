@@ -103,7 +103,7 @@ class ExpertConfig:
 
     # --- Safety thresholds ---
     traffic_light_brake_distance: float = 80.0  # metres — start braking
-    traffic_light_stop_distance: float = 1.0  # metres — full stop
+    traffic_light_stop_distance: float = 0.5  # metres — full stop
     traffic_light_route_match_distance: float = 6.0  # metres — AWP-to-route tolerance for Tier 3
     traffic_light_route_match_yaw_deg: float = 40.0  # degrees — AWP/route heading alignment gate
     traffic_light_stored_stop_max_yaw_diff_deg: float = (
@@ -127,6 +127,7 @@ class ExpertConfig:
     vehicle_reaction_time: float = 2.0  # seconds — scale hazard dist with speed
     vehicle_emergency_time: float = 1.2  # seconds — scale emergency with speed
     vehicle_comfort_decel: float = 3.0  # m/s² — comfortable braking for following
+    vehicle_allow_lateral_fallback: bool = False  # if False, only SAT (obb_in_lane) can select lead
     pedestrian_hazard_distance: float = 15.0
     pedestrian_emergency_distance: float = 5.0
     lane_half_width: float = 2.5  # metres — lateral fallback (used only when ego_wp unavailable)
@@ -1264,7 +1265,8 @@ class PrivilegedExpert:
 
         # --- Pedestrians ---
         if ped_dist is not None:
-            if ped_dist < cfg.pedestrian_emergency_distance:
+            ped_emergency_dist = cfg.pedestrian_emergency_distance + 5.0
+            if ped_dist < ped_emergency_dist:
                 mode = DrivingMode.EMERGENCY_STOP
                 target = 0.0
             elif ped_dist < cfg.pedestrian_hazard_distance:
@@ -1499,6 +1501,56 @@ class PrivilegedExpert:
                     )
                     yaw_txt = f"{yaw_diff:.1f}" if yaw_diff is not None else "None"
                     if stale_far or stop_behind or not plausible:
+                        # Curved approaches can transiently violate the
+                        # lateral plausibility gate even when the same TL
+                        # still controls us.  Before clearing memory,
+                        # re-derive stop-line geometry from the same TL.
+                        recovered_stop_dist, recovered_stop_loc = None, None
+                        if not stale_far and not stop_behind:
+                            recovered_stop_dist, recovered_stop_loc = self._stop_line_distance(
+                                tl_actor,
+                                transform,
+                            )
+                        if recovered_stop_loc is not None and recovered_stop_dist is not None:
+                            self._tl_stop_loc = recovered_stop_loc
+                            logger.debug(
+                                "T1-STORED: recovered id=%d state=%s stop_dist=%.1f "
+                                "old_stop_dist=%.1f yaw_diff=%s lat=%.2f lat_lim=%.2f",
+                                self._tl_waiting,
+                                tl_actor.state,
+                                recovered_stop_dist,
+                                stop_dist,
+                                yaw_txt,
+                                lat_off,
+                                lat_lim,
+                            )
+                            return tl_actor.state, recovered_stop_dist
+
+                        # Grace-hold memory through short geometry lapses on
+                        # red/yellow while the stored stop line is still ahead.
+                        if (
+                            not stale_far
+                            and not stop_behind
+                            and tl_actor.state
+                            in (
+                                carla.TrafficLightState.Red,
+                                carla.TrafficLightState.Yellow,
+                            )
+                            and stop_dist <= self.config.traffic_light_brake_distance
+                        ):
+                            logger.debug(
+                                "T1-STORED: grace hold id=%d state=%s stop_dist=%.1f "
+                                "plausible=%s yaw_diff=%s lat=%.2f lat_lim=%.2f",
+                                self._tl_waiting,
+                                tl_actor.state,
+                                stop_dist,
+                                plausible,
+                                yaw_txt,
+                                lat_off,
+                                lat_lim,
+                            )
+                            return tl_actor.state, stop_dist
+
                         logger.debug(
                             "T1-STORED: stale clear id=%d stop_dist=%.1f "
                             "behind=%s plausible=%s yaw_diff=%s lat=%.2f lat_lim=%.2f",
@@ -1547,6 +1599,29 @@ class PrivilegedExpert:
                         )
                         yaw_txt = f"{yaw_diff:.1f}" if yaw_diff is not None else "None"
                         if stale_far or stop_behind or not plausible:
+                            if (
+                                not stale_far
+                                and not stop_behind
+                                and tl_actor.state
+                                in (
+                                    carla.TrafficLightState.Red,
+                                    carla.TrafficLightState.Yellow,
+                                )
+                                and recovered_stop_dist <= self.config.traffic_light_brake_distance
+                            ):
+                                logger.debug(
+                                    "T1-RECOVERED: grace hold id=%d state=%s stop_dist=%.1f "
+                                    "plausible=%s yaw_diff=%s lat=%.2f lat_lim=%.2f",
+                                    self._tl_waiting,
+                                    tl_actor.state,
+                                    recovered_stop_dist,
+                                    plausible,
+                                    yaw_txt,
+                                    lat_off,
+                                    lat_lim,
+                                )
+                                return tl_actor.state, recovered_stop_dist
+
                             logger.debug(
                                 "T1-RECOVERED: stale clear id=%d stop_dist=%.1f "
                                 "behind=%s plausible=%s yaw_diff=%s lat=%.2f lat_lim=%.2f",
@@ -2630,13 +2705,10 @@ class PrivilegedExpert:
     ) -> Tuple[float | None, float | None, float | None]:
         """Return distance, speed, and lateral offset of closest vehicle ahead.
 
-        A vehicle is considered "in lane" if **either** the OBB/SAT
-        corridor overlap test says so, **or** its centre-point lateral
-        offset is within ``lane_half_width``.  Using both checks as a
-        union avoids false negatives from the SAT on road segments
-        where the corridor geometry is unreliable, while the SAT
-        still provides accurate detection on curved roads where the
-        lateral-only heuristic would miss offset vehicles.
+        A vehicle is considered "in lane" if its OBB/SAT corridor
+        overlap test passes.  When ``vehicle_allow_lateral_fallback``
+        is enabled, a centre-point lateral check is also accepted to
+        reduce false negatives on segments where SAT geometry is noisy.
 
         Oncoming vehicles (``same_direction == False``) are excluded
         so that head-on traffic on narrow roads or during turns does
@@ -2649,11 +2721,17 @@ class PrivilegedExpert:
             if not v.get("same_direction", True):
                 if not v.get("obb_in_lane", False):
                     continue
-            # Union of SAT overlap and lateral-distance check — either
-            # one is sufficient to flag the vehicle as in-lane.
             obb_flag = v.get("obb_in_lane", False)
-            lateral_flag = abs(v["lateral"]) < self._cached_half_lane
-            if obb_flag or lateral_flag:
+            if self.config.vehicle_allow_lateral_fallback:
+                # Union of SAT overlap and lateral-distance check — either
+                # one is sufficient to flag the vehicle as in-lane.
+                lateral_flag = abs(v["lateral"]) < self._cached_half_lane
+                in_lane = bool(obb_flag or lateral_flag)
+            else:
+                # SAT-only mode for ablation/testing.
+                in_lane = bool(obb_flag)
+
+            if in_lane:
                 return v["distance"], v.get("speed_kmh"), v.get("lateral")
         return None, None, None
 
