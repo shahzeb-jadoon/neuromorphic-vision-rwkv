@@ -1108,6 +1108,10 @@ class PrivilegedExpert:
         # above 15 km/h at 20-40 m distance), so the car approaches
         # a red TL at turn speed and has to slam at the last moment.
         speed_ms = speed_kmh / 3.6
+        # F9b: a full stop invalidates prior yellow dilemma commitment.
+        # Once speed reaches zero, treat TL handling as a fresh decision.
+        if self._tl_proceed_committed and speed_kmh < 0.5:
+            self._tl_proceed_committed = False
         if tl_state is not None and tl_distance is not None:
             if tl_state == carla.TrafficLightState.Green:
                 # TL is green — clear any yellow commitment.

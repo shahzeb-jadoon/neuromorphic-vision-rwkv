@@ -219,6 +219,64 @@ def test_plan_speed_yellow_commit_respects_max_distance(monkeypatch: MonkeyPatch
     assert target < 60.0
 
 
+def test_plan_speed_full_stop_clears_yellow_commit(monkeypatch: MonkeyPatch) -> None:
+    expert = _build_expert()
+    expert._prev_target = 20.0
+    expert._tl_proceed_committed = True
+
+    fake_tl = SimpleNamespace(Green=1, Yellow=2, Red=3)
+    monkeypatch.setattr(
+        "agents.expert.privileged_expert.carla", SimpleNamespace(TrafficLightState=fake_tl)
+    )
+
+    target, mode = expert._plan_speed(
+        speed_kmh=0.0,
+        nav_command=RoadOption.LANEFOLLOW,
+        tl_state=fake_tl.Red,
+        tl_distance=1.0,
+        ss_distance=None,
+        ss_committed=False,
+        lead_distance=None,
+        lead_speed=None,
+        lead_lateral=None,
+        ped_dist=None,
+        base_target=20.0,
+    )
+
+    assert expert._tl_proceed_committed is False
+    assert mode == DrivingMode.TRAFFIC_LIGHT_STOP
+    assert target == 0.0
+
+
+def test_plan_speed_moving_keeps_yellow_commit(monkeypatch: MonkeyPatch) -> None:
+    expert = _build_expert()
+    expert._prev_target = 20.0
+    expert._tl_proceed_committed = True
+
+    fake_tl = SimpleNamespace(Green=1, Yellow=2, Red=3)
+    monkeypatch.setattr(
+        "agents.expert.privileged_expert.carla", SimpleNamespace(TrafficLightState=fake_tl)
+    )
+
+    target, mode = expert._plan_speed(
+        speed_kmh=12.0,
+        nav_command=RoadOption.LANEFOLLOW,
+        tl_state=fake_tl.Red,
+        tl_distance=20.0,
+        ss_distance=None,
+        ss_committed=False,
+        lead_distance=None,
+        lead_speed=None,
+        lead_lateral=None,
+        ped_dist=None,
+        base_target=20.0,
+    )
+
+    assert expert._tl_proceed_committed is True
+    assert mode == DrivingMode.FOLLOW_LANE
+    assert target == 20.0
+
+
 def test_check_traffic_light_uses_stop_line_not_pole_for_stale_clear() -> None:
     expert = _build_expert()
     expert._tl_waiting = 7
