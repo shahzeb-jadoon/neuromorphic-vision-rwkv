@@ -33,6 +33,7 @@ import math
 from collections import deque
 from dataclasses import dataclass, field
 from enum import IntEnum, auto
+from types import SimpleNamespace
 from typing import Any, Dict, List, Tuple
 
 import numpy as np
@@ -100,6 +101,7 @@ class ExpertConfig:
     turn_follow_distance: float = 2.0  # metres — shorter look-ahead in turns
     max_follow_distance: float = 20.0  # metres — upper bound
     waypoint_buffer_size: int = 40
+    max_waypoint_pops_per_tick: int = 8  # cap dequeue bursts from transient geometry
 
     # --- Safety thresholds ---
     traffic_light_brake_distance: float = 80.0  # metres — start braking
@@ -201,6 +203,10 @@ class ExpertConfig:
     gap_fill_max_factor: float = 3.0
     gap_fill_diverge_factor: float = 2.0
     gap_fill_rpc_budget: int = 50_000
+    gap_fill_bezier_enabled: bool = True
+    gap_fill_bezier_step: float = 0.5  # metres
+    gap_fill_bezier_tangent_factor: float = 0.35  # control-handle length = gap * factor
+    gap_fill_bezier_max_project_error: float = 2.5  # metres
 
 
 # ---------------------------------------------------------------------------
@@ -693,7 +699,44 @@ class PrivilegedExpert:
             try:
                 nexts = last_wp.next(2.0)  # 2 m step
                 while nexts and len(self._wp_buffer) < buffer_maxlen:
-                    nxt = nexts[0]  # follow the first (keep-lane) option
+                    cur_wp, _ = self._wp_buffer[-1]
+                    cur_loc = cur_wp.transform.location
+                    cur_yaw = float(cur_wp.transform.rotation.yaw)
+                    yaw_rad = math.radians(cur_yaw)
+                    fwd = (math.cos(yaw_rad), math.sin(yaw_rad))
+                    right = (-fwd[1], fwd[0])
+                    cur_road_id = int(getattr(cur_wp, "road_id", -1))
+                    cur_lane_id = int(getattr(cur_wp, "lane_id", 0))
+
+                    def _route_end_branch_score(candidate: Any) -> tuple[float, ...]:
+                        loc = candidate.transform.location
+                        yaw = float(candidate.transform.rotation.yaw)
+                        yaw_diff = abs((yaw - cur_yaw + 180.0) % 360.0 - 180.0)
+
+                        dx = float(loc.x - cur_loc.x)
+                        dy = float(loc.y - cur_loc.y)
+                        forward_proj = fwd[0] * dx + fwd[1] * dy
+                        lateral_off = abs(right[0] * dx + right[1] * dy)
+
+                        cand_road_id = int(getattr(candidate, "road_id", cur_road_id))
+                        cand_lane_id = int(getattr(candidate, "lane_id", cur_lane_id))
+
+                        # Route-end extension should preserve lane continuity
+                        # (same lane order) and heading while still allowing
+                        # road transitions when a junction exit is unavoidable.
+                        road_change = 0 if cand_road_id == cur_road_id else 1
+                        lane_order_delta = abs(abs(cand_lane_id) - abs(cur_lane_id))
+                        behind = 0 if forward_proj > 0.0 else 1
+                        return (
+                            behind,
+                            road_change,
+                            lane_order_delta,
+                            yaw_diff,
+                            lateral_off,
+                            float(loc.distance(cur_loc)),
+                        )
+
+                    nxt = min(nexts, key=_route_end_branch_score)
                     self._wp_buffer.append((nxt, RoadOption.LANEFOLLOW))
                     nexts = nxt.next(2.0)
             except (AttributeError, RuntimeError):
@@ -721,10 +764,11 @@ class PrivilegedExpert:
         estimation, and adaptive follow-distance.
 
         This method scans consecutive waypoint pairs in the buffer.
-        When a gap exceeds ``_GAP_THRESHOLD`` metres, it queries the
-        HD map (``wp.next(step)``) to produce intermediate waypoints
-        at ~2 m spacing, preserving the nav command of the gap's
-        start waypoint.
+        When a gap exceeds ``_GAP_THRESHOLD`` metres, it first attempts
+        a smooth Bezier interpolation between entry and exit waypoints
+        (projected back to map waypoints). If projection quality is
+        poor, it falls back to route-aware ``wp.next(step)`` branch
+        scoring.
 
         The buffer's ``maxlen`` is respected — filling stops when
         full, and the deque naturally evicts the oldest entries.
@@ -755,8 +799,60 @@ class PrivilegedExpert:
            for unlimited.
         """
         _GAP_THRESHOLD = 4.0  # metres — normal spacing is ~2 m
-        _FILL_STEP = 2.0  # metres — interpolation step
+        _FILL_STEP = 2.0  # metres — fallback interpolation step
         cfg = self.config
+        bezier_step = max(0.25, float(cfg.gap_fill_bezier_step))
+
+        def _loc_dist(a: Any, b: Any) -> float:
+            dx = float(a.x) - float(b.x)
+            dy = float(a.y) - float(b.y)
+            dz = float(getattr(a, "z", 0.0)) - float(getattr(b, "z", 0.0))
+            return math.sqrt(dx * dx + dy * dy + dz * dz)
+
+        def _make_loc(x: float, y: float, z: float) -> Any:
+            if CARLA_AVAILABLE:
+                try:
+                    return carla.Location(x=x, y=y, z=z)
+                except (AttributeError, TypeError):
+                    pass
+            loc_cls = type(getattr(self.vehicle.get_transform(), "location", None))
+            try:
+                return loc_cls(x=x, y=y, z=z)
+            except TypeError:
+                try:
+                    return loc_cls(x, y, z)
+                except TypeError:
+                    return SimpleNamespace(x=x, y=y, z=z)
+
+        def _bezier_xyz(
+            t: float,
+            p0: tuple[float, float, float],
+            p1: tuple[float, float, float],
+            p2: tuple[float, float, float],
+            p3: tuple[float, float, float],
+        ) -> tuple[float, float, float]:
+            omt = 1.0 - t
+            omt2 = omt * omt
+            t2 = t * t
+            bx = (
+                omt2 * omt * p0[0]
+                + 3.0 * omt2 * t * p1[0]
+                + 3.0 * omt * t2 * p2[0]
+                + t2 * t * p3[0]
+            )
+            by = (
+                omt2 * omt * p0[1]
+                + 3.0 * omt2 * t * p1[1]
+                + 3.0 * omt * t2 * p2[1]
+                + t2 * t * p3[1]
+            )
+            bz = (
+                omt2 * omt * p0[2]
+                + 3.0 * omt2 * t * p1[2]
+                + 3.0 * omt * t2 * p2[2]
+                + t2 * t * p3[2]
+            )
+            return bx, by, bz
 
         # Gap filling disabled by config or budget exhausted
         if cfg.gap_fill_max_factor == 0:
@@ -793,6 +889,95 @@ class PrivilegedExpert:
                 )
                 diverge_limit = gap * cfg.gap_fill_diverge_factor
                 origin = wp_prev.transform.location
+                target_loc = wp_next.transform.location
+                target_yaw = wp_next.transform.rotation.yaw
+
+                def _branch_score(candidate: Any) -> tuple[float, float]:
+                    loc = candidate.transform.location
+                    yaw = candidate.transform.rotation.yaw
+                    yaw_diff = abs((yaw - target_yaw + 180.0) % 360.0 - 180.0)
+                    return (loc.distance(target_loc), yaw_diff)
+
+                bezier_fills: list[tuple[Any, RoadOption]] | None = None
+                if cfg.gap_fill_bezier_enabled:
+                    control_len = max(
+                        _FILL_STEP,
+                        min(
+                            gap * max(0.0, cfg.gap_fill_bezier_tangent_factor),
+                            gap * 0.5,
+                        ),
+                    )
+                    yaw0 = math.radians(float(wp_prev.transform.rotation.yaw))
+                    yaw3 = math.radians(float(wp_next.transform.rotation.yaw))
+                    p0 = (float(origin.x), float(origin.y), float(getattr(origin, "z", 0.0)))
+                    p3 = (
+                        float(target_loc.x),
+                        float(target_loc.y),
+                        float(getattr(target_loc, "z", 0.0)),
+                    )
+                    p1 = (
+                        p0[0] + control_len * math.cos(yaw0),
+                        p0[1] + control_len * math.sin(yaw0),
+                        p0[2],
+                    )
+                    p2 = (
+                        p3[0] - control_len * math.cos(yaw3),
+                        p3[1] - control_len * math.sin(yaw3),
+                        p3[2],
+                    )
+
+                    n_samples = max(2, int(gap / bezier_step))
+                    proj_error_limit = max(_FILL_STEP, float(cfg.gap_fill_bezier_max_project_error))
+                    tentative_curve: list[tuple[Any, RoadOption]] = []
+                    seen_ids = {int(getattr(wp_prev, "id", -1)), int(getattr(wp_next, "id", -1))}
+                    last_target_dist = _loc_dist(origin, target_loc)
+                    bezier_ok = True
+
+                    for idx in range(1, n_samples):
+                        t = idx / n_samples
+                        bx, by, bz = _bezier_xyz(t, p0, p1, p2, p3)
+                        probe_loc = _make_loc(bx, by, bz)
+                        try:
+                            projected_wp = self.map.get_waypoint(probe_loc)
+                        except (AttributeError, RuntimeError, TypeError):
+                            bezier_ok = False
+                            break
+                        if projected_wp is None:
+                            bezier_ok = False
+                            break
+
+                        proj_loc = projected_wp.transform.location
+                        if _loc_dist(proj_loc, probe_loc) > proj_error_limit:
+                            bezier_ok = False
+                            break
+                        if _loc_dist(proj_loc, origin) > diverge_limit:
+                            bezier_ok = False
+                            break
+
+                        target_dist = _loc_dist(proj_loc, target_loc)
+                        if target_dist > last_target_dist + _FILL_STEP:
+                            bezier_ok = False
+                            break
+                        last_target_dist = target_dist
+
+                        wp_id = int(getattr(projected_wp, "id", -1))
+                        if wp_id != -1 and wp_id in seen_ids:
+                            continue
+                        if wp_id != -1:
+                            seen_ids.add(wp_id)
+                        tentative_curve.append((projected_wp, cmd_next))
+
+                    if bezier_ok and tentative_curve:
+                        end_dist = _loc_dist(tentative_curve[-1][0].transform.location, target_loc)
+                        if end_dist <= max(_FILL_STEP * 2.0, bezier_step * 2.0):
+                            bezier_fills = tentative_curve
+
+                if bezier_fills:
+                    self._gap_fill_tried.add(pair_key)
+                    rebuilt.extend(bezier_fills)
+                    rebuilt.append((wp_next, cmd_next))
+                    continue
+
                 # Accumulate fills tentatively — only commit if they
                 # actually converge toward wp_next.  If the loop exits
                 # via the divergence guard or iteration cap WITHOUT
@@ -807,7 +992,7 @@ class PrivilegedExpert:
                     rpcs_this_call += 1
                     fills = 0
                     while nexts and fills < max_fills:
-                        nxt = nexts[0]
+                        nxt = min(nexts, key=_branch_score)
                         dist_to_target = nxt.transform.location.distance(wp_next.transform.location)
                         if dist_to_target < _FILL_STEP:
                             converged = True
@@ -864,21 +1049,36 @@ class PrivilegedExpert:
             self._refresh_tl_stop_loc(transform)
 
     def _advance_route(self, transform: "carla.Transform") -> None:
-        """Pop consumed waypoints (closer than *min_follow_distance* or behind ego)."""
+        """Pop consumed waypoints via distance and segment progress.
+
+        This avoids heading-based mass-popping when ego rotates during
+        turns by checking progress along the first buffer segment
+        (wp[0] -> wp[1]) instead of using an ego-forward "behind" test.
+        """
         location = transform.location
-        fwd = transform.get_forward_vector()
+        max_pops = max(1, int(getattr(self.config, "max_waypoint_pops_per_tick", 8)))
+        popped = 0
 
-        while len(self._wp_buffer) > 1:
-            wp, _ = self._wp_buffer[0]
-            wp_loc = wp.transform.location
-            dist = location.distance(wp_loc)
+        while len(self._wp_buffer) > 1 and popped < max_pops:
+            wp_curr, _ = self._wp_buffer[0]
+            wp_next, _ = self._wp_buffer[1]
+            curr_loc = wp_curr.transform.location
+            next_loc = wp_next.transform.location
+            dist = location.distance(curr_loc)
 
-            dx = wp_loc.x - location.x
-            dy = wp_loc.y - location.y
-            is_behind = (fwd.x * dx + fwd.y * dy) < 0
+            seg_dx = float(next_loc.x - curr_loc.x)
+            seg_dy = float(next_loc.y - curr_loc.y)
+            seg_len = math.hypot(seg_dx, seg_dy)
+            past_midpoint = False
+            if seg_len > 1e-6:
+                ego_dx = float(location.x - curr_loc.x)
+                ego_dy = float(location.y - curr_loc.y)
+                progress = (seg_dx * ego_dx + seg_dy * ego_dy) / seg_len
+                past_midpoint = progress > (0.5 * seg_len)
 
-            if dist < self.config.min_follow_distance or is_behind:
+            if dist < self.config.min_follow_distance or past_midpoint:
                 self._wp_buffer.popleft()
+                popped += 1
             else:
                 break
         self._fill_buffer(transform)

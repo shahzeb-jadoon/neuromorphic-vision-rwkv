@@ -41,19 +41,27 @@ class _Transform:
 
 
 class _Waypoint:
+    _id_counter = 1
+
     def __init__(self, x: float, y: float, road_id: int, lane_id: int, yaw: float = 0.0) -> None:
+        self.id = _Waypoint._id_counter
+        _Waypoint._id_counter += 1
         self.transform = _Transform(_Loc(x, y), yaw=yaw)
         self.road_id = road_id
         self.lane_id = lane_id
         self.is_junction = False
         self._left: _Waypoint | None = None
         self._right: _Waypoint | None = None
+        self._nexts: list[_Waypoint] = []
 
     def get_left_lane(self) -> "_Waypoint | None":
         return self._left
 
     def get_right_lane(self) -> "_Waypoint | None":
         return self._right
+
+    def next(self, _step: float) -> list["_Waypoint"]:
+        return list(self._nexts)
 
 
 def _build_expert() -> PrivilegedExpert:
@@ -71,6 +79,10 @@ def _build_expert() -> PrivilegedExpert:
     expert._prev_lane_wp = None
     expert._prev_target = 30.0
     expert._cached_half_lane = expert.config.lane_half_width
+    expert._gap_fill_rpcs = 0
+    expert._gap_fill_diverged = 0
+    expert._gap_fill_budget_exhausted = False
+    expert._gap_fill_tried = set()
     setattr(expert, "_route_curvature", lambda: 0.0)
     expert.vehicle = SimpleNamespace(
         bounding_box=SimpleNamespace(extent=SimpleNamespace(y=1.0)),
@@ -423,3 +435,131 @@ def test_closest_pedestrian_distance_uses_hybrid_floor() -> None:
     dist = expert._closest_pedestrian_distance([ped], _Transform(_Loc(0.0, 0.0)))
 
     assert dist == 12.0
+
+
+def test_fill_junction_gaps_chooses_route_aligned_branch() -> None:
+    expert = _build_expert()
+
+    wp_prev = _Waypoint(0.0, 0.0, road_id=10, lane_id=1, yaw=0.0)
+    wp_next = _Waypoint(8.0, 0.0, road_id=10, lane_id=1, yaw=0.0)
+
+    wrong_branch = _Waypoint(2.0, 2.0, road_id=11, lane_id=1, yaw=35.0)
+    right_branch = _Waypoint(2.0, 0.0, road_id=10, lane_id=1, yaw=0.0)
+    near_target = _Waypoint(6.5, 0.0, road_id=10, lane_id=1, yaw=0.0)
+
+    wp_prev._nexts = [wrong_branch, right_branch]  # wrong branch first by list order
+    right_branch._nexts = [near_target]
+    wrong_branch._nexts = [_Waypoint(4.5, 3.0, road_id=11, lane_id=1, yaw=45.0)]
+
+    expert._wp_buffer = deque(
+        [
+            (wp_prev, RoadOption.LANEFOLLOW),
+            (wp_next, RoadOption.LANEFOLLOW),
+        ]
+    )
+
+    expert._fill_junction_gaps(None)
+    filled_wps = [wp for wp, _cmd in expert._wp_buffer]
+
+    assert right_branch in filled_wps
+    assert wrong_branch not in filled_wps
+
+
+def test_fill_junction_gaps_prefers_bezier_before_branch_fallback() -> None:
+    expert = _build_expert()
+
+    wp_prev = _Waypoint(0.0, 0.0, road_id=10, lane_id=1, yaw=0.0)
+    wp_next = _Waypoint(8.0, 0.0, road_id=10, lane_id=1, yaw=0.0)
+    projected = [
+        _Waypoint(2.0, 0.0, road_id=10, lane_id=1, yaw=0.0),
+        _Waypoint(4.0, 0.0, road_id=10, lane_id=1, yaw=0.0),
+        _Waypoint(6.0, 0.0, road_id=10, lane_id=1, yaw=0.0),
+    ]
+    wrong_branch = _Waypoint(2.0, 2.0, road_id=11, lane_id=1, yaw=35.0)
+
+    next_calls = {"count": 0}
+
+    def _counting_next(_step: float) -> list[_Waypoint]:
+        next_calls["count"] += 1
+        return [wrong_branch]
+
+    wp_prev.next = _counting_next  # type: ignore[method-assign]
+
+    def _project_to_route(loc: _Loc) -> _Waypoint:
+        return min(projected, key=lambda wp: abs(wp.transform.location.x - loc.x))
+
+    expert.map = SimpleNamespace(get_waypoint=_project_to_route)
+    expert._wp_buffer = deque(
+        [
+            (wp_prev, RoadOption.LANEFOLLOW),
+            (wp_next, RoadOption.LANEFOLLOW),
+        ]
+    )
+
+    expert._fill_junction_gaps(None)
+    filled_wps = [wp for wp, _cmd in expert._wp_buffer]
+
+    assert next_calls["count"] == 0
+    assert any(wp in filled_wps for wp in projected)
+    assert wrong_branch not in filled_wps
+
+
+def test_fill_buffer_route_end_prefers_lane_order_continuity() -> None:
+    expert = _build_expert()
+
+    last_wp = _Waypoint(0.0, 0.0, road_id=50, lane_id=2, yaw=90.0)
+    wrong_lane = _Waypoint(0.0, 2.0, road_id=60, lane_id=4, yaw=90.0)
+    right_lane = _Waypoint(0.0, 2.0, road_id=60, lane_id=2, yaw=90.0)
+
+    # Wrong lane comes first to emulate unstable nexts[] ordering.
+    last_wp._nexts = [wrong_lane, right_lane]
+    wrong_lane._nexts = []
+    right_lane._nexts = []
+
+    expert._wp_buffer = deque([(last_wp, RoadOption.LANEFOLLOW)])
+    expert._route = []
+    expert._route_index = 0
+    expert._route_length = 0
+
+    expert._fill_buffer(None)
+    filled_wps = [wp for wp, _cmd in expert._wp_buffer]
+
+    assert len(filled_wps) >= 2
+    assert filled_wps[1] is right_lane
+
+
+def test_advance_route_uses_segment_progress() -> None:
+    expert = _build_expert()
+    expert.config.min_follow_distance = 0.1
+
+    wp0 = _Waypoint(0.0, 0.0, road_id=1, lane_id=1)
+    wp1 = _Waypoint(4.0, 0.0, road_id=1, lane_id=1)
+    wp2 = _Waypoint(8.0, 0.0, road_id=1, lane_id=1)
+    expert._wp_buffer = deque(
+        [
+            (wp0, RoadOption.LANEFOLLOW),
+            (wp1, RoadOption.LANEFOLLOW),
+            (wp2, RoadOption.LANEFOLLOW),
+        ]
+    )
+    setattr(expert, "_fill_buffer", lambda _transform: None)
+
+    expert._advance_route(_Transform(_Loc(2.5, 0.0), yaw=180.0))
+
+    assert len(expert._wp_buffer) == 2
+    assert expert._wp_buffer[0][0] is wp1
+
+
+def test_advance_route_caps_waypoint_pops_per_tick() -> None:
+    expert = _build_expert()
+    expert.config.min_follow_distance = 0.1
+    expert.config.max_waypoint_pops_per_tick = 2
+
+    wps = [_Waypoint(float(i * 2), 0.0, road_id=1, lane_id=1) for i in range(5)]
+    expert._wp_buffer = deque([(wp, RoadOption.LANEFOLLOW) for wp in wps])
+    setattr(expert, "_fill_buffer", lambda _transform: None)
+
+    expert._advance_route(_Transform(_Loc(100.0, 0.0), yaw=0.0))
+
+    assert len(expert._wp_buffer) == 3
+    assert expert._wp_buffer[0][0] is wps[2]
