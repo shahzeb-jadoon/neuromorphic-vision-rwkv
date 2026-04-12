@@ -232,7 +232,7 @@ class TestShortCollection:
                     # Schema version
                     assert S.METADATA_GROUP in f
                     sv = int(f[S.METADATA_GROUP].attrs.get(S.META_SCHEMA_VERSION, 0))
-                    assert sv == 3, f"Expected schema v3, got {sv}"
+                    assert sv == S.SCHEMA_VERSION, f"Expected schema v{S.SCHEMA_VERSION}, got {sv}"
 
                     # Image shape: (N, H=320, W_total=1920, 3)
                     imgs = f[S.IMAGES]
@@ -250,6 +250,7 @@ class TestShortCollection:
                         S.BRAKE,
                         S.NAV_COMMAND,
                         S.VELOCITY,
+                        S.GAP_FILL_RPCS,
                     ]:
                         assert key in f, f"Missing dataset: {key}"
                         assert f[key].shape[0] == n_frames

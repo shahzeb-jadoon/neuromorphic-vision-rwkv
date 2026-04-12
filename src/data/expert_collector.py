@@ -265,6 +265,9 @@ class _StreamingEpisodeWriter:
         self._ds_lat = self._h5.create_dataset(
             S.LATERAL_DETECTIONS, shape=(max_frames,), dtype=np.int32, maxshape=(None,)
         )
+        self._ds_gap_fill_rpcs = self._h5.create_dataset(
+            S.GAP_FILL_RPCS, shape=(max_frames,), dtype=np.int32, maxshape=(None,)
+        )
         self._ds_gap_fill_diverged = self._h5.create_dataset(
             S.GAP_FILL_DIVERGED, shape=(max_frames,), dtype=np.int32, maxshape=(None,)
         )
@@ -332,6 +335,7 @@ class _StreamingEpisodeWriter:
         self._ds_wpbh[i] = info.wp_buffer_head_dist
         self._ds_sat[i] = info.sat_detections
         self._ds_lat[i] = info.lateral_detections
+        self._ds_gap_fill_rpcs[i] = info.gap_fill_rpcs
         self._ds_gap_fill_diverged[i] = info.gap_fill_diverged
         self._ds_route_completion[i] = info.route_completion
         self._ds_nveh[i] = json.dumps(info.nearby_vehicles)
@@ -384,6 +388,7 @@ class _StreamingEpisodeWriter:
             self._ds_wpbh,
             self._ds_sat,
             self._ds_lat,
+            self._ds_gap_fill_rpcs,
             self._ds_gap_fill_diverged,
             self._ds_route_completion,
             self._ds_nveh,

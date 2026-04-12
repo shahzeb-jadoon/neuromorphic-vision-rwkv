@@ -136,6 +136,7 @@ class TestHDF5Schema:
             S.STOP_SIGN_DISTANCE,
             S.TARGET_SPEED,
             S.DRIVING_MODE,
+            S.GAP_FILL_RPCS,
             S.NEARBY_VEHICLES,
             S.NEARBY_PEDESTRIANS,
         ]:
@@ -234,6 +235,7 @@ class TestStreamingEpisodeWriter:
             assert f[S.IMAGES].shape == (n_frames, config.camera_height, pano_w, 3)
             assert f[S.STEERING].shape == (n_frames,)
             assert f[S.POSITION].shape == (n_frames, 3)
+            assert f[S.GAP_FILL_RPCS].shape == (n_frames,)
             assert S.STATIONARY in f
             assert S.METADATA_GROUP in f
             assert f[S.METADATA_GROUP].attrs[S.META_N_FRAMES] == n_frames
