@@ -33,6 +33,7 @@ import math
 from collections import deque
 from dataclasses import dataclass, field
 from enum import IntEnum, auto
+from types import SimpleNamespace
 from typing import Any, Dict, List, Tuple
 
 import numpy as np
@@ -99,7 +100,7 @@ class ExpertConfig:
     target_follow_distance: float = 5.0  # metres — desired look-ahead
     turn_follow_distance: float = 2.0  # metres — shorter look-ahead in turns
     max_follow_distance: float = 20.0  # metres — upper bound
-    waypoint_buffer_size: int = 40
+    waypoint_buffer_size: int = 60
 
     # --- Safety thresholds ---
     traffic_light_brake_distance: float = 80.0  # metres — start braking
@@ -201,6 +202,10 @@ class ExpertConfig:
     gap_fill_max_factor: float = 3.0
     gap_fill_diverge_factor: float = 2.0
     gap_fill_rpc_budget: int = 50_000
+    gap_fill_bezier_enabled: bool = True
+    gap_fill_bezier_step: float = 0.5  # metres
+    gap_fill_bezier_tangent_factor: float = 0.35  # control-handle length = gap * factor
+    gap_fill_bezier_max_project_error: float = 2.5  # metres
 
 
 # ---------------------------------------------------------------------------
@@ -404,6 +409,10 @@ class PrivilegedExpert:
         self._gap_fill_diverged: int = 0
         self._gap_fill_budget_exhausted: bool = False
         self._gap_fill_tried: set = set()  # (wp_prev.id, wp_next.id) pairs already probed
+        # Bezier arc buffer — populated by _fill_junction_gaps, consumed by
+        # _advance_route.  Kept separate from _wp_buffer so arc traversal
+        # never modifies the route tracking state.
+        self._arc_buffer: deque = deque()
         self._stop_sign_wait_counter: int = 0
         self._stop_sign_active: int | None = None  # actor ID
 
@@ -446,6 +455,15 @@ class PrivilegedExpert:
         self._route_length = len(route)
         self._route_index = 0
         self._wp_buffer.clear()
+        # Reset gap-fill state BEFORE _fill_buffer so the initial fill starts
+        # with a clean slate and the tried-set is valid after fill returns.
+        # Also clear any stale arc from a previous route (new expert is created
+        # per episode in the collector, but belt-and-suspenders here).
+        self._arc_buffer.clear()
+        self._gap_fill_rpcs = 0
+        self._gap_fill_diverged = 0
+        self._gap_fill_budget_exhausted = False
+        self._gap_fill_tried = set()
         self._fill_buffer()
         self.speed_pid.reset()
         self.steer_pid.reset()
@@ -460,10 +478,6 @@ class PrivilegedExpert:
         self._yield_active = None
         self._yield_wait_counter = 0
         self._yield_has_conflict = False
-        self._gap_fill_rpcs = 0
-        self._gap_fill_diverged = 0
-        self._gap_fill_budget_exhausted = False
-        self._gap_fill_tried = set()
         self._prev_lane_wp = None
 
         try:
@@ -721,10 +735,10 @@ class PrivilegedExpert:
         estimation, and adaptive follow-distance.
 
         This method scans consecutive waypoint pairs in the buffer.
-        When a gap exceeds ``_GAP_THRESHOLD`` metres, it queries the
-        HD map (``wp.next(step)``) to produce intermediate waypoints
-        at ~2 m spacing, preserving the nav command of the gap's
-        start waypoint.
+        When a gap exceeds ``_GAP_THRESHOLD`` metres, it first attempts
+        a smooth Bezier interpolation between entry and exit waypoints
+        (projected back to map waypoints). If projection quality is
+        poor, it falls back to the legacy ``wp.next(step)`` chaining.
 
         The buffer's ``maxlen`` is respected — filling stops when
         full, and the deque naturally evicts the oldest entries.
@@ -755,8 +769,53 @@ class PrivilegedExpert:
            for unlimited.
         """
         _GAP_THRESHOLD = 4.0  # metres — normal spacing is ~2 m
-        _FILL_STEP = 2.0  # metres — interpolation step
+        _FILL_STEP = 2.0  # metres — interpolation step / fallback step
         cfg = self.config
+        bezier_step = max(0.25, float(cfg.gap_fill_bezier_step))
+
+        def _loc_dist(a: Any, b: Any) -> float:
+            dx = float(a.x) - float(b.x)
+            dy = float(a.y) - float(b.y)
+            dz = float(getattr(a, "z", 0.0)) - float(getattr(b, "z", 0.0))
+            return math.sqrt(dx * dx + dy * dy + dz * dz)
+
+        def _make_loc(x: float, y: float, z: float) -> Any:
+            if CARLA_AVAILABLE:
+                try:
+                    return carla.Location(x=x, y=y, z=z)
+                except (AttributeError, TypeError):
+                    pass
+            return SimpleNamespace(x=x, y=y, z=z)
+
+        def _bezier_xyz(
+            t: float,
+            p0: tuple[float, float, float],
+            p1: tuple[float, float, float],
+            p2: tuple[float, float, float],
+            p3: tuple[float, float, float],
+        ) -> tuple[float, float, float]:
+            omt = 1.0 - t
+            omt2 = omt * omt
+            t2 = t * t
+            bx = (
+                omt2 * omt * p0[0]
+                + 3.0 * omt2 * t * p1[0]
+                + 3.0 * omt * t2 * p2[0]
+                + t2 * t * p3[0]
+            )
+            by = (
+                omt2 * omt * p0[1]
+                + 3.0 * omt2 * t * p1[1]
+                + 3.0 * omt * t2 * p2[1]
+                + t2 * t * p3[1]
+            )
+            bz = (
+                omt2 * omt * p0[2]
+                + 3.0 * omt2 * t * p1[2]
+                + 3.0 * omt * t2 * p2[2]
+                + t2 * t * p3[2]
+            )
+            return bx, by, bz
 
         # Gap filling disabled by config or budget exhausted
         if cfg.gap_fill_max_factor == 0:
@@ -767,6 +826,9 @@ class PrivilegedExpert:
             return
 
         # Work on a snapshot; rebuild with fills inserted.
+        # NOTE: Bezier arc fills are stored in self._arc_buffer (separate from
+        # the route buffer) so they never cause overflow or displace route
+        # waypoints.  Only legacy RPC fills go into rebuilt here.
         items = list(self._wp_buffer)
         rebuilt: list[tuple] = [items[0]]
         rpcs_this_call = 0
@@ -793,50 +855,145 @@ class PrivilegedExpert:
                 )
                 diverge_limit = gap * cfg.gap_fill_diverge_factor
                 origin = wp_prev.transform.location
-                # Accumulate fills tentatively — only commit if they
-                # actually converge toward wp_next.  If the loop exits
-                # via the divergence guard or iteration cap WITHOUT
-                # reaching the target, ALL tentative fills are discarded.
-                # This prevents wrong-road waypoints from corrupting the
-                # buffer and triggering cascading re-fills on subsequent
-                # frames.
-                tentative: list[tuple] = []
-                converged = False
-                try:
-                    nexts = wp_prev.next(_FILL_STEP)
-                    rpcs_this_call += 1
-                    fills = 0
-                    while nexts and fills < max_fills:
-                        nxt = nexts[0]
-                        dist_to_target = nxt.transform.location.distance(wp_next.transform.location)
-                        if dist_to_target < _FILL_STEP:
-                            converged = True
-                            break  # close enough to the next original wp
-                        # Divergence guard
-                        dist_from_origin = nxt.transform.location.distance(origin)
-                        if dist_from_origin > diverge_limit:
-                            break
-                        tentative.append((nxt, cmd_next))
-                        nexts = nxt.next(_FILL_STEP)
-                        rpcs_this_call += 1
-                        fills += 1
-                except (AttributeError, RuntimeError):
-                    pass  # graceful degradation
 
-                # Only insert fills that actually converged on the target.
-                # Diverging fills (wrong road) are silently discarded —
-                # the original gap is preserved, which is harmless
-                # (the corridor just has one longer segment there).
-                # Mark this pair as tried either way so we don't
-                # re-probe it on subsequent frames.
-                self._gap_fill_tried.add(pair_key)
-                if converged and tentative:
-                    rebuilt.extend(tentative)
-                elif tentative:
-                    # Gap diverged — fills were on a different road.
-                    # Discard them to avoid corrupting the waypoint
-                    # buffer and causing cascading re-fills.
-                    self._gap_fill_diverged += 1
+                # Try smooth geometric interpolation first for junction gaps.
+                # Only generate an arc for j==1 (the gap immediately ahead of
+                # _wp_buffer[0]).  Generating arcs for far-ahead gaps (j>1)
+                # freezes _wp_buffer prematurely — ego can't consume arc points
+                # that are 50-100 m away, causing wpd to grow to 100m+.
+                # Skip if a Bezier arc is already active — don't start a second.
+                bezier_fills: list[tuple[Any, RoadOption]] | None = None
+                if cfg.gap_fill_bezier_enabled and not self._arc_buffer and j == 1:
+                    target_loc = wp_next.transform.location
+                    yaw0 = math.radians(float(wp_prev.transform.rotation.yaw))
+                    yaw3 = math.radians(float(wp_next.transform.rotation.yaw))
+                    control_len = max(
+                        _FILL_STEP,
+                        min(
+                            gap * max(0.0, cfg.gap_fill_bezier_tangent_factor),
+                            gap * 0.5,
+                        ),
+                    )
+
+                    p0 = (float(origin.x), float(origin.y), float(getattr(origin, "z", 0.0)))
+                    p3 = (
+                        float(target_loc.x),
+                        float(target_loc.y),
+                        float(getattr(target_loc, "z", 0.0)),
+                    )
+                    p1 = (
+                        p0[0] + control_len * math.cos(yaw0),
+                        p0[1] + control_len * math.sin(yaw0),
+                        p0[2],
+                    )
+                    p2 = (
+                        p3[0] - control_len * math.cos(yaw3),
+                        p3[1] - control_len * math.sin(yaw3),
+                        p3[2],
+                    )
+
+                    n_samples = max(2, int(gap / bezier_step))
+                    proj_error_limit = max(_FILL_STEP, float(cfg.gap_fill_bezier_max_project_error))
+                    tentative_curve: list[tuple[Any, RoadOption]] = []
+                    seen_ids = {int(getattr(wp_prev, "id", -1)), int(getattr(wp_next, "id", -1))}
+                    last_target_dist = _loc_dist(origin, target_loc)
+                    bezier_ok = True
+
+                    for idx in range(1, n_samples):
+                        t = idx / n_samples
+                        bx, by, bz = _bezier_xyz(t, p0, p1, p2, p3)
+                        probe_loc = _make_loc(bx, by, bz)
+                        try:
+                            projected_wp = self.map.get_waypoint(probe_loc)
+                        except (AttributeError, RuntimeError, TypeError):
+                            bezier_ok = False
+                            break
+                        if projected_wp is None:
+                            bezier_ok = False
+                            break
+
+                        proj_loc = projected_wp.transform.location
+                        if _loc_dist(proj_loc, probe_loc) > proj_error_limit:
+                            bezier_ok = False
+                            break
+                        if _loc_dist(proj_loc, origin) > diverge_limit:
+                            bezier_ok = False
+                            break
+
+                        target_dist = _loc_dist(proj_loc, target_loc)
+                        if target_dist > last_target_dist + _FILL_STEP:
+                            bezier_ok = False
+                            break
+                        last_target_dist = target_dist
+
+                        wp_id = int(getattr(projected_wp, "id", -1))
+                        if wp_id != -1 and wp_id in seen_ids:
+                            continue
+                        if wp_id != -1:
+                            seen_ids.add(wp_id)
+                        tentative_curve.append((projected_wp, cmd_next))
+
+                    if bezier_ok and tentative_curve:
+                        end_dist = _loc_dist(tentative_curve[-1][0].transform.location, target_loc)
+                        if end_dist <= max(_FILL_STEP * 2.0, bezier_step * 2.0):
+                            bezier_fills = tentative_curve
+
+                if bezier_fills:
+                    self._gap_fill_tried.add(pair_key)
+                    # Store arc in the dedicated arc buffer — do NOT insert
+                    # into rebuilt.  This keeps _wp_buffer free of arc points
+                    # so route tracking is never corrupted by overflow.
+                    # junction_exit (wp_next) stays in rebuilt via the normal
+                    # append below, so _wp_buffer always has the correct exit.
+                    self._arc_buffer = deque(bezier_fills)
+                    # (fall through to wp_next append; skip RPC fallback)
+                else:
+                    # Accumulate fills tentatively — only commit if they
+                    # actually converge toward wp_next.  If the loop exits
+                    # via the divergence guard or iteration cap WITHOUT
+                    # reaching the target, ALL tentative fills are discarded.
+                    # This prevents wrong-road waypoints from corrupting the
+                    # buffer and triggering cascading re-fills on subsequent
+                    # frames.
+                    tentative: list[tuple] = []
+                    converged = False
+                    try:
+                        nexts = wp_prev.next(_FILL_STEP)
+                        rpcs_this_call += 1
+                        fills = 0
+                        while nexts and fills < max_fills:
+                            nxt = nexts[0]
+                            dist_to_target = nxt.transform.location.distance(
+                                wp_next.transform.location
+                            )
+                            if dist_to_target < _FILL_STEP:
+                                converged = True
+                                break  # close enough to the next original wp
+                            # Divergence guard
+                            dist_from_origin = nxt.transform.location.distance(origin)
+                            if dist_from_origin > diverge_limit:
+                                break
+                            tentative.append((nxt, cmd_next))
+                            nexts = nxt.next(_FILL_STEP)
+                            rpcs_this_call += 1
+                            fills += 1
+                    except (AttributeError, RuntimeError):
+                        pass  # graceful degradation
+
+                    # Only insert fills that actually converged on the target.
+                    # Diverging fills (wrong road) are silently discarded —
+                    # the original gap is preserved, which is harmless
+                    # (the corridor just has one longer segment there).
+                    # Mark this pair as tried either way so we don't
+                    # re-probe it on subsequent frames.
+                    self._gap_fill_tried.add(pair_key)
+                    if converged and tentative:
+                        rebuilt.extend(tentative)
+                    elif tentative:
+                        # Gap diverged — fills were on a different road.
+                        # Discard them to avoid corrupting the waypoint
+                        # buffer and causing cascading re-fills.
+                        self._gap_fill_diverged += 1
 
             rebuilt.append((wp_next, cmd_next))
 
@@ -853,10 +1010,11 @@ class PrivilegedExpert:
                 budget,
             )
 
-        # Only rebuild if we actually inserted anything.
+        # Only rebuild if we actually inserted anything (RPC fills only —
+        # Bezier arc fills now go to _arc_buffer and never reach rebuilt).
         if len(rebuilt) != len(items):
             self._wp_buffer.clear()
-            maxlen = self._wp_buffer.maxlen or 40
+            maxlen = self._wp_buffer.maxlen or 60
             for entry in rebuilt[:maxlen]:
                 self._wp_buffer.append(entry)
 
@@ -864,23 +1022,55 @@ class PrivilegedExpert:
             self._refresh_tl_stop_loc(transform)
 
     def _advance_route(self, transform: "carla.Transform") -> None:
-        """Pop consumed waypoints (closer than *min_follow_distance* or behind ego)."""
+        """Pop consumed waypoints via distance and segment progress.
+
+        When a Bezier arc is active (_arc_buffer non-empty), the arc is
+        advanced instead of the route buffer.  The route buffer is frozen
+        during arc traversal so junction_exit stays as _wp_buffer[0] and
+        becomes the natural handoff point the moment the arc empties.
+
+        Waypoint advancement is position-based (progress along
+        wp[0]->wp[1]) rather than heading-based so yaw rotation in
+        turns does not trigger premature mass popping.
+        """
         location = transform.location
-        fwd = transform.get_forward_vector()
 
-        while len(self._wp_buffer) > 1:
-            wp, _ = self._wp_buffer[0]
-            wp_loc = wp.transform.location
-            dist = location.distance(wp_loc)
+        def _progress_past(buf: deque) -> bool:
+            """Return True and pop buf[0] if ego is past its midpoint."""
+            wp_curr, _ = buf[0]
+            wp_next, _ = buf[1]
+            curr_loc = wp_curr.transform.location
+            next_loc = wp_next.transform.location
+            dist = location.distance(curr_loc)
+            seg_dx = float(next_loc.x - curr_loc.x)
+            seg_dy = float(next_loc.y - curr_loc.y)
+            seg_len = math.hypot(seg_dx, seg_dy)
+            past_midpoint = False
+            if seg_len > 1e-6:
+                ego_dx = float(location.x - curr_loc.x)
+                ego_dy = float(location.y - curr_loc.y)
+                progress = (seg_dx * ego_dx + seg_dy * ego_dy) / seg_len
+                past_midpoint = progress > (0.5 * seg_len)
+            return dist < self.config.min_follow_distance or past_midpoint
 
-            dx = wp_loc.x - location.x
-            dy = wp_loc.y - location.y
-            is_behind = (fwd.x * dx + fwd.y * dy) < 0
+        if self._arc_buffer:
+            # Arc is active — advance the arc, freeze the route buffer.
+            while len(self._arc_buffer) > 1 and _progress_past(self._arc_buffer):
+                self._arc_buffer.popleft()
+            if len(self._arc_buffer) <= 1:
+                # Arc exhausted — clear it so _get_target falls back to
+                # _wp_buffer.  The route buffer still holds junction_exit
+                # as its front entry; normal catchup popping handles it.
+                self._arc_buffer.clear()
+            # Still call _fill_buffer so route waypoints reload normally,
+            # but _fill_junction_gaps will skip new Bezier generation while
+            # _arc_buffer is non-empty (no double-arc).
+            self._fill_buffer(transform)
+            return
 
-            if dist < self.config.min_follow_distance or is_behind:
-                self._wp_buffer.popleft()
-            else:
-                break
+        # Normal route buffer advancement.
+        while len(self._wp_buffer) > 1 and _progress_past(self._wp_buffer):
+            self._wp_buffer.popleft()
         self._fill_buffer(transform)
 
     def _get_target(
@@ -996,8 +1186,12 @@ class PrivilegedExpert:
             cfg.turn_follow_distance - cfg.target_follow_distance
         )
 
-        target_wp, _ = self._wp_buffer[0]
-        for wp, _ in self._wp_buffer:
+        # When a Bezier arc is active use the arc buffer for the steering
+        # target so ego follows the smooth junction path.  Nav command
+        # scanning always uses _wp_buffer (route commands, not arc points).
+        steer_buf = self._arc_buffer if self._arc_buffer else self._wp_buffer
+        target_wp, _ = steer_buf[0]
+        for wp, _ in steer_buf:
             if ego_loc.distance(wp.transform.location) >= follow_dist:
                 target_wp = wp
                 break

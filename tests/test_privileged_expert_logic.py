@@ -41,19 +41,27 @@ class _Transform:
 
 
 class _Waypoint:
+    _id_counter = 1
+
     def __init__(self, x: float, y: float, road_id: int, lane_id: int, yaw: float = 0.0) -> None:
+        self.id = _Waypoint._id_counter
+        _Waypoint._id_counter += 1
         self.transform = _Transform(_Loc(x, y), yaw=yaw)
         self.road_id = road_id
         self.lane_id = lane_id
         self.is_junction = False
         self._left: _Waypoint | None = None
         self._right: _Waypoint | None = None
+        self._nexts: list[_Waypoint] = []
 
     def get_left_lane(self) -> "_Waypoint | None":
         return self._left
 
     def get_right_lane(self) -> "_Waypoint | None":
         return self._right
+
+    def next(self, _step: float) -> list["_Waypoint"]:
+        return list(self._nexts)
 
 
 def _build_expert() -> PrivilegedExpert:
@@ -71,6 +79,11 @@ def _build_expert() -> PrivilegedExpert:
     expert._prev_lane_wp = None
     expert._prev_target = 30.0
     expert._cached_half_lane = expert.config.lane_half_width
+    expert._gap_fill_rpcs = 0
+    expert._gap_fill_diverged = 0
+    expert._gap_fill_budget_exhausted = False
+    expert._gap_fill_tried = set()
+    expert._arc_buffer = deque()
     setattr(expert, "_route_curvature", lambda: 0.0)
     expert.vehicle = SimpleNamespace(
         bounding_box=SimpleNamespace(extent=SimpleNamespace(y=1.0)),
@@ -423,3 +436,131 @@ def test_closest_pedestrian_distance_uses_hybrid_floor() -> None:
     dist = expert._closest_pedestrian_distance([ped], _Transform(_Loc(0.0, 0.0)))
 
     assert dist == 12.0
+
+
+def test_fill_junction_gaps_prefers_bezier_for_junction_gap() -> None:
+    expert = _build_expert()
+
+    wp_prev = _Waypoint(0.0, 0.0, road_id=10, lane_id=1, yaw=0.0)
+    wp_next = _Waypoint(8.0, 0.0, road_id=10, lane_id=1, yaw=0.0)
+    projected = [
+        _Waypoint(2.0, 0.0, road_id=10, lane_id=1, yaw=0.0),
+        _Waypoint(4.0, 0.0, road_id=10, lane_id=1, yaw=0.0),
+        _Waypoint(6.0, 0.0, road_id=10, lane_id=1, yaw=0.0),
+    ]
+    wrong_branch = _Waypoint(2.0, 2.0, road_id=11, lane_id=1, yaw=35.0)
+    next_calls = {"count": 0}
+
+    def _counting_next(_step: float) -> list[_Waypoint]:
+        next_calls["count"] += 1
+        return [wrong_branch]
+
+    wp_prev.next = _counting_next  # type: ignore[method-assign]
+
+    def _project_to_route(loc: _Loc) -> _Waypoint:
+        return min(projected, key=lambda wp: abs(wp.transform.location.x - loc.x))
+
+    expert.map = SimpleNamespace(get_waypoint=_project_to_route)
+    expert._wp_buffer = deque(
+        [
+            (wp_prev, RoadOption.LANEFOLLOW),
+            (wp_next, RoadOption.LANEFOLLOW),
+        ]
+    )
+
+    expert._fill_junction_gaps(None)
+
+    # RPC fallback must not have been called (Bezier was preferred).
+    assert next_calls["count"] == 0
+    # Bezier fills land in _arc_buffer, not _wp_buffer.
+    arc_wps = [wp for wp, _cmd in expert._arc_buffer]
+    assert any(wp in arc_wps for wp in projected), "Bezier fills not found in _arc_buffer"
+    assert wrong_branch not in arc_wps
+
+
+def test_fill_junction_gaps_bezier_goes_to_arc_buffer_not_wp_buffer() -> None:
+    """Bezier arc fills must land in _arc_buffer, never in _wp_buffer.
+
+    Dual-buffer design: _wp_buffer stays as a pure route tracker.  Arc fills
+    are placed in _arc_buffer so no overflow can displace post-junction route
+    waypoints and no _route_index rewind is needed.
+    """
+    expert = _build_expert()
+
+    wp_prev = _Waypoint(0.0, 0.0, road_id=10, lane_id=1, yaw=0.0)
+    wp_next = _Waypoint(8.0, 0.0, road_id=10, lane_id=1, yaw=0.0)
+    projected = [
+        _Waypoint(2.0, 0.0, road_id=10, lane_id=1, yaw=0.0),
+        _Waypoint(4.0, 0.0, road_id=10, lane_id=1, yaw=0.0),
+        _Waypoint(6.0, 0.0, road_id=10, lane_id=1, yaw=0.0),
+    ]
+
+    def _project(loc: object) -> "_Waypoint":
+        x = float(getattr(loc, "x", 0.0))
+        return min(projected, key=lambda wp: abs(wp.transform.location.x - x))
+
+    expert.map = SimpleNamespace(get_waypoint=_project)
+    expert._wp_buffer = deque([(wp_prev, RoadOption.LANEFOLLOW), (wp_next, RoadOption.LANEFOLLOW)])
+
+    expert._fill_junction_gaps(None)
+
+    # Arc fills landed in _arc_buffer.
+    assert len(expert._arc_buffer) > 0, "Bezier fills were not placed in _arc_buffer"
+    # _wp_buffer must still contain the junction exit (wp_next) — not disturbed.
+    route_wps = [wp for wp, _ in expert._wp_buffer]
+    assert wp_next in route_wps, "junction exit (wp_next) was removed from _wp_buffer"
+    # No arc waypoints in _wp_buffer (they should only be in _arc_buffer).
+    arc_wps = {wp for wp, _ in expert._arc_buffer}
+    for wp in route_wps:
+        assert (
+            wp not in arc_wps
+        ), f"arc waypoint leaked into _wp_buffer at x={wp.transform.location.x}"
+
+
+def test_fill_junction_gaps_does_not_start_second_arc_while_one_is_active() -> None:
+    """If _arc_buffer is already populated, gap fill must not overwrite it."""
+    expert = _build_expert()
+
+    wp_prev = _Waypoint(0.0, 0.0, road_id=10, lane_id=1, yaw=0.0)
+    wp_next = _Waypoint(8.0, 0.0, road_id=10, lane_id=1, yaw=0.0)
+
+    sentinel_arc_wp = _Waypoint(1.0, 0.0, road_id=99, lane_id=1)
+    expert._arc_buffer = deque([(sentinel_arc_wp, RoadOption.LANEFOLLOW)])
+
+    def _project(loc: object) -> "_Waypoint":
+        return _Waypoint(float(getattr(loc, "x", 0.0)), 0.0, road_id=10, lane_id=1, yaw=0.0)
+
+    expert.map = SimpleNamespace(get_waypoint=_project)
+    expert._wp_buffer = deque([(wp_prev, RoadOption.LANEFOLLOW), (wp_next, RoadOption.LANEFOLLOW)])
+
+    expert._fill_junction_gaps(None)
+
+    # Active arc must not have been replaced.
+    assert (
+        expert._arc_buffer[0][0] is sentinel_arc_wp
+    ), "_arc_buffer was overwritten while an arc was already active"
+
+
+def test_advance_route_uses_segment_progress_even_when_heading_would_disagree() -> None:
+    expert = _build_expert()
+    expert.config.min_follow_distance = 0.1
+
+    wp0 = _Waypoint(0.0, 0.0, road_id=1, lane_id=1)
+    wp1 = _Waypoint(4.0, 0.0, road_id=1, lane_id=1)
+    wp2 = _Waypoint(8.0, 0.0, road_id=1, lane_id=1)
+    expert._wp_buffer = deque(
+        [
+            (wp0, RoadOption.LANEFOLLOW),
+            (wp1, RoadOption.LANEFOLLOW),
+            (wp2, RoadOption.LANEFOLLOW),
+        ]
+    )
+    setattr(expert, "_fill_buffer", lambda _transform: None)
+
+    # x=1.0 is before midpoint (2.0) on segment [0->4], so wp0 should remain.
+    expert._advance_route(_Transform(_Loc(1.0, 0.0), yaw=180.0))
+    assert expert._wp_buffer[0][0] is wp0
+
+    # x=2.5 is past midpoint, so wp0 should now be consumed.
+    expert._advance_route(_Transform(_Loc(2.5, 0.0), yaw=180.0))
+    assert expert._wp_buffer[0][0] is wp1
