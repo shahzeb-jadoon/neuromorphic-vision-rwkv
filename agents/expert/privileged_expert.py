@@ -207,6 +207,16 @@ class ExpertConfig:
     gap_fill_bezier_tangent_factor: float = 0.35  # control-handle length = gap * factor
     gap_fill_bezier_max_project_error: float = 2.5  # metres
 
+    # --- Route densification (long-term robust path smoothing) ---
+    # Preprocess sparse route transitions once in set_route() so runtime
+    # control does not depend on per-frame gap-repair timing.
+    route_densify_enabled: bool = True
+    route_densify_gap_threshold: float = 4.0  # metres
+    route_densify_step: float = 1.0  # metres
+    route_densify_max_factor: float = 3.0
+    route_densify_diverge_factor: float = 2.0
+    route_densify_projection_fallback: bool = True
+
 
 # ---------------------------------------------------------------------------
 # Data structures
@@ -449,10 +459,160 @@ class PrivilegedExpert:
     # Route management
     # ------------------------------------------------------------------
 
+    def _project_route_gap_samples(
+        self,
+        wp_prev: "carla.Waypoint",
+        wp_next: "carla.Waypoint",
+        cmd_next: RoadOption,
+        gap: float,
+        step: float,
+        diverge_limit: float,
+        seen_ids: set[int],
+    ) -> List[Tuple["carla.Waypoint", RoadOption]]:
+        """Project linear samples of a sparse route gap back onto map waypoints."""
+        origin = wp_prev.transform.location
+        target = wp_next.transform.location
+        n_samples = max(2, int(gap / step))
+        projected_fills: List[Tuple["carla.Waypoint", RoadOption]] = []
+        last_target_dist = origin.distance(target)
+
+        for sample_idx in range(1, n_samples):
+            t = sample_idx / n_samples
+            sx = float(origin.x) + (float(target.x) - float(origin.x)) * t
+            sy = float(origin.y) + (float(target.y) - float(origin.y)) * t
+            sz = float(getattr(origin, "z", 0.0)) + (
+                float(getattr(target, "z", 0.0)) - float(getattr(origin, "z", 0.0))
+            ) * t
+            if CARLA_AVAILABLE:
+                probe_loc = carla.Location(x=sx, y=sy, z=sz)
+            else:
+                probe_loc = SimpleNamespace(x=sx, y=sy, z=sz)
+
+            try:
+                projected_wp = self.map.get_waypoint(probe_loc)
+            except (AttributeError, RuntimeError, TypeError):
+                return []
+            if projected_wp is None:
+                return []
+
+            proj_loc = projected_wp.transform.location
+            if proj_loc.distance(origin) > diverge_limit:
+                return []
+
+            target_dist = proj_loc.distance(target)
+            if target_dist > last_target_dist + step:
+                return []
+            last_target_dist = target_dist
+
+            projected_id = int(getattr(projected_wp, "id", -1))
+            if projected_id != -1 and projected_id in seen_ids:
+                continue
+            if projected_id != -1:
+                seen_ids.add(projected_id)
+            projected_fills.append((projected_wp, cmd_next))
+
+        if projected_fills:
+            end_dist = projected_fills[-1][0].transform.location.distance(target)
+            if end_dist <= max(step * 2.0, 2.0):
+                return projected_fills
+        return []
+
+    def _densify_route_transitions(
+        self,
+        route: List[Tuple["carla.Waypoint", RoadOption]],
+    ) -> List[Tuple["carla.Waypoint", RoadOption]]:
+        """Densify sparse transitions once at route-load time.
+
+        This removes dependence on per-frame gap repair for most junction
+        transitions and keeps runtime gap filling as a safety net.
+        """
+        if not route or len(route) < 2:
+            return list(route)
+
+        cfg = self.config
+        if not cfg.route_densify_enabled:
+            return list(route)
+
+        step = max(0.5, float(cfg.route_densify_step))
+        gap_threshold = max(float(cfg.route_densify_gap_threshold), step * 2.0)
+
+        densified: List[Tuple["carla.Waypoint", RoadOption]] = [route[0]]
+
+        for idx in range(1, len(route)):
+            wp_prev, _ = route[idx - 1]
+            wp_next, cmd_next = route[idx]
+            gap = wp_prev.transform.location.distance(wp_next.transform.location)
+
+            if gap <= gap_threshold:
+                densified.append((wp_next, cmd_next))
+                continue
+
+            max_steps = (
+                int(gap / step * cfg.route_densify_max_factor) + 1
+                if math.isfinite(cfg.route_densify_max_factor)
+                else float("inf")
+            )
+            diverge_limit = gap * float(cfg.route_densify_diverge_factor)
+            origin = wp_prev.transform.location
+            target = wp_next.transform.location
+
+            inserted: List[Tuple["carla.Waypoint", RoadOption]] = []
+            seen_ids = {int(getattr(wp_prev, "id", -1)), int(getattr(wp_next, "id", -1))}
+            converged = False
+            current_wp = wp_prev
+            steps = 0
+
+            try:
+                nexts = current_wp.next(step)
+                while nexts and steps < max_steps:
+                    # Choose the branch that best approaches the intended target.
+                    next_wp = min(
+                        nexts,
+                        key=lambda cand: cand.transform.location.distance(target),
+                    )
+                    next_loc = next_wp.transform.location
+
+                    if next_loc.distance(target) < step:
+                        converged = True
+                        break
+                    if next_loc.distance(origin) > diverge_limit:
+                        break
+
+                    wp_id = int(getattr(next_wp, "id", -1))
+                    if wp_id != -1 and wp_id in seen_ids:
+                        break
+                    if wp_id != -1:
+                        seen_ids.add(wp_id)
+
+                    inserted.append((next_wp, cmd_next))
+                    current_wp = next_wp
+                    nexts = current_wp.next(step)
+                    steps += 1
+            except (AttributeError, RuntimeError):
+                inserted = []
+
+            if not converged and cfg.route_densify_projection_fallback:
+                inserted = self._project_route_gap_samples(
+                    wp_prev=wp_prev,
+                    wp_next=wp_next,
+                    cmd_next=cmd_next,
+                    gap=gap,
+                    step=step,
+                    diverge_limit=diverge_limit,
+                    seen_ids=seen_ids,
+                )
+
+            densified.extend(inserted)
+            densified.append((wp_next, cmd_next))
+
+        return densified
+
     def set_route(self, route: List[Tuple["carla.Waypoint", RoadOption]]) -> None:
         """Load a pre-computed route (list of (waypoint, RoadOption))."""
-        self._route = list(route)
-        self._route_length = len(route)
+        route_waypoints = list(route)
+        route_waypoints = self._densify_route_transitions(route_waypoints)
+        self._route = route_waypoints
+        self._route_length = len(route_waypoints)
         self._route_index = 0
         self._wp_buffer.clear()
         # Reset gap-fill state BEFORE _fill_buffer so the initial fill starts

@@ -564,3 +564,79 @@ def test_advance_route_uses_segment_progress_even_when_heading_would_disagree() 
     # x=2.5 is past midpoint, so wp0 should now be consumed.
     expert._advance_route(_Transform(_Loc(2.5, 0.0), yaw=180.0))
     assert expert._wp_buffer[0][0] is wp1
+
+
+def test_densify_route_transitions_inserts_waypoints_for_large_gap() -> None:
+    expert = _build_expert()
+    expert.config.route_densify_enabled = True
+    expert.config.route_densify_step = 1.0
+
+    wp0 = _Waypoint(0.0, 0.0, road_id=1, lane_id=1)
+    wp2 = _Waypoint(2.0, 0.0, road_id=1, lane_id=1)
+    wp4 = _Waypoint(4.0, 0.0, road_id=1, lane_id=1)
+    wp6 = _Waypoint(6.0, 0.0, road_id=1, lane_id=1)
+    wp8 = _Waypoint(8.0, 0.0, road_id=1, lane_id=1)
+    wp10 = _Waypoint(10.0, 0.0, road_id=1, lane_id=1)
+    wp12 = _Waypoint(12.0, 0.0, road_id=1, lane_id=1)
+
+    wp0._nexts = [wp2]
+    wp2._nexts = [wp4]
+    wp4._nexts = [wp6]
+    wp6._nexts = [wp8]
+    wp8._nexts = [wp10]
+    wp10._nexts = [wp12]
+
+    route = [(wp0, RoadOption.LANEFOLLOW), (wp12, RoadOption.LEFT)]
+    dense = expert._densify_route_transitions(route)
+
+    assert len(dense) > len(route)
+    assert dense[0][0] is wp0
+    assert dense[-1][0] is wp12
+    assert all(cmd == RoadOption.LEFT for _wp, cmd in dense[1:])
+
+
+def test_densify_route_transitions_uses_projection_fallback() -> None:
+    expert = _build_expert()
+    expert.config.route_densify_enabled = True
+    expert.config.route_densify_step = 1.0
+    expert.config.route_densify_projection_fallback = True
+
+    wp0 = _Waypoint(0.0, 0.0, road_id=1, lane_id=1)
+    wp8 = _Waypoint(8.0, 0.0, road_id=2, lane_id=1)
+    wrong = _Waypoint(1.0, 4.0, road_id=9, lane_id=1)
+    wp0._nexts = [wrong]
+    wrong._nexts = []
+
+    projected = [
+        _Waypoint(2.0, 0.0, road_id=2, lane_id=1),
+        _Waypoint(4.0, 0.0, road_id=2, lane_id=1),
+        _Waypoint(6.0, 0.0, road_id=2, lane_id=1),
+    ]
+
+    def _project(loc: object) -> _Waypoint:
+        x = float(getattr(loc, "x", 0.0))
+        return min(projected, key=lambda wp: abs(wp.transform.location.x - x))
+
+    expert.map = SimpleNamespace(get_waypoint=_project)
+
+    route = [(wp0, RoadOption.LANEFOLLOW), (wp8, RoadOption.LEFT)]
+    dense = expert._densify_route_transitions(route)
+
+    inserted = [wp for wp, _ in dense[1:-1]]
+    assert len(inserted) >= 2
+    assert any(wp in inserted for wp in projected)
+
+
+def test_densify_route_transitions_can_be_disabled() -> None:
+    expert = _build_expert()
+    expert.config.route_densify_enabled = False
+
+    wp0 = _Waypoint(0.0, 0.0, road_id=1, lane_id=1)
+    wp10 = _Waypoint(10.0, 0.0, road_id=1, lane_id=1)
+    route = [(wp0, RoadOption.LANEFOLLOW), (wp10, RoadOption.LEFT)]
+
+    dense = expert._densify_route_transitions(route)
+
+    assert len(dense) == len(route)
+    assert dense[0][0] is wp0
+    assert dense[1][0] is wp10
