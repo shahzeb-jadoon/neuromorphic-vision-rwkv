@@ -541,6 +541,60 @@ def test_fill_junction_gaps_does_not_start_second_arc_while_one_is_active() -> N
     ), "_arc_buffer was overwritten while an arc was already active"
 
 
+def test_fill_junction_gaps_fallback_chooses_route_aligned_branch() -> None:
+    expert = _build_expert()
+    expert.config.gap_fill_bezier_enabled = False
+
+    wp_prev = _Waypoint(0.0, 0.0, road_id=10, lane_id=1, yaw=0.0)
+    wp_next = _Waypoint(8.0, 0.0, road_id=10, lane_id=1, yaw=0.0)
+
+    wrong_branch = _Waypoint(2.0, 2.0, road_id=11, lane_id=1, yaw=35.0)
+    right_branch = _Waypoint(2.0, 0.0, road_id=10, lane_id=1, yaw=0.0)
+    near_target = _Waypoint(6.5, 0.0, road_id=10, lane_id=1, yaw=0.0)
+
+    # Wrong branch appears first to verify scoring beats list order.
+    wp_prev._nexts = [wrong_branch, right_branch]
+    right_branch._nexts = [near_target]
+    wrong_branch._nexts = [_Waypoint(4.5, 3.0, road_id=11, lane_id=1, yaw=45.0)]
+
+    expert._wp_buffer = deque(
+        [
+            (wp_prev, RoadOption.LANEFOLLOW),
+            (wp_next, RoadOption.LANEFOLLOW),
+        ]
+    )
+
+    expert._fill_junction_gaps(None)
+    filled_wps = [wp for wp, _cmd in expert._wp_buffer]
+
+    assert right_branch in filled_wps
+    assert wrong_branch not in filled_wps
+
+
+def test_fill_buffer_route_end_prefers_lane_order_continuity() -> None:
+    expert = _build_expert()
+
+    last_wp = _Waypoint(0.0, 0.0, road_id=50, lane_id=2, yaw=90.0)
+    wrong_lane = _Waypoint(0.0, 2.0, road_id=60, lane_id=4, yaw=90.0)
+    right_lane = _Waypoint(0.0, 2.0, road_id=60, lane_id=2, yaw=90.0)
+
+    # Wrong lane comes first to emulate unstable nexts[] ordering.
+    last_wp._nexts = [wrong_lane, right_lane]
+    wrong_lane._nexts = []
+    right_lane._nexts = []
+
+    expert._wp_buffer = deque([(last_wp, RoadOption.LANEFOLLOW)])
+    expert._route = []
+    expert._route_index = 0
+    expert._route_length = 0
+
+    expert._fill_buffer(None)
+    filled_wps = [wp for wp, _cmd in expert._wp_buffer]
+
+    assert len(filled_wps) >= 2
+    assert filled_wps[1] is right_lane
+
+
 def test_advance_route_uses_segment_progress_even_when_heading_would_disagree() -> None:
     expert = _build_expert()
     expert.config.min_follow_distance = 0.1

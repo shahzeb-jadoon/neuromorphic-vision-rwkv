@@ -867,7 +867,41 @@ class PrivilegedExpert:
             try:
                 nexts = last_wp.next(2.0)  # 2 m step
                 while nexts and len(self._wp_buffer) < buffer_maxlen:
-                    nxt = nexts[0]  # follow the first (keep-lane) option
+                    cur_wp, _ = self._wp_buffer[-1]
+                    cur_loc = cur_wp.transform.location
+                    cur_yaw = float(cur_wp.transform.rotation.yaw)
+                    yaw_rad = math.radians(cur_yaw)
+                    fwd = (math.cos(yaw_rad), math.sin(yaw_rad))
+                    right = (-fwd[1], fwd[0])
+                    cur_road_id = int(getattr(cur_wp, "road_id", -1))
+                    cur_lane_id = int(getattr(cur_wp, "lane_id", 0))
+
+                    def _route_end_branch_score(candidate: Any) -> tuple[float, ...]:
+                        loc = candidate.transform.location
+                        yaw = float(candidate.transform.rotation.yaw)
+                        yaw_diff = abs((yaw - cur_yaw + 180.0) % 360.0 - 180.0)
+
+                        dx = float(loc.x - cur_loc.x)
+                        dy = float(loc.y - cur_loc.y)
+                        forward_proj = fwd[0] * dx + fwd[1] * dy
+                        lateral_off = abs(right[0] * dx + right[1] * dy)
+
+                        cand_road_id = int(getattr(candidate, "road_id", cur_road_id))
+                        cand_lane_id = int(getattr(candidate, "lane_id", cur_lane_id))
+
+                        road_change = 0 if cand_road_id == cur_road_id else 1
+                        lane_order_delta = abs(abs(cand_lane_id) - abs(cur_lane_id))
+                        behind = 0 if forward_proj > 0.0 else 1
+                        return (
+                            behind,
+                            road_change,
+                            lane_order_delta,
+                            yaw_diff,
+                            lateral_off,
+                            float(loc.distance(cur_loc)),
+                        )
+
+                    nxt = min(nexts, key=_route_end_branch_score)
                     self._wp_buffer.append((nxt, RoadOption.LANEFOLLOW))
                     nexts = nxt.next(2.0)
             except (AttributeError, RuntimeError):
@@ -1015,6 +1049,14 @@ class PrivilegedExpert:
                 )
                 diverge_limit = gap * cfg.gap_fill_diverge_factor
                 origin = wp_prev.transform.location
+                target_loc = wp_next.transform.location
+                target_yaw = float(wp_next.transform.rotation.yaw)
+
+                def _branch_score(candidate: Any) -> tuple[float, float]:
+                    loc = candidate.transform.location
+                    yaw = float(candidate.transform.rotation.yaw)
+                    yaw_diff = abs((yaw - target_yaw + 180.0) % 360.0 - 180.0)
+                    return (loc.distance(target_loc), yaw_diff)
 
                 # Try smooth geometric interpolation first for junction gaps.
                 # Only generate an arc for j==1 (the gap immediately ahead of
@@ -1024,7 +1066,6 @@ class PrivilegedExpert:
                 # Skip if a Bezier arc is already active — don't start a second.
                 bezier_fills: list[tuple[Any, RoadOption]] | None = None
                 if cfg.gap_fill_bezier_enabled and not self._arc_buffer and j == 1:
-                    target_loc = wp_next.transform.location
                     yaw0 = math.radians(float(wp_prev.transform.rotation.yaw))
                     yaw3 = math.radians(float(wp_next.transform.rotation.yaw))
                     control_len = max(
@@ -1122,7 +1163,7 @@ class PrivilegedExpert:
                         rpcs_this_call += 1
                         fills = 0
                         while nexts and fills < max_fills:
-                            nxt = nexts[0]
+                            nxt = min(nexts, key=_branch_score)
                             dist_to_target = nxt.transform.location.distance(
                                 wp_next.transform.location
                             )
