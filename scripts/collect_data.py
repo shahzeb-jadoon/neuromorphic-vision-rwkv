@@ -139,6 +139,18 @@ def build_campaign(
         expert_kw["turn_speed_factor"] = float(expert_cfg_dict["turn_speed_factor"])
     if "steering_noise_sigma" in expert_cfg_dict:
         expert_kw["steering_noise_sigma"] = float(expert_cfg_dict["steering_noise_sigma"])
+    if "stanley_cte_enabled" in expert_cfg_dict:
+        expert_kw["stanley_cte_enabled"] = bool(expert_cfg_dict["stanley_cte_enabled"])
+    if "cross_track_gain" in expert_cfg_dict:
+        expert_kw["cross_track_gain"] = float(expert_cfg_dict["cross_track_gain"])
+    if "turn_cross_track_gain" in expert_cfg_dict:
+        expert_kw["turn_cross_track_gain"] = float(expert_cfg_dict["turn_cross_track_gain"])
+    if "cross_track_deadband" in expert_cfg_dict:
+        expert_kw["cross_track_deadband"] = float(expert_cfg_dict["cross_track_deadband"])
+    if "cross_track_speed_floor" in expert_cfg_dict:
+        expert_kw["cross_track_speed_floor"] = float(expert_cfg_dict["cross_track_speed_floor"])
+    if "cross_track_steer_limit" in expert_cfg_dict:
+        expert_kw["cross_track_steer_limit"] = float(expert_cfg_dict["cross_track_steer_limit"])
     expert_config = ExpertConfig(**expert_kw)
 
     ep_template = EpisodeConfig(

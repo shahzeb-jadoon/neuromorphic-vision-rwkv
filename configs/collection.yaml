@@ -37,6 +37,13 @@ expert:
   pedestrian_hazard_distance: 15.0
   turn_speed_factor: 0.45
   steering_noise_sigma: 0.05
+  # Archive A/B overlay: optional bounded Stanley/CTE assist
+  stanley_cte_enabled: true
+  cross_track_gain: 1.5
+  turn_cross_track_gain: 2.0
+  cross_track_deadband: 0.05
+  cross_track_speed_floor: 1.0
+  cross_track_steer_limit: 0.35
 
 # Towns for training data collection
 towns:

@@ -21,7 +21,12 @@
 
 set -euo pipefail
 
-OUTPUT_DIR="data/test_collection"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+cd "${REPO_ROOT}"
+
+OUTPUT_DIR="${OUTPUT_DIR:-data/test_collection}"
+CONFIG_PATH="${CONFIG_PATH:-configs/collection.yaml}"
 LOG_FILE="${OUTPUT_DIR}/test_collection.log"
 
 # Clean previous test data
@@ -38,14 +43,13 @@ echo "Output:  ${OUTPUT_DIR}"
 echo "=================================================================="
 echo ""
 
-# --- Run a small collection: 2 towns, 1 weather, 1 episode per traffic config ---
+# --- Run a smoke collection: 7 towns, 1 weather, 1 episode per traffic config ---
 # collect_data.py iterates towns × weathers × traffic_configs × episodes,
-# so 2 towns × 1 weather × 3 traffic densities × 1 episode = 6 episodes total
-# (same total as the previous 1 town × 3 traffic × 2 episodes setup).
+# so 7 towns × 1 weather × 3 traffic densities × 1 episode = 21 episodes total.
 python scripts/collect_data.py \
-    --config configs/collection.yaml \
+    --config "${CONFIG_PATH}" \
     --output "${OUTPUT_DIR}" \
-    --town Town07 Town10HD Town06 \
+    --town Town01 Town03 Town04 Town05 Town06 Town07 Town10HD \
     --weather ClearNoon \
     --episodes 1 \
     --spectator \
