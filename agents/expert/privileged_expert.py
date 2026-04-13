@@ -658,10 +658,158 @@ class PrivilegedExpert:
 
         return densified
 
+    @staticmethod
+    def _wrap_angle_deg(angle: float) -> float:
+        """Wrap an angle to [-180, 180] degrees."""
+        return (angle + 180.0) % 360.0 - 180.0
+
+    def _transition_signed_angle_deg(self, wp_prev: Any, wp_next: Any) -> float | None:
+        """Signed angle from waypoint heading to transition direction."""
+        try:
+            prev_loc = wp_prev.transform.location
+            next_loc = wp_next.transform.location
+            yaw_prev = float(wp_prev.transform.rotation.yaw)
+        except (AttributeError, TypeError):
+            return None
+
+        dx = float(next_loc.x) - float(prev_loc.x)
+        dy = float(next_loc.y) - float(prev_loc.y)
+        if math.hypot(dx, dy) < 1e-6:
+            return None
+
+        transition_yaw = math.degrees(math.atan2(dy, dx))
+        return float(self._wrap_angle_deg(transition_yaw - yaw_prev))
+
+    @staticmethod
+    def _contains_do_not_enter_landmark(wp: Any) -> bool:
+        """Heuristic check for do-not-enter landmarks near a waypoint."""
+        try:
+            landmarks = wp.get_landmarks(10.0, True)
+        except (AttributeError, RuntimeError, TypeError):
+            return False
+
+        for lm in landmarks or []:
+            lm_blob = " ".join(
+                [
+                    str(getattr(lm, "type", "")),
+                    str(getattr(lm, "name", "")),
+                    str(getattr(lm, "id", "")),
+                ]
+            ).lower()
+            if any(token in lm_blob for token in ("do_not_enter", "do-not-enter", "no_entry")):
+                return True
+        return False
+
+    def _is_route_transition_legal(
+        self,
+        wp_prev: Any,
+        wp_next: Any,
+        cmd_next: RoadOption,
+        *,
+        count_violation: bool,
+    ) -> bool:
+        """Check one route transition against hard legality filters."""
+        cfg = self.config
+        if not (cfg.planner_policy_enabled and cfg.planner_legality_filter_enabled):
+            return True
+
+        def _flag(reason: str) -> bool:
+            if not count_violation:
+                return False
+            self._planner_policy_reason = PlannerPolicyReason.LEGALITY_FILTERED
+            if reason == "wrong_way":
+                self._legality_wrong_way_filtered += 1
+            elif reason == "do_not_enter":
+                self._legality_do_not_enter_filtered += 1
+            elif reason == "turn_mismatch":
+                self._legality_turn_mismatch_filtered += 1
+            return False
+
+        signed = self._transition_signed_angle_deg(wp_prev, wp_next)
+        if signed is not None and abs(signed) > float(cfg.planner_wrong_way_max_yaw_diff_deg):
+            return _flag("wrong_way")
+
+        prev_lane_id = int(getattr(wp_prev, "lane_id", 0))
+        next_lane_id = int(getattr(wp_next, "lane_id", 0))
+        same_road = getattr(wp_prev, "road_id", None) == getattr(wp_next, "road_id", None)
+        lane_sign_flipped = (
+            same_road
+            and prev_lane_id != 0
+            and next_lane_id != 0
+            and ((prev_lane_id > 0) != (next_lane_id > 0))
+        )
+        if lane_sign_flipped and not cfg.planner_allow_lane_id_sign_flip:
+            return _flag("do_not_enter")
+
+        if self._contains_do_not_enter_landmark(wp_next):
+            return _flag("do_not_enter")
+
+        if signed is not None:
+            threshold = max(5.0, float(cfg.planner_turn_mismatch_threshold_deg))
+            if cmd_next == RoadOption.LEFT and signed < -threshold:
+                return _flag("turn_mismatch")
+            if cmd_next == RoadOption.RIGHT and signed > threshold:
+                return _flag("turn_mismatch")
+            if cmd_next == RoadOption.STRAIGHT and abs(signed) > max(45.0, threshold * 2.5):
+                return _flag("turn_mismatch")
+
+        return True
+
+    def _enforce_route_legality(
+        self,
+        route: List[Tuple["carla.Waypoint", RoadOption]],
+    ) -> List[Tuple["carla.Waypoint", RoadOption]]:
+        """Apply hard legality filtering to planned route transitions."""
+        if len(route) < 2:
+            return list(route)
+        if not (self.config.planner_policy_enabled and self.config.planner_legality_filter_enabled):
+            return list(route)
+
+        filtered: List[Tuple["carla.Waypoint", RoadOption]] = [route[0]]
+        for idx in range(1, len(route)):
+            wp_prev, _ = filtered[-1]
+            wp_next, cmd_next = route[idx]
+            if self._is_route_transition_legal(
+                wp_prev,
+                wp_next,
+                cmd_next,
+                count_violation=True,
+            ):
+                filtered.append((wp_next, cmd_next))
+
+        if len(filtered) < 2:
+            logger.warning(
+                "Legality filter removed too many route transitions (%d -> %d). Falling back to original route.",
+                len(route),
+                len(filtered),
+            )
+            return list(route)
+
+        if len(filtered) != len(route):
+            logger.info(
+                "Legality filter removed %d route transitions (%d -> %d)",
+                len(route) - len(filtered),
+                len(route),
+                len(filtered),
+            )
+        return filtered
+
     def set_route(self, route: List[Tuple["carla.Waypoint", RoadOption]]) -> None:
         """Load a pre-computed route (list of (waypoint, RoadOption))."""
         route_waypoints = list(route)
+
+        self._planner_policy_reason = PlannerPolicyReason.NONE
+        self._planner_policy_exception = PlannerPolicyException.NONE
+        self._dist_to_next_junction = -1.0
+        self._frame_pre_junction_lane_change_violation = 0
+        self._frame_consecutive_lane_change_violation = 0
+        self._frame_straight_exit_lane_violation = 0
+        self._legality_wrong_way_filtered = 0
+        self._legality_do_not_enter_filtered = 0
+        self._legality_turn_mismatch_filtered = 0
+
         route_waypoints = self._densify_route_transitions(route_waypoints)
+        route_waypoints = self._enforce_route_legality(route_waypoints)
         self._route = route_waypoints
         self._route_length = len(route_waypoints)
         self._route_index = 0
@@ -697,9 +845,6 @@ class PrivilegedExpert:
         self._frame_pre_junction_lane_change_violation = 0
         self._frame_consecutive_lane_change_violation = 0
         self._frame_straight_exit_lane_violation = 0
-        self._legality_wrong_way_filtered = 0
-        self._legality_do_not_enter_filtered = 0
-        self._legality_turn_mismatch_filtered = 0
 
         try:
             self._refresh_route_tl_candidates(self.vehicle.get_transform())
@@ -945,8 +1090,21 @@ class PrivilegedExpert:
             try:
                 nexts = last_wp.next(2.0)  # 2 m step
                 while nexts and len(self._wp_buffer) < buffer_maxlen:
-                    nxt = nexts[0]  # follow the first (keep-lane) option
+                    legal_nexts = [
+                        cand
+                        for cand in nexts
+                        if self._is_route_transition_legal(
+                            last_wp,
+                            cand,
+                            RoadOption.LANEFOLLOW,
+                            count_violation=True,
+                        )
+                    ]
+                    if not legal_nexts:
+                        break
+                    nxt = legal_nexts[0]  # follow the first legal keep-lane option
                     self._wp_buffer.append((nxt, RoadOption.LANEFOLLOW))
+                    last_wp = nxt
                     nexts = nxt.next(2.0)
             except (AttributeError, RuntimeError):
                 pass  # graceful degradation if map query fails

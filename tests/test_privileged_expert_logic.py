@@ -10,6 +10,8 @@ from pytest import MonkeyPatch
 from agents.expert.privileged_expert import (
     DrivingMode,
     ExpertConfig,
+    PlannerPolicyException,
+    PlannerPolicyReason,
     PrivilegedExpert,
     RoadOption,
 )
@@ -84,6 +86,15 @@ def _build_expert() -> PrivilegedExpert:
     expert._gap_fill_budget_exhausted = False
     expert._gap_fill_tried = set()
     expert._arc_buffer = deque()
+    expert._planner_policy_reason = PlannerPolicyReason.NONE
+    expert._planner_policy_exception = PlannerPolicyException.NONE
+    expert._dist_to_next_junction = -1.0
+    expert._frame_pre_junction_lane_change_violation = 0
+    expert._frame_consecutive_lane_change_violation = 0
+    expert._frame_straight_exit_lane_violation = 0
+    expert._legality_wrong_way_filtered = 0
+    expert._legality_do_not_enter_filtered = 0
+    expert._legality_turn_mismatch_filtered = 0
     setattr(expert, "_route_curvature", lambda: 0.0)
     expert.vehicle = SimpleNamespace(
         bounding_box=SimpleNamespace(extent=SimpleNamespace(y=1.0)),
@@ -640,3 +651,79 @@ def test_densify_route_transitions_can_be_disabled() -> None:
     assert len(dense) == len(route)
     assert dense[0][0] is wp0
     assert dense[1][0] is wp10
+
+
+def test_route_legality_filters_wrong_way_transition() -> None:
+    expert = _build_expert()
+    expert.config.planner_wrong_way_max_yaw_diff_deg = 80.0
+
+    wp0 = _Waypoint(0.0, 0.0, road_id=1, lane_id=1, yaw=0.0)
+    wrong_way = _Waypoint(-6.0, 0.0, road_id=1, lane_id=1, yaw=180.0)
+    wp_ok = _Waypoint(6.0, 0.0, road_id=1, lane_id=1, yaw=0.0)
+
+    filtered = expert._enforce_route_legality(
+        [
+            (wp0, RoadOption.LANEFOLLOW),
+            (wrong_way, RoadOption.LANEFOLLOW),
+            (wp_ok, RoadOption.LANEFOLLOW),
+        ]
+    )
+
+    assert [wp for wp, _ in filtered] == [wp0, wp_ok]
+    assert expert._legality_wrong_way_filtered >= 1
+
+
+def test_route_legality_rejects_lane_sign_flip_without_exception() -> None:
+    expert = _build_expert()
+    expert.config.planner_allow_lane_id_sign_flip = False
+
+    wp0 = _Waypoint(0.0, 0.0, road_id=1, lane_id=1, yaw=0.0)
+    wp1 = _Waypoint(4.0, 0.0, road_id=1, lane_id=-1, yaw=0.0)
+
+    legal = expert._is_route_transition_legal(
+        wp0,
+        wp1,
+        RoadOption.LANEFOLLOW,
+        count_violation=True,
+    )
+
+    assert legal is False
+    assert expert._legality_do_not_enter_filtered == 1
+
+
+def test_route_legality_rejects_turn_mismatch() -> None:
+    expert = _build_expert()
+
+    wp0 = _Waypoint(0.0, 0.0, road_id=1, lane_id=1, yaw=0.0)
+    wp_right = _Waypoint(5.0, -5.0, road_id=2, lane_id=1, yaw=-45.0)
+
+    legal = expert._is_route_transition_legal(
+        wp0,
+        wp_right,
+        RoadOption.LEFT,
+        count_violation=True,
+    )
+
+    assert legal is False
+    assert expert._legality_turn_mismatch_filtered == 1
+
+
+def test_route_end_extension_skips_illegal_next_branch() -> None:
+    expert = _build_expert()
+    expert._route_index = 1
+    expert._route_length = 1
+
+    last_wp = _Waypoint(0.0, 0.0, road_id=1, lane_id=1, yaw=0.0)
+    bad_next = _Waypoint(-3.0, 0.0, road_id=1, lane_id=1, yaw=180.0)
+    good_next = _Waypoint(3.0, 0.0, road_id=1, lane_id=1, yaw=0.0)
+    last_wp._nexts = [bad_next, good_next]
+    bad_next._nexts = []
+    good_next._nexts = []
+
+    expert._wp_buffer = deque([(last_wp, RoadOption.LANEFOLLOW)], maxlen=5)
+
+    expert._fill_buffer(None)
+
+    assert len(expert._wp_buffer) == 2
+    assert expert._wp_buffer[1][0] is good_next
+    assert expert._legality_wrong_way_filtered >= 1
