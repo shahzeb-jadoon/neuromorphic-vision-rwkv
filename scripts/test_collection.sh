@@ -25,6 +25,12 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 cd "${REPO_ROOT}"
 
+if [ -n "${PYTHONPATH:-}" ]; then
+    export PYTHONPATH="${REPO_ROOT}:${PYTHONPATH}"
+else
+    export PYTHONPATH="${REPO_ROOT}"
+fi
+
 OUTPUT_DIR="${OUTPUT_DIR:-data/test_collection}"
 CONFIG_PATH="${CONFIG_PATH:-configs/collection.yaml}"
 LOG_FILE="${OUTPUT_DIR}/test_collection.log"
