@@ -37,6 +37,16 @@ expert:
   pedestrian_hazard_distance: 15.0
   turn_speed_factor: 0.45
   steering_noise_sigma: 0.05
+  # Waypoint planner policy scaffolding (Commit A)
+  planner_policy_enabled: true
+  planner_legality_filter_enabled: true
+  planner_wrong_way_max_yaw_diff_deg: 110.0
+  planner_allow_lane_id_sign_flip: false
+  planner_turn_mismatch_threshold_deg: 20.0
+  planner_lane_change_freeze_distance_m: 30.0
+  planner_lane_change_consecutive_window_m: 30.0
+  planner_mandatory_exit_window_m: 30.0
+  planner_exit_lane_leave_distance_m: 30.0
 
 # Towns for training data collection
 towns:

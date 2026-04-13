@@ -137,6 +137,12 @@ class TestHDF5Schema:
             S.TARGET_SPEED,
             S.DRIVING_MODE,
             S.GAP_FILL_RPCS,
+            S.PLANNER_POLICY_REASON,
+            S.PLANNER_POLICY_EXCEPTION,
+            S.DIST_TO_NEXT_JUNCTION,
+            S.PRE_JUNCTION_LANE_CHANGE_VIOLATION,
+            S.CONSECUTIVE_LANE_CHANGE_VIOLATION,
+            S.STRAIGHT_EXIT_LANE_VIOLATION,
             S.NEARBY_VEHICLES,
             S.NEARBY_PEDESTRIANS,
         ]:
@@ -202,6 +208,15 @@ class _FakeFrameInfo:
         self.gap_fill_rpcs = 0
         self.current_speed = speed_kmh
         self.route_completion = 0.5
+        self.planner_policy_reason = 0
+        self.planner_policy_exception = 0
+        self.dist_to_next_junction = -1.0
+        self.pre_junction_lane_change_violation = 0
+        self.consecutive_lane_change_violation = 0
+        self.straight_exit_lane_violation = 0
+        self.legality_wrong_way_filtered = 0
+        self.legality_do_not_enter_filtered = 0
+        self.legality_turn_mismatch_filtered = 0
 
 
 class TestStreamingEpisodeWriter:
@@ -236,6 +251,8 @@ class TestStreamingEpisodeWriter:
             assert f[S.STEERING].shape == (n_frames,)
             assert f[S.POSITION].shape == (n_frames, 3)
             assert f[S.GAP_FILL_RPCS].shape == (n_frames,)
+            assert f[S.PLANNER_POLICY_REASON].shape == (n_frames,)
+            assert f[S.PRE_JUNCTION_LANE_CHANGE_VIOLATION].shape == (n_frames,)
             assert S.STATIONARY in f
             assert S.METADATA_GROUP in f
             assert f[S.METADATA_GROUP].attrs[S.META_N_FRAMES] == n_frames

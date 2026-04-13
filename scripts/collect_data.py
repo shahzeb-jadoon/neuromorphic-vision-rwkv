@@ -139,6 +139,28 @@ def build_campaign(
         expert_kw["turn_speed_factor"] = float(expert_cfg_dict["turn_speed_factor"])
     if "steering_noise_sigma" in expert_cfg_dict:
         expert_kw["steering_noise_sigma"] = float(expert_cfg_dict["steering_noise_sigma"])
+
+    float_policy_fields = [
+        "planner_wrong_way_max_yaw_diff_deg",
+        "planner_turn_mismatch_threshold_deg",
+        "planner_lane_change_freeze_distance_m",
+        "planner_lane_change_consecutive_window_m",
+        "planner_mandatory_exit_window_m",
+        "planner_exit_lane_leave_distance_m",
+    ]
+    for policy_key in float_policy_fields:
+        if policy_key in expert_cfg_dict:
+            expert_kw[policy_key] = float(expert_cfg_dict[policy_key])
+
+    bool_policy_fields = [
+        "planner_policy_enabled",
+        "planner_legality_filter_enabled",
+        "planner_allow_lane_id_sign_flip",
+    ]
+    for policy_key in bool_policy_fields:
+        if policy_key in expert_cfg_dict:
+            expert_kw[policy_key] = bool(expert_cfg_dict[policy_key])
+
     expert_config = ExpertConfig(**expert_kw)
 
     ep_template = EpisodeConfig(

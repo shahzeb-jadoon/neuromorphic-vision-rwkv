@@ -274,6 +274,51 @@ class _StreamingEpisodeWriter:
         self._ds_route_completion = self._h5.create_dataset(
             S.ROUTE_COMPLETION, shape=(max_frames,), dtype=np.float32, maxshape=(None,)
         )
+        self._ds_policy_reason = self._h5.create_dataset(
+            S.PLANNER_POLICY_REASON, shape=(max_frames,), dtype=np.int32, maxshape=(None,)
+        )
+        self._ds_policy_exception = self._h5.create_dataset(
+            S.PLANNER_POLICY_EXCEPTION, shape=(max_frames,), dtype=np.int32, maxshape=(None,)
+        )
+        self._ds_dist_to_next_junction = self._h5.create_dataset(
+            S.DIST_TO_NEXT_JUNCTION, shape=(max_frames,), dtype=np.float32, maxshape=(None,)
+        )
+        self._ds_pre_junction_lane_change_violation = self._h5.create_dataset(
+            S.PRE_JUNCTION_LANE_CHANGE_VIOLATION,
+            shape=(max_frames,),
+            dtype=np.int8,
+            maxshape=(None,),
+        )
+        self._ds_consecutive_lane_change_violation = self._h5.create_dataset(
+            S.CONSECUTIVE_LANE_CHANGE_VIOLATION,
+            shape=(max_frames,),
+            dtype=np.int8,
+            maxshape=(None,),
+        )
+        self._ds_straight_exit_lane_violation = self._h5.create_dataset(
+            S.STRAIGHT_EXIT_LANE_VIOLATION,
+            shape=(max_frames,),
+            dtype=np.int8,
+            maxshape=(None,),
+        )
+        self._ds_legality_wrong_way_filtered = self._h5.create_dataset(
+            S.LEGALITY_WRONG_WAY_FILTERED,
+            shape=(max_frames,),
+            dtype=np.int32,
+            maxshape=(None,),
+        )
+        self._ds_legality_do_not_enter_filtered = self._h5.create_dataset(
+            S.LEGALITY_DO_NOT_ENTER_FILTERED,
+            shape=(max_frames,),
+            dtype=np.int32,
+            maxshape=(None,),
+        )
+        self._ds_legality_turn_mismatch_filtered = self._h5.create_dataset(
+            S.LEGALITY_TURN_MISMATCH_FILTERED,
+            shape=(max_frames,),
+            dtype=np.int32,
+            maxshape=(None,),
+        )
 
         # Variable-length string datasets for actor JSON
         dt_str = h5py.string_dtype()
@@ -338,6 +383,15 @@ class _StreamingEpisodeWriter:
         self._ds_gap_fill_rpcs[i] = info.gap_fill_rpcs
         self._ds_gap_fill_diverged[i] = info.gap_fill_diverged
         self._ds_route_completion[i] = info.route_completion
+        self._ds_policy_reason[i] = info.planner_policy_reason
+        self._ds_policy_exception[i] = info.planner_policy_exception
+        self._ds_dist_to_next_junction[i] = info.dist_to_next_junction
+        self._ds_pre_junction_lane_change_violation[i] = info.pre_junction_lane_change_violation
+        self._ds_consecutive_lane_change_violation[i] = info.consecutive_lane_change_violation
+        self._ds_straight_exit_lane_violation[i] = info.straight_exit_lane_violation
+        self._ds_legality_wrong_way_filtered[i] = info.legality_wrong_way_filtered
+        self._ds_legality_do_not_enter_filtered[i] = info.legality_do_not_enter_filtered
+        self._ds_legality_turn_mismatch_filtered[i] = info.legality_turn_mismatch_filtered
         self._ds_nveh[i] = json.dumps(info.nearby_vehicles)
         self._ds_nped[i] = json.dumps(info.nearby_pedestrians)
 
@@ -391,6 +445,15 @@ class _StreamingEpisodeWriter:
             self._ds_gap_fill_rpcs,
             self._ds_gap_fill_diverged,
             self._ds_route_completion,
+            self._ds_policy_reason,
+            self._ds_policy_exception,
+            self._ds_dist_to_next_junction,
+            self._ds_pre_junction_lane_change_violation,
+            self._ds_consecutive_lane_change_violation,
+            self._ds_straight_exit_lane_violation,
+            self._ds_legality_wrong_way_filtered,
+            self._ds_legality_do_not_enter_filtered,
+            self._ds_legality_turn_mismatch_filtered,
             self._ds_nveh,
             self._ds_nped,
         ]:

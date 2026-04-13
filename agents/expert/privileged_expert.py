@@ -217,6 +217,17 @@ class ExpertConfig:
     route_densify_diverge_factor: float = 2.0
     route_densify_projection_fallback: bool = True
 
+    # --- Waypoint planner policy scaffolding ---
+    planner_policy_enabled: bool = True
+    planner_legality_filter_enabled: bool = True
+    planner_wrong_way_max_yaw_diff_deg: float = 110.0
+    planner_allow_lane_id_sign_flip: bool = False
+    planner_turn_mismatch_threshold_deg: float = 20.0
+    planner_lane_change_freeze_distance_m: float = 30.0
+    planner_lane_change_consecutive_window_m: float = 30.0
+    planner_mandatory_exit_window_m: float = 30.0
+    planner_exit_lane_leave_distance_m: float = 30.0
+
 
 # ---------------------------------------------------------------------------
 # Data structures
@@ -235,6 +246,24 @@ class DrivingMode(IntEnum):
     EMERGENCY_STOP = auto()
     STOP_SIGN_STOP = auto()
     YIELD_STOP = auto()
+
+
+class PlannerPolicyReason(IntEnum):
+    """Per-frame planner policy reason code for diagnostics and analytics."""
+
+    NONE = 0
+    LEGALITY_FILTERED = auto()
+    PRE_JUNCTION_LANE_CHANGE_BLOCKED = auto()
+    CONSECUTIVE_LANE_CHANGE_BLOCKED = auto()
+    STRAIGHT_EXIT_LANE_WARNING = auto()
+
+
+class PlannerPolicyException(IntEnum):
+    """Per-frame planner policy exception code for explicit audit trails."""
+
+    NONE = 0
+    MANDATORY_EXIT = auto()
+    BLOCKED_LANE = auto()
 
 
 @dataclass
@@ -287,6 +316,17 @@ class FrameInfo:
     # Collectors can monitor this to decide when to end an episode.
     gap_fill_rpcs: int = 0
     gap_fill_diverged: int = 0  # cumulative gaps that diverged (discarded)
+
+    # Waypoint planner policy diagnostics.
+    planner_policy_reason: int = 0
+    planner_policy_exception: int = 0
+    dist_to_next_junction: float = -1.0
+    pre_junction_lane_change_violation: int = 0
+    consecutive_lane_change_violation: int = 0
+    straight_exit_lane_violation: int = 0
+    legality_wrong_way_filtered: int = 0
+    legality_do_not_enter_filtered: int = 0
+    legality_turn_mismatch_filtered: int = 0
 
 
 # ---------------------------------------------------------------------------
@@ -454,6 +494,17 @@ class PrivilegedExpert:
         # P3-D: track consecutive TURNING frames so we can reset the
         # speed PID only after a real turn (>0.5 s), not a brief curve.
         self._turn_frame_count: int = 0
+
+        # Waypoint planner policy diagnostics and cumulative counters.
+        self._planner_policy_reason: PlannerPolicyReason = PlannerPolicyReason.NONE
+        self._planner_policy_exception: PlannerPolicyException = PlannerPolicyException.NONE
+        self._dist_to_next_junction: float = -1.0
+        self._frame_pre_junction_lane_change_violation: int = 0
+        self._frame_consecutive_lane_change_violation: int = 0
+        self._frame_straight_exit_lane_violation: int = 0
+        self._legality_wrong_way_filtered: int = 0
+        self._legality_do_not_enter_filtered: int = 0
+        self._legality_turn_mismatch_filtered: int = 0
 
     # ------------------------------------------------------------------
     # Route management
@@ -640,6 +691,16 @@ class PrivilegedExpert:
         self._yield_has_conflict = False
         self._prev_lane_wp = None
 
+        self._planner_policy_reason = PlannerPolicyReason.NONE
+        self._planner_policy_exception = PlannerPolicyException.NONE
+        self._dist_to_next_junction = -1.0
+        self._frame_pre_junction_lane_change_violation = 0
+        self._frame_consecutive_lane_change_violation = 0
+        self._frame_straight_exit_lane_violation = 0
+        self._legality_wrong_way_filtered = 0
+        self._legality_do_not_enter_filtered = 0
+        self._legality_turn_mismatch_filtered = 0
+
         try:
             self._refresh_route_tl_candidates(self.vehicle.get_transform())
         except RuntimeError:
@@ -683,6 +744,14 @@ class PrivilegedExpert:
         velocity = self.vehicle.get_velocity()
         speed_ms = math.sqrt(velocity.x**2 + velocity.y**2 + velocity.z**2)
         speed_kmh = speed_ms * 3.6
+
+        # Per-frame policy diagnostics are reset at the start of each tick.
+        self._planner_policy_reason = PlannerPolicyReason.NONE
+        self._planner_policy_exception = PlannerPolicyException.NONE
+        self._dist_to_next_junction = -1.0
+        self._frame_pre_junction_lane_change_violation = 0
+        self._frame_consecutive_lane_change_violation = 0
+        self._frame_straight_exit_lane_violation = 0
 
         # Dynamic speed limit from road signs (falls back to config)
         cfg = self.config
@@ -821,6 +890,15 @@ class PrivilegedExpert:
             lateral_detections=lat_hits,
             gap_fill_rpcs=self._gap_fill_rpcs,
             gap_fill_diverged=self._gap_fill_diverged,
+            planner_policy_reason=int(self._planner_policy_reason),
+            planner_policy_exception=int(self._planner_policy_exception),
+            dist_to_next_junction=float(self._dist_to_next_junction),
+            pre_junction_lane_change_violation=self._frame_pre_junction_lane_change_violation,
+            consecutive_lane_change_violation=self._frame_consecutive_lane_change_violation,
+            straight_exit_lane_violation=self._frame_straight_exit_lane_violation,
+            legality_wrong_way_filtered=self._legality_wrong_way_filtered,
+            legality_do_not_enter_filtered=self._legality_do_not_enter_filtered,
+            legality_turn_mismatch_filtered=self._legality_turn_mismatch_filtered,
         )
 
         return control, info

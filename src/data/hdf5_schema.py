@@ -82,6 +82,17 @@ GAP_FILL_RPCS = "gap_fill_rpcs"  # (N,) int32 cumulative gap-fill RPC attempts
 GAP_FILL_DIVERGED = "gap_fill_diverged"  # (N,) int32 count of junction gaps that diverged
 ROUTE_COMPLETION = "route_completion"  # (N,) float32 route progress 0.0–1.0
 
+# --- Planner policy diagnostics (waypoint checklist instrumentation) ---
+PLANNER_POLICY_REASON = "planner_policy_reason"  # (N,) int32 PlannerPolicyReason enum
+PLANNER_POLICY_EXCEPTION = "planner_policy_exception"  # (N,) int32 PlannerPolicyException enum
+DIST_TO_NEXT_JUNCTION = "dist_to_next_junction"  # (N,) float32 metres (-1 if unknown)
+PRE_JUNCTION_LANE_CHANGE_VIOLATION = "pre_junction_lane_change_violation"  # (N,) int8
+CONSECUTIVE_LANE_CHANGE_VIOLATION = "consecutive_lane_change_violation"  # (N,) int8
+STRAIGHT_EXIT_LANE_VIOLATION = "straight_exit_lane_violation"  # (N,) int8
+LEGALITY_WRONG_WAY_FILTERED = "legality_wrong_way_filtered"  # (N,) int32 cumulative
+LEGALITY_DO_NOT_ENTER_FILTERED = "legality_do_not_enter_filtered"  # (N,) int32 cumulative
+LEGALITY_TURN_MISMATCH_FILTERED = "legality_turn_mismatch_filtered"  # (N,) int32 cumulative
+
 # --- Metadata group and attribute names ---
 METADATA_GROUP = "metadata"
 META_TOWN = "town"
