@@ -505,6 +505,9 @@ class PrivilegedExpert:
         self._legality_wrong_way_filtered: int = 0
         self._legality_do_not_enter_filtered: int = 0
         self._legality_turn_mismatch_filtered: int = 0
+        self._policy_distance_traveled: float = 0.0
+        self._policy_last_location: Any | None = None
+        self._policy_last_lane_change_distance: float = -1e9
 
     # ------------------------------------------------------------------
     # Route management
@@ -807,6 +810,9 @@ class PrivilegedExpert:
         self._legality_wrong_way_filtered = 0
         self._legality_do_not_enter_filtered = 0
         self._legality_turn_mismatch_filtered = 0
+        self._policy_distance_traveled = 0.0
+        self._policy_last_location = None
+        self._policy_last_lane_change_distance = -1e9
 
         route_waypoints = self._densify_route_transitions(route_waypoints)
         route_waypoints = self._enforce_route_legality(route_waypoints)
@@ -912,6 +918,13 @@ class PrivilegedExpert:
         # --- 2.  Route progress ---
         self._advance_route(transform)
         target_wp, nav_label, nav_command = self._get_target(transform)
+        ego_wp = self.map.get_waypoint(transform.location)
+
+        if self._policy_last_location is not None:
+            self._policy_distance_traveled += transform.location.distance(self._policy_last_location)
+        self._policy_last_location = transform.location
+
+        nav_label = self._apply_lane_change_policy(nav_label, ego_wp, transform.location)
 
         # --- 3.  Privileged perception ---
         tl_state, tl_distance = self._check_traffic_light(transform)
@@ -1594,6 +1607,104 @@ class PrivilegedExpert:
 
         self._prev_lane_wp = ego_wp if ego_wp is not None else target_wp
         return target_wp, nav_label, nav_command
+
+    def _distance_to_next_junction(self, ego_loc: Any) -> float:
+        """Approximate route distance from ego to the next junction waypoint."""
+        if not self._wp_buffer:
+            return -1.0
+
+        accum = 0.0
+        prev_loc = ego_loc
+        for wp, _ in self._wp_buffer:
+            wp_loc = wp.transform.location
+            accum += prev_loc.distance(wp_loc)
+            if bool(getattr(wp, "is_junction", False)):
+                return float(accum)
+            prev_loc = wp_loc
+        return -1.0
+
+    @staticmethod
+    def _is_lane_change_command(cmd: RoadOption) -> bool:
+        return cmd in (RoadOption.CHANGELANELEFT, RoadOption.CHANGELANERIGHT)
+
+    def _is_mandatory_exit_lane_change(self) -> bool:
+        """Heuristic: lane change is mandatory if a turn follows immediately."""
+        seen_lane_change = False
+        for _wp, cmd in self._wp_buffer:
+            if cmd in (RoadOption.LANEFOLLOW, RoadOption.VOID):
+                continue
+            if self._is_lane_change_command(cmd):
+                seen_lane_change = True
+                continue
+            if seen_lane_change:
+                return cmd in (RoadOption.LEFT, RoadOption.RIGHT)
+            return False
+        return False
+
+    def _is_exit_only_lane_for_straight(self, ego_wp: Any) -> bool:
+        """Heuristic exit-only check: no straight continuation from current lane."""
+        try:
+            nexts = ego_wp.next(2.0)
+        except (AttributeError, RuntimeError, TypeError):
+            return False
+        if not nexts:
+            return False
+
+        signed_angles = [
+            self._transition_signed_angle_deg(ego_wp, cand)
+            for cand in nexts
+        ]
+        valid_angles = [a for a in signed_angles if a is not None]
+        if not valid_angles:
+            return False
+
+        has_straight = any(abs(a) <= 30.0 for a in valid_angles)
+        has_turn = any(abs(a) > 35.0 for a in valid_angles)
+        return has_turn and not has_straight
+
+    def _apply_lane_change_policy(self, nav_label: RoadOption, ego_wp: Any, ego_loc: Any) -> RoadOption:
+        """Apply BR-16/17/18 lane-change policy guardrails to nav labels."""
+        cfg = self.config
+        self._dist_to_next_junction = self._distance_to_next_junction(ego_loc)
+        if not cfg.planner_policy_enabled:
+            return nav_label
+
+        out_label = nav_label
+        mandatory_exit = self._is_lane_change_command(nav_label) and self._is_mandatory_exit_lane_change()
+        if mandatory_exit:
+            self._planner_policy_exception = PlannerPolicyException.MANDATORY_EXIT
+
+        in_freeze_window = (
+            self._dist_to_next_junction > 0.0
+            and self._dist_to_next_junction <= cfg.planner_lane_change_freeze_distance_m
+        )
+
+        if self._is_lane_change_command(out_label) and in_freeze_window and not mandatory_exit:
+            self._planner_policy_reason = PlannerPolicyReason.PRE_JUNCTION_LANE_CHANGE_BLOCKED
+            self._frame_pre_junction_lane_change_violation = 1
+            out_label = RoadOption.LANEFOLLOW
+
+        dist_since_last_lane_change = self._policy_distance_traveled - self._policy_last_lane_change_distance
+        if self._is_lane_change_command(out_label) and not mandatory_exit:
+            if dist_since_last_lane_change < cfg.planner_lane_change_consecutive_window_m:
+                self._planner_policy_reason = PlannerPolicyReason.CONSECUTIVE_LANE_CHANGE_BLOCKED
+                self._frame_consecutive_lane_change_violation = 1
+                out_label = RoadOption.LANEFOLLOW
+
+        if self._is_lane_change_command(out_label):
+            self._policy_last_lane_change_distance = self._policy_distance_traveled
+
+        in_exit_window = (
+            out_label == RoadOption.STRAIGHT
+            and self._dist_to_next_junction > 0.0
+            and self._dist_to_next_junction <= cfg.planner_exit_lane_leave_distance_m
+        )
+        if in_exit_window and ego_wp is not None and self._is_exit_only_lane_for_straight(ego_wp):
+            if self._planner_policy_reason == PlannerPolicyReason.NONE:
+                self._planner_policy_reason = PlannerPolicyReason.STRAIGHT_EXIT_LANE_WARNING
+            self._frame_straight_exit_lane_violation = 1
+
+        return out_label
 
     # ------------------------------------------------------------------
     # Internal — speed planning

@@ -95,6 +95,9 @@ def _build_expert() -> PrivilegedExpert:
     expert._legality_wrong_way_filtered = 0
     expert._legality_do_not_enter_filtered = 0
     expert._legality_turn_mismatch_filtered = 0
+    expert._policy_distance_traveled = 0.0
+    expert._policy_last_location = None
+    expert._policy_last_lane_change_distance = -1e9
     setattr(expert, "_route_curvature", lambda: 0.0)
     expert.vehicle = SimpleNamespace(
         bounding_box=SimpleNamespace(extent=SimpleNamespace(y=1.0)),
@@ -727,3 +730,99 @@ def test_route_end_extension_skips_illegal_next_branch() -> None:
     assert len(expert._wp_buffer) == 2
     assert expert._wp_buffer[1][0] is good_next
     assert expert._legality_wrong_way_filtered >= 1
+
+
+def test_lane_change_freeze_blocks_non_mandatory_change() -> None:
+    expert = _build_expert()
+    expert._policy_distance_traveled = 120.0
+    expert._policy_last_lane_change_distance = 0.0
+
+    lc_wp = _Waypoint(8.0, 0.0, road_id=1, lane_id=1)
+    junc_wp = _Waypoint(12.0, 0.0, road_id=2, lane_id=1)
+    junc_wp.is_junction = True
+    expert._wp_buffer = deque(
+        [
+            (lc_wp, RoadOption.CHANGELANELEFT),
+            (junc_wp, RoadOption.STRAIGHT),
+        ]
+    )
+
+    ego_wp = _Waypoint(0.0, 0.0, road_id=1, lane_id=1)
+    label = expert._apply_lane_change_policy(
+        RoadOption.CHANGELANELEFT,
+        ego_wp,
+        _Loc(0.0, 0.0),
+    )
+
+    assert label == RoadOption.LANEFOLLOW
+    assert expert._frame_pre_junction_lane_change_violation == 1
+    assert expert._planner_policy_reason == PlannerPolicyReason.PRE_JUNCTION_LANE_CHANGE_BLOCKED
+
+
+def test_lane_change_mandatory_exit_exception_allows_change() -> None:
+    expert = _build_expert()
+    expert._policy_distance_traveled = 120.0
+    expert._policy_last_lane_change_distance = 0.0
+
+    lc_wp = _Waypoint(8.0, 0.0, road_id=1, lane_id=1)
+    junc_wp = _Waypoint(12.0, 0.0, road_id=2, lane_id=1)
+    junc_wp.is_junction = True
+    expert._wp_buffer = deque(
+        [
+            (lc_wp, RoadOption.CHANGELANELEFT),
+            (junc_wp, RoadOption.LEFT),
+        ]
+    )
+
+    ego_wp = _Waypoint(0.0, 0.0, road_id=1, lane_id=1)
+    label = expert._apply_lane_change_policy(
+        RoadOption.CHANGELANELEFT,
+        ego_wp,
+        _Loc(0.0, 0.0),
+    )
+
+    assert label == RoadOption.CHANGELANELEFT
+    assert expert._planner_policy_exception == PlannerPolicyException.MANDATORY_EXIT
+    assert expert._frame_pre_junction_lane_change_violation == 0
+
+
+def test_consecutive_lane_change_blocked_without_exception() -> None:
+    expert = _build_expert()
+    expert._policy_distance_traveled = 50.0
+    expert._policy_last_lane_change_distance = 45.0
+    expert._wp_buffer = deque([(_Waypoint(30.0, 0.0, road_id=1, lane_id=1), RoadOption.LANEFOLLOW)])
+
+    ego_wp = _Waypoint(0.0, 0.0, road_id=1, lane_id=1)
+    label = expert._apply_lane_change_policy(
+        RoadOption.CHANGELANERIGHT,
+        ego_wp,
+        _Loc(0.0, 0.0),
+    )
+
+    assert label == RoadOption.LANEFOLLOW
+    assert expert._frame_consecutive_lane_change_violation == 1
+    assert expert._planner_policy_reason == PlannerPolicyReason.CONSECUTIVE_LANE_CHANGE_BLOCKED
+
+
+def test_straight_exit_lane_warning_records_violation() -> None:
+    expert = _build_expert()
+    junc_wp = _Waypoint(15.0, 0.0, road_id=2, lane_id=1)
+    junc_wp.is_junction = True
+    expert._wp_buffer = deque(
+        [
+            (_Waypoint(8.0, 0.0, road_id=1, lane_id=1), RoadOption.LANEFOLLOW),
+            (junc_wp, RoadOption.STRAIGHT),
+        ]
+    )
+    setattr(expert, "_is_exit_only_lane_for_straight", lambda _ego_wp: True)
+
+    ego_wp = _Waypoint(0.0, 0.0, road_id=1, lane_id=1)
+    label = expert._apply_lane_change_policy(
+        RoadOption.STRAIGHT,
+        ego_wp,
+        _Loc(0.0, 0.0),
+    )
+
+    assert label == RoadOption.STRAIGHT
+    assert expert._frame_straight_exit_lane_violation == 1
+    assert expert._planner_policy_reason == PlannerPolicyReason.STRAIGHT_EXIT_LANE_WARNING
