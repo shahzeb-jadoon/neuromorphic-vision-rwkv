@@ -17,6 +17,7 @@ from collections.abc import Iterator
 from pathlib import Path
 
 import h5py
+import numpy as np
 import pytest
 
 from src.data import hdf5_schema as S
@@ -182,3 +183,51 @@ class TestAnalyzeDataset:
             "episode" in output or "frame" in output
         ), f"Expected statistics in output, got:\n{result.stdout[:500]}"
         assert "waypoint policy evaluation" in output
+
+    def test_analyze_reports_policy_violation_totals(self, tmp_path: Path) -> None:
+        """Policy telemetry is aggregated into explicit violation totals."""
+        data_dir = tmp_path / "policy_data"
+        data_dir.mkdir(parents=True, exist_ok=True)
+        ep_path = data_dir / "episode_policy_test.h5"
+
+        with h5py.File(ep_path, "w") as f:
+            f.create_dataset(S.IMAGES, data=np.zeros((4, 8, 8, 3), dtype=np.uint8))
+            f.create_dataset(S.NAV_COMMAND, data=np.array([4, 4, 4, 4], dtype=np.int32))
+            f.create_dataset(S.STEERING, data=np.zeros((4,), dtype=np.float32))
+            f.create_dataset(S.THROTTLE, data=np.zeros((4,), dtype=np.float32))
+            f.create_dataset(
+                S.PRE_JUNCTION_LANE_CHANGE_VIOLATION,
+                data=np.array([0, 1, 0, 1], dtype=np.int8),
+            )
+            f.create_dataset(
+                S.CONSECUTIVE_LANE_CHANGE_VIOLATION,
+                data=np.array([0, 1, 0, 0], dtype=np.int8),
+            )
+            f.create_dataset(
+                S.STRAIGHT_EXIT_LANE_VIOLATION,
+                data=np.array([0, 0, 0, 1], dtype=np.int8),
+            )
+
+            meta = f.create_group(S.METADATA_GROUP)
+            meta.attrs[S.META_TOWN] = "Town01"
+            meta.attrs[S.META_WEATHER] = "ClearNoon"
+            meta.attrs[S.META_STATUS] = "completed"
+
+        result = subprocess.run(
+            [
+                sys.executable,
+                "scripts/analyze_dataset.py",
+                str(data_dir),
+            ],
+            capture_output=True,
+            text=True,
+            cwd=_PROJECT_ROOT,
+            env=_script_env(),
+        )
+
+        assert result.returncode == 0, f"Analysis failed:\n{result.stderr}"
+        output = result.stdout
+        assert "pre-junction lane-change: 2 violations" in output
+        assert "consecutive lane-change: 1 violations" in output
+        assert "straight-in-exit-lane: 1 violations" in output
+        assert output.count("-> FAIL") == 3
