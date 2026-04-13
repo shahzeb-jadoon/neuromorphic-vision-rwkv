@@ -169,9 +169,14 @@ class ExpertConfig:
     curvature_speed_factor: float = 0.7  # reduce by 30% on curves
     curvature_threshold_deg: float = 20.0  # angle change between successive wps
 
-    # --- Cross-track correction (DISABLED — unbounded value causes
-    #     steering spikes on waypoint transitions; see commit history) ---
-    # cross_track_gain: float = 0.3
+    # --- Optional Stanley/CTE assist (archive overlay experiment) ---
+    # Default OFF to preserve baseline behavior unless explicitly enabled.
+    stanley_cte_enabled: bool = False
+    cross_track_gain: float = 1.5
+    turn_cross_track_gain: float = 2.0
+    cross_track_deadband: float = 0.05  # metres
+    cross_track_speed_floor: float = 1.0  # m/s
+    cross_track_steer_limit: float = 0.35  # normalized steering contribution
 
     # --- Noise injection (for training data diversity) ---
     steering_noise_sigma: float = 1e-3  # Gaussian noise std on steering
@@ -1693,14 +1698,11 @@ class PrivilegedExpert:
         transform: "carla.Transform",
         target_wp: "carla.Waypoint",
     ) -> float:
-        """PID steering on heading error.
+        """PID steering on heading error with optional bounded CTE assist.
 
-        Cross-track correction was previously added here but removed
-        because the raw 2-D cross product is unbounded and jumps
-        discontinuously when the target waypoint pops, causing
-        compounding steering spikes that lead to collision within
-        ~80 frames.  A proper Stanley-style controller would fix
-        this but is out of scope for phase 1.
+        The archive branch used a Stanley-style cross-track correction.
+        In this overlay, that term is available behind a config flag and
+        explicitly bounded to prevent spikes from dominating steering.
         """
         ego = transform.location
         tgt = target_wp.transform.location
@@ -1713,8 +1715,54 @@ class PrivilegedExpert:
         error = (error + 180) % 360 - 180
 
         # Normalise so ±90° → ±1.0
-        steer = self.steer_pid.step(error / 90.0)
-        return max(-1.0, min(1.0, steer))
+        steer = float(self.steer_pid.step(error / 90.0))
+
+        cfg = self.config
+        if not cfg.stanley_cte_enabled:
+            return max(-1.0, min(1.0, steer))
+
+        cte = float(self._cross_track_error(transform))
+        if abs(cte) <= float(cfg.cross_track_deadband):
+            return max(-1.0, min(1.0, steer))
+
+        try:
+            vel = self.vehicle.get_velocity()
+            speed_ms = math.sqrt(float(vel.x) ** 2 + float(vel.y) ** 2 + float(vel.z) ** 2)
+        except Exception:
+            speed_ms = 0.0
+
+        mode = getattr(self, "mode", DrivingMode.FOLLOW_LANE)
+        if mode in (DrivingMode.APPROACHING_TURN, DrivingMode.TURNING):
+            k = float(cfg.turn_cross_track_gain)
+        else:
+            k = float(cfg.cross_track_gain)
+
+        cte_term = math.atan2(k * cte, max(speed_ms, float(cfg.cross_track_speed_floor)))
+        cte_norm = cte_term / (math.pi / 2.0)
+        cte_norm = float(np.clip(cte_norm, -cfg.cross_track_steer_limit, cfg.cross_track_steer_limit))
+
+        return max(-1.0, min(1.0, steer + cte_norm))
+
+    def _cross_track_error(self, transform: "carla.Transform") -> float:
+        """Signed perpendicular distance from ego to the first route segment."""
+        if len(self._wp_buffer) < 2:
+            return 0.0
+
+        a = self._wp_buffer[0][0].transform.location
+        b = self._wp_buffer[1][0].transform.location
+        p = transform.location
+
+        abx = float(b.x - a.x)
+        aby = float(b.y - a.y)
+        apx = float(p.x - a.x)
+        apy = float(p.y - a.y)
+
+        seg_len = math.hypot(abx, aby)
+        if seg_len < 1e-6:
+            return 0.0
+
+        cross = abx * apy - aby * apx
+        return cross / seg_len
 
     def _longitudinal_control(
         self,

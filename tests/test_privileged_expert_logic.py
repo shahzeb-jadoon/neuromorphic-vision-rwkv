@@ -640,3 +640,62 @@ def test_densify_route_transitions_can_be_disabled() -> None:
     assert len(dense) == len(route)
     assert dense[0][0] is wp0
     assert dense[1][0] is wp10
+
+
+def test_lateral_control_cte_disabled_keeps_pid_only_behavior() -> None:
+    expert = _build_expert()
+    expert.config.stanley_cte_enabled = False
+    expert.steer_pid = SimpleNamespace(step=lambda err: float(err))
+
+    wp0 = _Waypoint(0.0, 0.0, road_id=1, lane_id=1)
+    wp1 = _Waypoint(10.0, 0.0, road_id=1, lane_id=1)
+    expert._wp_buffer = deque([(wp0, RoadOption.LANEFOLLOW), (wp1, RoadOption.LANEFOLLOW)])
+
+    transform = _Transform(_Loc(0.0, 1.0), yaw=0.0)
+    target = _Waypoint(10.0, 1.0, road_id=1, lane_id=1)
+
+    steer = expert._lateral_control(transform, target)
+    assert abs(steer) < 1e-8
+
+
+def test_lateral_control_cte_enabled_is_bounded_by_limit() -> None:
+    expert = _build_expert()
+    expert.config.stanley_cte_enabled = True
+    expert.config.cross_track_gain = 100.0
+    expert.config.cross_track_steer_limit = 0.2
+    expert.config.cross_track_deadband = 0.0
+    expert.steer_pid = SimpleNamespace(step=lambda err: float(err))
+
+    wp0 = _Waypoint(0.0, 0.0, road_id=1, lane_id=1)
+    wp1 = _Waypoint(10.0, 0.0, road_id=1, lane_id=1)
+    expert._wp_buffer = deque([(wp0, RoadOption.LANEFOLLOW), (wp1, RoadOption.LANEFOLLOW)])
+
+    transform = _Transform(_Loc(0.0, 1.0), yaw=0.0)
+    target = _Waypoint(10.0, 1.0, road_id=1, lane_id=1)
+
+    steer = expert._lateral_control(transform, target)
+    assert 0.19 <= steer <= 0.2
+
+
+def test_lateral_control_cte_sign_follows_lateral_side() -> None:
+    expert = _build_expert()
+    expert.config.stanley_cte_enabled = True
+    expert.config.cross_track_gain = 10.0
+    expert.config.cross_track_steer_limit = 1.0
+    expert.config.cross_track_deadband = 0.0
+    expert.steer_pid = SimpleNamespace(step=lambda err: float(err))
+
+    wp0 = _Waypoint(0.0, 0.0, road_id=1, lane_id=1)
+    wp1 = _Waypoint(10.0, 0.0, road_id=1, lane_id=1)
+    expert._wp_buffer = deque([(wp0, RoadOption.LANEFOLLOW), (wp1, RoadOption.LANEFOLLOW)])
+
+    transform_right = _Transform(_Loc(0.0, 1.0), yaw=0.0)
+    target_right = _Waypoint(10.0, 1.0, road_id=1, lane_id=1)
+    steer_right = expert._lateral_control(transform_right, target_right)
+
+    transform_left = _Transform(_Loc(0.0, -1.0), yaw=0.0)
+    target_left = _Waypoint(10.0, -1.0, road_id=1, lane_id=1)
+    steer_left = expert._lateral_control(transform_left, target_left)
+
+    assert steer_right > 0.0
+    assert steer_left < 0.0
