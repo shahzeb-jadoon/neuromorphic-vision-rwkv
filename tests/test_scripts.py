@@ -181,3 +181,4 @@ class TestAnalyzeDataset:
         assert (
             "episode" in output or "frame" in output
         ), f"Expected statistics in output, got:\n{result.stdout[:500]}"
+        assert "waypoint policy evaluation" in output
