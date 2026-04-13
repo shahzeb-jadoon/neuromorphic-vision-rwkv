@@ -38,14 +38,13 @@ echo "Output:  ${OUTPUT_DIR}"
 echo "=================================================================="
 echo ""
 
-# --- Run a small collection: 2 towns, 1 weather, 1 episode per traffic config ---
+# --- Run a smoke collection: 7 towns, 1 weather, 1 episode per traffic config ---
 # collect_data.py iterates towns × weathers × traffic_configs × episodes,
-# so 2 towns × 1 weather × 3 traffic densities × 1 episode = 6 episodes total
-# (same total as the previous 1 town × 3 traffic × 2 episodes setup).
+# so 7 towns × 1 weather × 3 traffic densities × 1 episode = 21 episodes total.
 python scripts/collect_data.py \
     --config configs/collection.yaml \
     --output "${OUTPUT_DIR}" \
-    --town Town07 Town10HD Town06 \
+    --town Town01 Town03 Town04 Town05 Town06 Town07 Town10HD \
     --weather ClearNoon \
     --episodes 1 \
     --spectator \
