@@ -1744,12 +1744,19 @@ class PrivilegedExpert:
         return max(-1.0, min(1.0, steer + cte_norm))
 
     def _cross_track_error(self, transform: "carla.Transform") -> float:
-        """Signed perpendicular distance from ego to the first route segment."""
-        if len(self._wp_buffer) < 2:
+        """Signed perpendicular distance from ego to the active steering segment.
+
+        Uses the same buffer family as lateral target selection:
+        prefer ``_arc_buffer`` when a Bezier arc is active, otherwise
+        use ``_wp_buffer``. This keeps Stanley/CTE geometry aligned with
+        heading control through junction arcs.
+        """
+        ref_buf = self._arc_buffer if len(self._arc_buffer) >= 2 else self._wp_buffer
+        if len(ref_buf) < 2:
             return 0.0
 
-        a = self._wp_buffer[0][0].transform.location
-        b = self._wp_buffer[1][0].transform.location
+        a = ref_buf[0][0].transform.location
+        b = ref_buf[1][0].transform.location
         p = transform.location
 
         abx = float(b.x - a.x)

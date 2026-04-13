@@ -39,11 +39,11 @@ expert:
   steering_noise_sigma: 0.05
   # Archive A/B overlay: optional bounded Stanley/CTE assist
   stanley_cte_enabled: true
-  cross_track_gain: 1.5
-  turn_cross_track_gain: 2.0
-  cross_track_deadband: 0.05
+  cross_track_gain: 0.8
+  turn_cross_track_gain: 1.0
+  cross_track_deadband: 0.10
   cross_track_speed_floor: 1.0
-  cross_track_steer_limit: 0.35
+  cross_track_steer_limit: 0.20
 
 # Towns for training data collection
 towns:

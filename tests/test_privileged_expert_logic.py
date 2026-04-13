@@ -699,3 +699,22 @@ def test_lateral_control_cte_sign_follows_lateral_side() -> None:
 
     assert steer_right > 0.0
     assert steer_left < 0.0
+
+
+def test_cross_track_error_prefers_arc_buffer_when_active() -> None:
+    expert = _build_expert()
+
+    # Route buffer suggests near-zero cross-track error for point (1,0)
+    # on a horizontal segment.
+    wp0 = _Waypoint(0.0, 0.0, road_id=1, lane_id=1)
+    wp1 = _Waypoint(10.0, 0.0, road_id=1, lane_id=1)
+    expert._wp_buffer = deque([(wp0, RoadOption.LANEFOLLOW), (wp1, RoadOption.LANEFOLLOW)])
+
+    # Active arc is vertical; point (1,0) should yield negative error.
+    arc0 = _Waypoint(0.0, 0.0, road_id=2, lane_id=1)
+    arc1 = _Waypoint(0.0, 10.0, road_id=2, lane_id=1)
+    expert._arc_buffer = deque([(arc0, RoadOption.LEFT), (arc1, RoadOption.LEFT)])
+
+    cte = expert._cross_track_error(_Transform(_Loc(1.0, 0.0), yaw=0.0))
+
+    assert cte < -0.9
