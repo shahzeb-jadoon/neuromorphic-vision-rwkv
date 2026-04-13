@@ -27,10 +27,13 @@ This checklist prevents regressions in route legality and defines how to verify 
 | BR-13 | Turn quota confidence bounds | Campaign-level routing | Avoid over-correction instability | Apply bounded correction window (for example +/-5%) and exponential smoothing of deficits | Quota overshoot/undershoot variance | Medium |
 | BR-14 | Lane-change budget per km | Whole route | Control aggressiveness globally | Define max lane changes per km and penalize routes exceeding budget | Lane changes per km histogram | Medium |
 | BR-15 | Blocked-lane exception policy | Active blockage/incident | Keep safety rules practical under obstacles | Permit controlled exception to lane-lock only with explicit blockage reason and recovery plan | Exception count with reason code | Medium |
+| BR-16 | Pre-junction lane-change freeze with mandatory-exit exception (25-30 m) | Junction/exit approach corridor | Prevent late weave before turns while preserving required exit positioning | Forbid lane-change initiation inside configured freeze window (default 30 m), except when a required exit would otherwise be missed within 30 m from road entry and straight-through command is not intended | Violations of freeze window without exception reason code | Critical |
+| BR-17 | No consecutive lane changes except mandatory-exit recovery | Consecutive lane-change decisions | Prevent zig-zag and multi-lane jumping | Disallow consecutive lane changes unless route requires immediate exit positioning within <=30 m and no single-change option exists | Consecutive lane changes without mandatory-exit justification | Critical |
+| BR-18 | Exit-lane discipline for straight-through traffic | Exit lane segments | Prevent staying in exit lane then jumping left to continue straight | If nav command is straight-through, ego must leave exit-only lane >=30 m before exit gore when feasible; never jump multiple lanes in one decision cycle | Straight-command frames spent in exit-only lane near exit; multi-lane jump count | High |
 
 Notes:
 - BR-11 to BR-13 should be implemented as optional scheduler policy toggles so collection throughput is not blocked.
-- BR-01 to BR-08 should be treated as non-optional legality and safety constraints.
+- BR-01 to BR-08 and BR-16 to BR-18 should be treated as non-optional legality and safety constraints.
 
 ---
 
@@ -45,6 +48,9 @@ Notes:
 | WP-05 | U-turn from the nearest valid lane | Reduce multi-lane crossing risk | Select U-turn lane with minimal lateral crossing cost and legal turn permission | High |
 | WP-06 | No rapid lane oscillation | Improve stability and realism | Apply cooldown or hysteresis after lane-change decisions | High |
 | WP-07 | Preserve route continuity through junction exits | Prevent sparse-gap skips and chord-cutting | Densify transitions and verify legal successor lane after each junction | Critical |
+| WP-08 | No lane change 25-30 m before junction entry (except mandatory exit) | Stabilize turn approach and avoid late merge errors | Enforce configurable freeze window (default 30 m) and allow only required-exit exception with explicit reason code | Critical |
+| WP-09 | No consecutive lane changes unless required for imminent exit | Reduce zig-zag and lane-jump behavior | Consecutive lane changes require mandatory-exit proof within <=30 m and cannot be used for straight-through continuation | Critical |
+| WP-10 | Do not remain in exit lane when going straight | Avoid unsafe late lane-jump from exit lane | If route command is straight-through, enforce transition out of exit-only lane >=30 m before exit where feasible | High |
 
 ---
 
@@ -59,6 +65,24 @@ Notes:
 | EV-05 | U-turn lane correctness | Check whether U-turn initiated from closest legal lane | 100% compliance on U-turn scenarios |
 | EV-06 | Junction continuity | Track `wp_buffer_head_dist` spikes and route regressions | No route regressions; no catastrophic head-distance spikes |
 | EV-07 | Sign compliance under pressure | Stress scenarios with nearby actors and mixed signs | No illegal turn or wrong-way events |
+| EV-08 | Pre-junction lane-change violations | Count lane-change starts within 0-30 m of upcoming junction entry | 0 violations except mandatory-exit or blockage exception codes |
+| EV-09 | Consecutive lane-change legality | Count consecutive lane changes lacking mandatory-exit reason within <=30 m | 0 violations |
+| EV-10 | Straight-in-exit-lane violations | Count straight-command frames in exit-only lane inside 30 m to exit | 0 avoidable violations |
+
+---
+
+## Research and Industry Pattern Matrix (Proactive vs Reactive)
+
+Based on prior analysis notes in this repository and publicly disclosed patterns.
+
+| Group | Proactive measures | Reactive measures |
+|---|---|---|
+| TransFuser-style rule experts | Dense route following, junction-aware speed policy, future trajectory extrapolation horizon (longer in junctions) | Hazard-triggered braking (often binary), safety box checks |
+| TCP / early LBC-lineage | Command/angle-based slowdown heuristics | Cone/ray hazard checks with binary brake |
+| InterFuser | Lane-aware filtering, junction-specific detection modes, richer actor semantics | Still mostly binary safety overrides despite richer detection |
+| Roach / MILE / ThinkTwice family | Learn behavior policy from BEV + reward shaping, route-conditioned latent planning | Rule-based safety override layers in data collection/eval pipelines |
+| Waymo/Cruise-style (publicly described) | HD map constraints, hierarchical stack (perception -> prediction -> planning -> control), lane-occupancy legality checks | Independent safety monitors, collision-imminent fallback behavior |
+| Tesla-style (publicly described) | End-to-end occupancy/trajectory planning with lane/topology constraints and continuous replanning | Runtime intervention layers (e.g., emergency braking/fallback controls) |
 
 ---
 
@@ -87,6 +111,6 @@ Notes:
 ## Acceptance Gate Before Major Re-collection
 
 A collection run is approved only if:
-1. Planner guardrails WP-01..WP-05 are enforced.
-2. Evaluation checks EV-01..EV-05 report zero violations.
+1. Planner guardrails WP-01..WP-05 and WP-08..WP-10 are enforced.
+2. Evaluation checks EV-01..EV-05 and EV-08..EV-10 report zero violations.
 3. Junction continuity (EV-06) remains stable across multi-town runs.
