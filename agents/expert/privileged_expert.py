@@ -250,6 +250,7 @@ class ExpertConfig:
     planner_roundabout_commitment_enabled: bool = True
     planner_roundabout_context_window_m: float = 35.0
     planner_roundabout_lane_change_cooldown_m: float = 35.0
+    planner_policy_steer_consistency_gate_enabled: bool = True
 
 
 # ---------------------------------------------------------------------------
@@ -1037,15 +1038,10 @@ class PrivilegedExpert:
         self._policy_last_location = transform.location
 
         nav_label = self._apply_lane_change_policy(nav_label, ego_wp, transform.location)
-        block_reasons = {
-            PlannerPolicyReason.PRE_JUNCTION_LANE_CHANGE_BLOCKED,
-            PlannerPolicyReason.CONSECUTIVE_LANE_CHANGE_BLOCKED,
-            PlannerPolicyReason.ROUNDABOUT_LANE_CHANGE_BLOCKED,
-        }
-        policy_blocked_lane_change = (
-            nav_command_route in (RoadOption.CHANGELANELEFT, RoadOption.CHANGELANERIGHT)
-            and nav_label == RoadOption.LANEFOLLOW
-            and self._planner_policy_reason in block_reasons
+        target_wp, policy_blocked_lane_change = self._enforce_policy_steer_consistency(
+            target_wp=target_wp,
+            nav_command_route=nav_command_route,
+            nav_label=nav_label,
         )
         if policy_blocked_lane_change:
             self._policy_block_streak += 1
@@ -2204,6 +2200,38 @@ class PrivilegedExpert:
             self._frame_straight_exit_lane_violation = 1
 
         return out_label
+
+    def _enforce_policy_steer_consistency(
+        self,
+        *,
+        target_wp: Any,
+        nav_command_route: RoadOption,
+        nav_label: RoadOption,
+    ) -> tuple[Any, bool]:
+        """Ensure steering target does not contradict blocked lane-change policy."""
+        block_reasons = {
+            PlannerPolicyReason.PRE_JUNCTION_LANE_CHANGE_BLOCKED,
+            PlannerPolicyReason.CONSECUTIVE_LANE_CHANGE_BLOCKED,
+            PlannerPolicyReason.ROUNDABOUT_LANE_CHANGE_BLOCKED,
+        }
+        policy_blocked_lane_change = (
+            nav_command_route in (RoadOption.CHANGELANELEFT, RoadOption.CHANGELANERIGHT)
+            and nav_label == RoadOption.LANEFOLLOW
+            and self._planner_policy_reason in block_reasons
+        )
+        if not policy_blocked_lane_change:
+            return target_wp, False
+
+        if not self.config.planner_policy_steer_consistency_gate_enabled:
+            return target_wp, True
+
+        if self._arc_buffer and self._wp_buffer:
+            if self._planner_policy_exception == PlannerPolicyException.NONE:
+                self._planner_policy_exception = PlannerPolicyException.BLOCKED_LANE
+            self._steer_from_arc = 0
+            return self._wp_buffer[0][0], True
+
+        return target_wp, True
 
     # ------------------------------------------------------------------
     # Internal — speed planning

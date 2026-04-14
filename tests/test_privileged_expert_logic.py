@@ -908,6 +908,52 @@ def test_lane_change_freeze_blocks_non_mandatory_change() -> None:
     assert expert._planner_policy_reason == PlannerPolicyReason.PRE_JUNCTION_LANE_CHANGE_BLOCKED
 
 
+def test_policy_steer_consistency_gate_retargets_from_arc_to_route() -> None:
+    expert = _build_expert()
+    expert.config.planner_policy_steer_consistency_gate_enabled = True
+    expert._planner_policy_reason = PlannerPolicyReason.PRE_JUNCTION_LANE_CHANGE_BLOCKED
+    expert._planner_policy_exception = PlannerPolicyException.NONE
+
+    arc_wp = _Waypoint(5.0, 1.5, road_id=1, lane_id=2)
+    route_wp = _Waypoint(6.0, 0.0, road_id=1, lane_id=1)
+    expert._arc_buffer = deque([(arc_wp, RoadOption.LANEFOLLOW)])
+    expert._wp_buffer = deque([(route_wp, RoadOption.LANEFOLLOW)])
+    expert._steer_from_arc = 1
+
+    target, blocked = expert._enforce_policy_steer_consistency(
+        target_wp=arc_wp,
+        nav_command_route=RoadOption.CHANGELANELEFT,
+        nav_label=RoadOption.LANEFOLLOW,
+    )
+
+    assert blocked is True
+    assert target is route_wp
+    assert expert._steer_from_arc == 0
+    assert expert._planner_policy_exception == PlannerPolicyException.BLOCKED_LANE
+
+
+def test_policy_steer_consistency_gate_can_be_disabled() -> None:
+    expert = _build_expert()
+    expert.config.planner_policy_steer_consistency_gate_enabled = False
+    expert._planner_policy_reason = PlannerPolicyReason.CONSECUTIVE_LANE_CHANGE_BLOCKED
+
+    arc_wp = _Waypoint(5.0, 1.5, road_id=1, lane_id=2)
+    route_wp = _Waypoint(6.0, 0.0, road_id=1, lane_id=1)
+    expert._arc_buffer = deque([(arc_wp, RoadOption.LANEFOLLOW)])
+    expert._wp_buffer = deque([(route_wp, RoadOption.LANEFOLLOW)])
+    expert._steer_from_arc = 1
+
+    target, blocked = expert._enforce_policy_steer_consistency(
+        target_wp=arc_wp,
+        nav_command_route=RoadOption.CHANGELANERIGHT,
+        nav_label=RoadOption.LANEFOLLOW,
+    )
+
+    assert blocked is True
+    assert target is arc_wp
+    assert expert._steer_from_arc == 1
+
+
 def test_turn_lane_legality_blocks_unsupported_turn_command() -> None:
     expert = _build_expert()
     expert.config.planner_turn_lane_validation_enabled = True
