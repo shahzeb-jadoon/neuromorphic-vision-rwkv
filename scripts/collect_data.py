@@ -153,6 +153,10 @@ def build_campaign(
         "planner_exit_lane_leave_distance_m",
         "planner_legality_max_skip_gap_m",
         "route_watchdog_wp_buffer_head_dist_m",
+        "route_watchdog_progress_epsilon",
+        "route_watchdog_min_moving_speed_kmh",
+        "route_watchdog_heading_mismatch_deg",
+        "route_watchdog_tl_hold_exempt_speed_kmh",
         "oncoming_lead_lateral_max_m",
         "oncoming_lead_longitudinal_max_m",
         "oncoming_lead_ttc_max_s",
@@ -181,6 +185,7 @@ def build_campaign(
     int_policy_fields = [
         "route_watchdog_min_corridor_segments",
         "route_watchdog_min_frames",
+        "route_watchdog_stall_min_frames",
     ]
     for policy_key in int_policy_fields:
         if policy_key in expert_cfg_dict:

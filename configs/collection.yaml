@@ -60,6 +60,11 @@ expert:
   route_watchdog_wp_buffer_head_dist_m: 30.0
   route_watchdog_min_corridor_segments: 1
   route_watchdog_min_frames: 3
+  route_watchdog_stall_min_frames: 80
+  route_watchdog_progress_epsilon: 0.0001
+  route_watchdog_min_moving_speed_kmh: 5.0
+  route_watchdog_heading_mismatch_deg: 75.0
+  route_watchdog_tl_hold_exempt_speed_kmh: 8.0
   planner_roundabout_commitment_enabled: true
   planner_roundabout_context_window_m: 35.0
   planner_roundabout_lane_change_cooldown_m: 35.0

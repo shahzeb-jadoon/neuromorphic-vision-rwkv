@@ -241,6 +241,11 @@ class ExpertConfig:
     route_watchdog_wp_buffer_head_dist_m: float = 30.0
     route_watchdog_min_corridor_segments: int = 1
     route_watchdog_min_frames: int = 3
+    route_watchdog_stall_min_frames: int = 80
+    route_watchdog_progress_epsilon: float = 1e-4
+    route_watchdog_min_moving_speed_kmh: float = 5.0
+    route_watchdog_heading_mismatch_deg: float = 75.0
+    route_watchdog_tl_hold_exempt_speed_kmh: float = 8.0
     planner_roundabout_commitment_enabled: bool = True
     planner_roundabout_context_window_m: float = 35.0
     planner_roundabout_lane_change_cooldown_m: float = 35.0
@@ -537,6 +542,8 @@ class PrivilegedExpert:
         self._legality_turn_mismatch_filtered: int = 0
         self._legality_continuity_kept: int = 0
         self._route_watchdog_consecutive_frames: int = 0
+        self._route_watchdog_progress_stall_frames: int = 0
+        self._route_watchdog_prev_route_completion: float | None = None
         self._policy_distance_traveled: float = 0.0
         self._policy_last_location: Any | None = None
         self._policy_last_lane_change_distance: float = -1e9
@@ -872,6 +879,8 @@ class PrivilegedExpert:
         self._legality_turn_mismatch_filtered = 0
         self._legality_continuity_kept = 0
         self._route_watchdog_consecutive_frames = 0
+        self._route_watchdog_progress_stall_frames = 0
+        self._route_watchdog_prev_route_completion = None
         self._policy_distance_traveled = 0.0
         self._policy_last_location = None
         self._policy_last_lane_change_distance = -1e9
@@ -920,6 +929,8 @@ class PrivilegedExpert:
         self._frame_turn_lane_legality_violation = 0
         self._frame_roundabout_lane_change_violation = 0
         self._frame_route_watchdog_triggered = 0
+        self._route_watchdog_progress_stall_frames = 0
+        self._route_watchdog_prev_route_completion = None
 
         try:
             self._refresh_route_tl_candidates(self.vehicle.get_transform())
@@ -1005,6 +1016,7 @@ class PrivilegedExpert:
         if self._wp_buffer:
             wp0_loc = self._wp_buffer[0][0].transform.location
             buf_head_dist = transform.location.distance(wp0_loc)
+        heading_error_deg = self._target_heading_error_deg(transform, target_wp)
 
         # --- 3.  Privileged perception ---
         tl_state, tl_distance = self._check_traffic_light(transform)
@@ -1035,6 +1047,11 @@ class PrivilegedExpert:
             buf_head_dist=buf_head_dist,
             target_speed=target_speed,
             mode=mode,
+            speed_kmh=speed_kmh,
+            route_completion=self.route_completion,
+            heading_error_deg=heading_error_deg,
+            tl_state=tl_state,
+            tl_distance=tl_distance,
         )
 
         # Reset speed PID integral when leaving a stop/hold mode.
@@ -1717,21 +1734,50 @@ class PrivilegedExpert:
             prev_loc = wp_loc
         return -1.0
 
+    def _target_heading_error_deg(
+        self,
+        transform: "carla.Transform",
+        target_wp: Any,
+    ) -> float | None:
+        """Return absolute ego-to-target heading mismatch in degrees."""
+        if target_wp is None:
+            return None
+
+        ego_loc = transform.location
+        target_loc = target_wp.transform.location
+        dx = float(target_loc.x - ego_loc.x)
+        dy = float(target_loc.y - ego_loc.y)
+        if math.hypot(dx, dy) < 1e-6:
+            return None
+
+        target_yaw = math.degrees(math.atan2(dy, dx))
+        ego_yaw = float(transform.rotation.yaw)
+        return abs(self._wrap_angle_deg(target_yaw - ego_yaw))
+
     def _apply_route_continuity_watchdog(
         self,
         *,
         buf_head_dist: float,
         target_speed: float,
         mode: DrivingMode,
+        speed_kmh: float,
+        route_completion: float,
+        heading_error_deg: float | None,
+        tl_state: Any,
+        tl_distance: float | None,
     ) -> tuple[float, DrivingMode]:
-        """Emergency-stop when corridor collapses while the next target is far away."""
+        """Emergency-stop on persistent route-health failure signatures.
+
+        Two independent trip paths are monitored:
+        1. Legacy corridor-collapse signature (small corridor + far target).
+        2. Composite stall signature (moving + stalled route progress +
+           off-route geometry), with traffic-light hold exemptions.
+        """
         cfg = self.config
         if not cfg.route_watchdog_enabled:
             self._route_watchdog_consecutive_frames = 0
-            return target_speed, mode
-
-        if buf_head_dist < 0.0:
-            self._route_watchdog_consecutive_frames = 0
+            self._route_watchdog_progress_stall_frames = 0
+            self._route_watchdog_prev_route_completion = route_completion
             return target_speed, mode
 
         collapsed = self._n_corridor_segments <= int(cfg.route_watchdog_min_corridor_segments)
@@ -1740,10 +1786,47 @@ class PrivilegedExpert:
             self._route_watchdog_consecutive_frames += 1
         else:
             self._route_watchdog_consecutive_frames = 0
-            return target_speed, mode
+
+        prev_completion = self._route_watchdog_prev_route_completion
+        if prev_completion is None:
+            progress_delta = 0.0
+        else:
+            progress_delta = max(0.0, route_completion - prev_completion)
+        self._route_watchdog_prev_route_completion = route_completion
+
+        moving = speed_kmh >= float(cfg.route_watchdog_min_moving_speed_kmh)
+        stalled = progress_delta <= float(cfg.route_watchdog_progress_epsilon)
+        heading_mismatch = (
+            heading_error_deg is not None
+            and heading_error_deg >= float(cfg.route_watchdog_heading_mismatch_deg)
+        )
+        offroute = far_head or heading_mismatch
+
+        tl_forced_hold = False
+        if tl_distance is not None and 0.0 < tl_distance < cfg.traffic_light_brake_distance:
+            try:
+                tl_forced_hold = tl_state in (
+                    carla.TrafficLightState.Red,
+                    carla.TrafficLightState.Yellow,
+                )
+            except (AttributeError, NameError):
+                # Test/runtime fallback where carla enums are unavailable.
+                tl_forced_hold = tl_state in (2, 3)
+
+        exempt_hold = (
+            tl_forced_hold and speed_kmh <= float(cfg.route_watchdog_tl_hold_exempt_speed_kmh)
+        )
+
+        if moving and stalled and offroute and not exempt_hold:
+            self._route_watchdog_progress_stall_frames += 1
+        else:
+            self._route_watchdog_progress_stall_frames = 0
 
         min_frames = max(1, int(cfg.route_watchdog_min_frames))
-        if self._route_watchdog_consecutive_frames < min_frames:
+        stall_min_frames = max(1, int(cfg.route_watchdog_stall_min_frames))
+        legacy_trip = self._route_watchdog_consecutive_frames >= min_frames
+        stall_trip = self._route_watchdog_progress_stall_frames >= stall_min_frames
+        if not (legacy_trip or stall_trip):
             return target_speed, mode
 
         self._frame_route_watchdog_triggered = 1

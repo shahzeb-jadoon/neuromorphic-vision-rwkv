@@ -103,6 +103,8 @@ def _build_expert() -> PrivilegedExpert:
     expert._legality_turn_mismatch_filtered = 0
     expert._legality_continuity_kept = 0
     expert._route_watchdog_consecutive_frames = 0
+    expert._route_watchdog_progress_stall_frames = 0
+    expert._route_watchdog_prev_route_completion = None
     expert._policy_distance_traveled = 0.0
     expert._policy_last_location = None
     expert._policy_last_lane_change_distance = -1e9
@@ -1017,6 +1019,11 @@ def test_route_watchdog_triggers_emergency_stop_after_streak() -> None:
         buf_head_dist=45.0,
         target_speed=20.0,
         mode=DrivingMode.FOLLOW_LANE,
+        speed_kmh=20.0,
+        route_completion=0.2,
+        heading_error_deg=0.0,
+        tl_state=None,
+        tl_distance=None,
     )
     assert mode == DrivingMode.FOLLOW_LANE
     assert target == 20.0
@@ -1026,6 +1033,11 @@ def test_route_watchdog_triggers_emergency_stop_after_streak() -> None:
         buf_head_dist=44.0,
         target_speed=18.0,
         mode=DrivingMode.FOLLOW_LANE,
+        speed_kmh=18.0,
+        route_completion=0.2,
+        heading_error_deg=0.0,
+        tl_state=None,
+        tl_distance=None,
     )
     assert mode == DrivingMode.EMERGENCY_STOP
     assert target == 0.0
@@ -1045,6 +1057,11 @@ def test_route_watchdog_resets_streak_when_corridor_recovers() -> None:
         buf_head_dist=40.0,
         target_speed=25.0,
         mode=DrivingMode.FOLLOW_LANE,
+        speed_kmh=25.0,
+        route_completion=0.2,
+        heading_error_deg=0.0,
+        tl_state=None,
+        tl_distance=None,
     )
     assert expert._route_watchdog_consecutive_frames == 1
 
@@ -1053,11 +1070,85 @@ def test_route_watchdog_resets_streak_when_corridor_recovers() -> None:
         buf_head_dist=8.0,
         target_speed=25.0,
         mode=DrivingMode.FOLLOW_LANE,
+        speed_kmh=25.0,
+        route_completion=0.21,
+        heading_error_deg=0.0,
+        tl_state=None,
+        tl_distance=None,
     )
     assert expert._route_watchdog_consecutive_frames == 0
     assert expert._frame_route_watchdog_triggered == 0
     assert mode == DrivingMode.FOLLOW_LANE
     assert target == 25.0
+
+
+def test_route_watchdog_stall_signature_triggers_without_corridor_collapse() -> None:
+    expert = _build_expert()
+    expert.config.route_watchdog_enabled = True
+    expert.config.route_watchdog_min_corridor_segments = 1
+    expert.config.route_watchdog_wp_buffer_head_dist_m = 30.0
+    expert.config.route_watchdog_stall_min_frames = 2
+    expert.config.route_watchdog_progress_epsilon = 1e-4
+    expert.config.route_watchdog_min_moving_speed_kmh = 5.0
+    expert.config.route_watchdog_heading_mismatch_deg = 60.0
+    expert._n_corridor_segments = 20
+
+    target, mode = expert._apply_route_continuity_watchdog(
+        buf_head_dist=4.0,
+        target_speed=24.0,
+        mode=DrivingMode.FOLLOW_LANE,
+        speed_kmh=20.0,
+        route_completion=0.45,
+        heading_error_deg=95.0,
+        tl_state=None,
+        tl_distance=None,
+    )
+    assert mode == DrivingMode.FOLLOW_LANE
+    assert target == 24.0
+
+    target, mode = expert._apply_route_continuity_watchdog(
+        buf_head_dist=4.0,
+        target_speed=24.0,
+        mode=DrivingMode.FOLLOW_LANE,
+        speed_kmh=20.0,
+        route_completion=0.45,
+        heading_error_deg=100.0,
+        tl_state=None,
+        tl_distance=None,
+    )
+    assert mode == DrivingMode.EMERGENCY_STOP
+    assert target == 0.0
+    assert expert._frame_route_watchdog_triggered == 1
+
+
+def test_route_watchdog_tl_hold_exempts_stall_signature(monkeypatch: MonkeyPatch) -> None:
+    expert = _build_expert()
+    expert.config.route_watchdog_enabled = True
+    expert.config.route_watchdog_stall_min_frames = 1
+    expert.config.route_watchdog_progress_epsilon = 1e-4
+    expert.config.route_watchdog_min_moving_speed_kmh = 5.0
+    expert.config.route_watchdog_heading_mismatch_deg = 60.0
+    expert.config.route_watchdog_tl_hold_exempt_speed_kmh = 8.0
+    expert._n_corridor_segments = 20
+
+    fake_tl = SimpleNamespace(Green=1, Yellow=2, Red=3)
+    monkeypatch.setattr(
+        "agents.expert.privileged_expert.carla", SimpleNamespace(TrafficLightState=fake_tl)
+    )
+
+    target, mode = expert._apply_route_continuity_watchdog(
+        buf_head_dist=5.0,
+        target_speed=12.0,
+        mode=DrivingMode.TRAFFIC_LIGHT_STOP,
+        speed_kmh=6.5,
+        route_completion=0.2,
+        heading_error_deg=95.0,
+        tl_state=fake_tl.Red,
+        tl_distance=10.0,
+    )
+    assert mode == DrivingMode.TRAFFIC_LIGHT_STOP
+    assert target == 12.0
+    assert expert._frame_route_watchdog_triggered == 0
 
 
 def test_lane_change_mandatory_exit_exception_allows_change() -> None:
