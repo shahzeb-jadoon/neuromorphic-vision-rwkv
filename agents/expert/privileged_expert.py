@@ -129,6 +129,11 @@ class ExpertConfig:
     vehicle_emergency_time: float = 1.2  # seconds — scale emergency with speed
     vehicle_comfort_decel: float = 3.0  # m/s² — comfortable braking for following
     vehicle_allow_lateral_fallback: bool = False  # if False, only SAT (obb_in_lane) can select lead
+    vehicle_oncoming_conflict_gate_enabled: bool = True
+    oncoming_lead_lateral_max_m: float = 1.2
+    oncoming_lead_longitudinal_max_m: float = 12.0
+    oncoming_lead_ttc_max_s: float = 1.5
+    oncoming_lead_min_closing_speed_kmh: float = 5.0
     pedestrian_hazard_distance: float = 15.0
     pedestrian_emergency_distance: float = 5.0
     lane_half_width: float = 2.5  # metres — lateral fallback (used only when ego_wp unavailable)
@@ -983,7 +988,7 @@ class PrivilegedExpert:
         ys_distance, ys_has_conflict = self._check_yield_signs(transform, speed_kmh)
         nearby_vehicles = self._detect_vehicles(transform)
         nearby_pedestrians = self._detect_pedestrians(transform)
-        lead_distance, lead_speed, lead_lateral = self._lead_vehicle_info(nearby_vehicles)
+        lead_distance, lead_speed, lead_lateral = self._lead_vehicle_info(nearby_vehicles, speed_kmh)
         ped_dist = self._closest_pedestrian_distance(nearby_pedestrians, transform)
 
         # --- 4.  Target speed & driving mode ---
@@ -3504,6 +3509,7 @@ class PrivilegedExpert:
     def _lead_vehicle_info(
         self,
         nearby: List[Dict[str, Any]],
+        ego_speed_kmh: float,
     ) -> Tuple[float | None, float | None, float | None]:
         """Return distance, speed, and lateral offset of closest vehicle ahead.
 
@@ -3512,19 +3518,21 @@ class PrivilegedExpert:
         is enabled, a centre-point lateral check is also accepted to
         reduce false negatives on segments where SAT geometry is noisy.
 
-        Oncoming vehicles (``same_direction == False``) are excluded
-        so that head-on traffic on narrow roads or during turns does
-        not trigger false lead-vehicle braking.
+        Oncoming vehicles use a stricter conflict gate (lateral,
+        longitudinal, and TTC constraints) so adjacent-lane overlap
+        artefacts do not trigger false emergency stops.
         """
         for v in nearby:
             if not v["is_ahead"]:
                 continue
-            # Skip oncoming traffic
-            if not v.get("same_direction", True):
-                if not v.get("obb_in_lane", False):
-                    continue
             obb_flag = v.get("obb_in_lane", False)
-            if self.config.vehicle_allow_lateral_fallback:
+            if not v.get("same_direction", True):
+                if not obb_flag:
+                    continue
+                if not self._passes_oncoming_conflict_gate(v, ego_speed_kmh):
+                    continue
+                in_lane = True
+            elif self.config.vehicle_allow_lateral_fallback:
                 # Union of SAT overlap and lateral-distance check — either
                 # one is sufficient to flag the vehicle as in-lane.
                 lateral_flag = abs(v["lateral"]) < self._cached_half_lane
@@ -3536,6 +3544,30 @@ class PrivilegedExpert:
             if in_lane:
                 return v["distance"], v.get("speed_kmh"), v.get("lateral")
         return None, None, None
+
+    def _passes_oncoming_conflict_gate(self, vehicle_info: Dict[str, Any], ego_speed_kmh: float) -> bool:
+        """Return True only for immediate oncoming conflict candidates."""
+        cfg = self.config
+        if not cfg.vehicle_oncoming_conflict_gate_enabled:
+            return True
+
+        lateral = abs(float(vehicle_info.get("lateral", 999.0)))
+        longitudinal = max(0.0, float(vehicle_info.get("longitudinal", 999.0)))
+        distance = max(0.0, float(vehicle_info.get("distance", 999.0)))
+        if lateral > float(cfg.oncoming_lead_lateral_max_m):
+            return False
+        if longitudinal > float(cfg.oncoming_lead_longitudinal_max_m):
+            return False
+
+        other_speed_kmh = max(0.0, float(vehicle_info.get("speed_kmh", 0.0)))
+        closing_kmh = max(
+            float(cfg.oncoming_lead_min_closing_speed_kmh),
+            max(0.0, ego_speed_kmh) + other_speed_kmh,
+        )
+        if distance <= 0.0:
+            return True
+        ttc_s = distance / max(closing_kmh / 3.6, 1e-3)
+        return ttc_s <= float(cfg.oncoming_lead_ttc_max_s)
 
     def _dynamic_half_lane(self, transform: "carla.Transform") -> float:
         """Compute corridor half-width from the current lane width.

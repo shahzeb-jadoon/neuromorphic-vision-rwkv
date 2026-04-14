@@ -443,6 +443,56 @@ def test_turning_keeps_stopped_vehicle_in_corridor_as_blocker(monkeypatch: Monke
     assert target == 0.0
 
 
+def test_lead_vehicle_info_rejects_oncoming_adjacent_overlap() -> None:
+    expert = _build_expert()
+    expert.config.vehicle_oncoming_conflict_gate_enabled = True
+    expert.config.oncoming_lead_lateral_max_m = 1.2
+
+    nearby = [
+        {
+            "is_ahead": True,
+            "same_direction": False,
+            "obb_in_lane": True,
+            "distance": 0.0,
+            "longitudinal": 3.8,
+            "lateral": -2.4,
+            "speed_kmh": 0.0,
+        }
+    ]
+
+    lead_distance, lead_speed, lead_lateral = expert._lead_vehicle_info(nearby, ego_speed_kmh=15.0)
+
+    assert lead_distance is None
+    assert lead_speed is None
+    assert lead_lateral is None
+
+
+def test_lead_vehicle_info_accepts_oncoming_immediate_conflict() -> None:
+    expert = _build_expert()
+    expert.config.vehicle_oncoming_conflict_gate_enabled = True
+    expert.config.oncoming_lead_lateral_max_m = 1.2
+    expert.config.oncoming_lead_longitudinal_max_m = 12.0
+    expert.config.oncoming_lead_ttc_max_s = 1.5
+
+    nearby = [
+        {
+            "is_ahead": True,
+            "same_direction": False,
+            "obb_in_lane": True,
+            "distance": 3.0,
+            "longitudinal": 3.0,
+            "lateral": 0.3,
+            "speed_kmh": 10.0,
+        }
+    ]
+
+    lead_distance, lead_speed, lead_lateral = expert._lead_vehicle_info(nearby, ego_speed_kmh=30.0)
+
+    assert lead_distance == 3.0
+    assert lead_speed == 10.0
+    assert lead_lateral == 0.3
+
+
 def test_closest_pedestrian_distance_uses_hybrid_floor() -> None:
     expert = _build_expert()
     setattr(expert, "_dynamic_half_lane", lambda _t: 1.75)

@@ -135,6 +135,10 @@ def build_campaign(
         expert_kw["pedestrian_hazard_distance"] = float(
             expert_cfg_dict["pedestrian_hazard_distance"]
         )
+    if "pedestrian_emergency_distance" in expert_cfg_dict:
+        expert_kw["pedestrian_emergency_distance"] = float(
+            expert_cfg_dict["pedestrian_emergency_distance"]
+        )
     if "turn_speed_factor" in expert_cfg_dict:
         expert_kw["turn_speed_factor"] = float(expert_cfg_dict["turn_speed_factor"])
     if "steering_noise_sigma" in expert_cfg_dict:
@@ -149,6 +153,10 @@ def build_campaign(
         "planner_exit_lane_leave_distance_m",
         "planner_legality_max_skip_gap_m",
         "route_watchdog_wp_buffer_head_dist_m",
+        "oncoming_lead_lateral_max_m",
+        "oncoming_lead_longitudinal_max_m",
+        "oncoming_lead_ttc_max_s",
+        "oncoming_lead_min_closing_speed_kmh",
     ]
     for policy_key in float_policy_fields:
         if policy_key in expert_cfg_dict:
@@ -159,6 +167,8 @@ def build_campaign(
         "planner_legality_filter_enabled",
         "planner_allow_lane_id_sign_flip",
         "route_watchdog_enabled",
+        "vehicle_allow_lateral_fallback",
+        "vehicle_oncoming_conflict_gate_enabled",
     ]
     for policy_key in bool_policy_fields:
         if policy_key in expert_cfg_dict:

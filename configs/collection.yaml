@@ -35,6 +35,13 @@ expert:
   traffic_light_brake_distance: 80.0
   vehicle_hazard_distance: 25.0
   pedestrian_hazard_distance: 15.0
+  pedestrian_emergency_distance: 5.0
+  vehicle_allow_lateral_fallback: false
+  vehicle_oncoming_conflict_gate_enabled: true
+  oncoming_lead_lateral_max_m: 1.2
+  oncoming_lead_longitudinal_max_m: 12.0
+  oncoming_lead_ttc_max_s: 1.5
+  oncoming_lead_min_closing_speed_kmh: 5.0
   turn_speed_factor: 0.45
   steering_noise_sigma: 0.05
   # Waypoint planner policy scaffolding (Commit A)
