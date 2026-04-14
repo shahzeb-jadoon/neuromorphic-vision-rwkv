@@ -88,6 +88,7 @@ def _build_expert() -> PrivilegedExpert:
     expert._gap_fill_bezier_tried = set()
     expert._gap_fill_rpc_attempts = {}
     expert._gap_fill_bezier_attempts = {}
+    expert._gap_fill_pair_blacklist = set()
     expert._arc_buffer = deque()
     expert._planner_policy_reason = PlannerPolicyReason.NONE
     expert._planner_policy_exception = PlannerPolicyException.NONE
@@ -649,6 +650,32 @@ def test_fill_junction_gaps_allows_rpc_retry_after_bezier_failure() -> None:
     expert._fill_junction_gaps(None)
     assert pair_key in expert._gap_fill_rpc_tried
     assert expert._gap_fill_rpcs > 0
+
+
+def test_fill_junction_gaps_startup_circuit_breaker_blacklists_diverging_pair() -> None:
+    expert = _build_expert()
+    expert.config.gap_fill_startup_circuit_breaker_enabled = True
+    expert.config.gap_fill_bezier_retry_limit = 1
+    expert.config.gap_fill_rpc_retry_limit = 2
+
+    wp_prev = _Waypoint(0.0, 0.0, road_id=10, lane_id=1, yaw=0.0)
+    wp_next = _Waypoint(8.0, 0.0, road_id=10, lane_id=1, yaw=0.0)
+    wp_wrong = _Waypoint(2.0, 2.0, road_id=11, lane_id=1, yaw=0.0)
+    wp_prev._nexts = [wp_wrong]
+    wp_wrong._nexts = []
+
+    pair_key = (wp_prev.id, wp_next.id)
+    expert._wp_buffer = deque([(wp_prev, RoadOption.LANEFOLLOW), (wp_next, RoadOption.LANEFOLLOW)])
+    expert.map = SimpleNamespace(get_waypoint=lambda _loc: None)
+
+    expert._fill_junction_gaps(None)
+
+    assert pair_key in expert._gap_fill_pair_blacklist
+    first_rpc_count = expert._gap_fill_rpcs
+
+    # Second startup pass should skip this pair entirely.
+    expert._fill_junction_gaps(None)
+    assert expert._gap_fill_rpcs == first_rpc_count
 
 
 def test_advance_route_uses_segment_progress_even_when_heading_would_disagree() -> None:

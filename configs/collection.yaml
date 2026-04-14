@@ -68,6 +68,7 @@ expert:
   planner_roundabout_commitment_enabled: true
   planner_roundabout_context_window_m: 35.0
   planner_roundabout_lane_change_cooldown_m: 35.0
+  gap_fill_startup_circuit_breaker_enabled: true
 
 # Towns for training data collection
 towns:

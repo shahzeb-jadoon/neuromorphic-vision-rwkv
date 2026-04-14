@@ -214,6 +214,7 @@ class ExpertConfig:
     gap_fill_bezier_step: float = 0.5  # metres
     gap_fill_bezier_tangent_factor: float = 0.35  # control-handle length = gap * factor
     gap_fill_bezier_max_project_error: float = 2.5  # metres
+    gap_fill_startup_circuit_breaker_enabled: bool = True
 
     # --- Route densification (long-term robust path smoothing) ---
     # Preprocess sparse route transitions once in set_route() so runtime
@@ -491,6 +492,7 @@ class PrivilegedExpert:
         self._gap_fill_bezier_tried: set[tuple[int, int]] = set()
         self._gap_fill_rpc_attempts: dict[tuple[int, int], int] = {}
         self._gap_fill_bezier_attempts: dict[tuple[int, int], int] = {}
+        self._gap_fill_pair_blacklist: set[tuple[int, int]] = set()
         # Bezier arc buffer — populated by _fill_junction_gaps, consumed by
         # _advance_route.  Kept separate from _wp_buffer so arc traversal
         # never modifies the route tracking state.
@@ -906,6 +908,7 @@ class PrivilegedExpert:
         self._gap_fill_bezier_tried = set()
         self._gap_fill_rpc_attempts = {}
         self._gap_fill_bezier_attempts = {}
+        self._gap_fill_pair_blacklist = set()
         self._fill_buffer()
         self.speed_pid.reset()
         self.steer_pid.reset()
@@ -1345,6 +1348,7 @@ class PrivilegedExpert:
         _GAP_THRESHOLD = 4.0  # metres — normal spacing is ~2 m
         _FILL_STEP = 2.0  # metres — interpolation step / fallback step
         cfg = self.config
+        startup_mode = transform is None and bool(cfg.gap_fill_startup_circuit_breaker_enabled)
         bezier_step = max(0.25, float(cfg.gap_fill_bezier_step))
 
         def _loc_dist(a: Any, b: Any) -> float:
@@ -1414,6 +1418,9 @@ class PrivilegedExpert:
 
             if gap > _GAP_THRESHOLD:
                 pair_key = (wp_prev.id, wp_next.id)
+                if pair_key in self._gap_fill_pair_blacklist:
+                    rebuilt.append((wp_next, cmd_next))
+                    continue
                 bezier_retries = max(1, int(cfg.gap_fill_bezier_retry_limit))
                 rpc_retries = max(1, int(cfg.gap_fill_rpc_retry_limit))
                 bezier_attempts = self._gap_fill_bezier_attempts.get(pair_key, 0)
@@ -1579,6 +1586,8 @@ class PrivilegedExpert:
                         # Discard them to avoid corrupting the waypoint
                         # buffer and causing cascading re-fills.
                         self._gap_fill_diverged += 1
+                        if startup_mode:
+                            self._gap_fill_pair_blacklist.add(pair_key)
 
             rebuilt.append((wp_next, cmd_next))
 

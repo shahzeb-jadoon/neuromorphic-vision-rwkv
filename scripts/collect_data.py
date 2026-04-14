@@ -177,6 +177,7 @@ def build_campaign(
         "vehicle_allow_lateral_fallback",
         "vehicle_oncoming_conflict_gate_enabled",
         "planner_roundabout_commitment_enabled",
+        "gap_fill_startup_circuit_breaker_enabled",
     ]
     for policy_key in bool_policy_fields:
         if policy_key in expert_cfg_dict:
