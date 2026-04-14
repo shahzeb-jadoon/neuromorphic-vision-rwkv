@@ -95,10 +95,12 @@ def _build_expert() -> PrivilegedExpert:
     expert._frame_pre_junction_lane_change_violation = 0
     expert._frame_consecutive_lane_change_violation = 0
     expert._frame_straight_exit_lane_violation = 0
+    expert._frame_route_watchdog_triggered = 0
     expert._legality_wrong_way_filtered = 0
     expert._legality_do_not_enter_filtered = 0
     expert._legality_turn_mismatch_filtered = 0
     expert._legality_continuity_kept = 0
+    expert._route_watchdog_consecutive_frames = 0
     expert._policy_distance_traveled = 0.0
     expert._policy_last_location = None
     expert._policy_last_lane_change_distance = -1e9
@@ -818,6 +820,61 @@ def test_lane_change_freeze_blocks_non_mandatory_change() -> None:
     assert label == RoadOption.LANEFOLLOW
     assert expert._frame_pre_junction_lane_change_violation == 1
     assert expert._planner_policy_reason == PlannerPolicyReason.PRE_JUNCTION_LANE_CHANGE_BLOCKED
+
+
+def test_route_watchdog_triggers_emergency_stop_after_streak() -> None:
+    expert = _build_expert()
+    expert.config.route_watchdog_enabled = True
+    expert.config.route_watchdog_wp_buffer_head_dist_m = 30.0
+    expert.config.route_watchdog_min_corridor_segments = 1
+    expert.config.route_watchdog_min_frames = 2
+    expert._n_corridor_segments = 1
+
+    target, mode = expert._apply_route_continuity_watchdog(
+        buf_head_dist=45.0,
+        target_speed=20.0,
+        mode=DrivingMode.FOLLOW_LANE,
+    )
+    assert mode == DrivingMode.FOLLOW_LANE
+    assert target == 20.0
+    assert expert._frame_route_watchdog_triggered == 0
+
+    target, mode = expert._apply_route_continuity_watchdog(
+        buf_head_dist=44.0,
+        target_speed=18.0,
+        mode=DrivingMode.FOLLOW_LANE,
+    )
+    assert mode == DrivingMode.EMERGENCY_STOP
+    assert target == 0.0
+    assert expert._frame_route_watchdog_triggered == 1
+    assert expert._planner_policy_reason == PlannerPolicyReason.ROUTE_CONTINUITY_WATCHDOG
+
+
+def test_route_watchdog_resets_streak_when_corridor_recovers() -> None:
+    expert = _build_expert()
+    expert.config.route_watchdog_enabled = True
+    expert.config.route_watchdog_wp_buffer_head_dist_m = 30.0
+    expert.config.route_watchdog_min_corridor_segments = 1
+    expert.config.route_watchdog_min_frames = 2
+
+    expert._n_corridor_segments = 1
+    _ = expert._apply_route_continuity_watchdog(
+        buf_head_dist=40.0,
+        target_speed=25.0,
+        mode=DrivingMode.FOLLOW_LANE,
+    )
+    assert expert._route_watchdog_consecutive_frames == 1
+
+    expert._n_corridor_segments = 2
+    target, mode = expert._apply_route_continuity_watchdog(
+        buf_head_dist=8.0,
+        target_speed=25.0,
+        mode=DrivingMode.FOLLOW_LANE,
+    )
+    assert expert._route_watchdog_consecutive_frames == 0
+    assert expert._frame_route_watchdog_triggered == 0
+    assert mode == DrivingMode.FOLLOW_LANE
+    assert target == 25.0
 
 
 def test_lane_change_mandatory_exit_exception_allows_change() -> None:

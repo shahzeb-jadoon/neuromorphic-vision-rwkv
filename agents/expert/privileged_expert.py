@@ -231,6 +231,10 @@ class ExpertConfig:
     planner_mandatory_exit_window_m: float = 30.0
     planner_exit_lane_leave_distance_m: float = 30.0
     planner_legality_max_skip_gap_m: float = 30.0
+    route_watchdog_enabled: bool = True
+    route_watchdog_wp_buffer_head_dist_m: float = 30.0
+    route_watchdog_min_corridor_segments: int = 1
+    route_watchdog_min_frames: int = 3
 
 
 # ---------------------------------------------------------------------------
@@ -260,6 +264,7 @@ class PlannerPolicyReason(IntEnum):
     PRE_JUNCTION_LANE_CHANGE_BLOCKED = auto()
     CONSECUTIVE_LANE_CHANGE_BLOCKED = auto()
     STRAIGHT_EXIT_LANE_WARNING = auto()
+    ROUTE_CONTINUITY_WATCHDOG = auto()
 
 
 class PlannerPolicyException(IntEnum):
@@ -332,6 +337,7 @@ class FrameInfo:
     legality_do_not_enter_filtered: int = 0
     legality_turn_mismatch_filtered: int = 0
     legality_continuity_kept: int = 0
+    route_watchdog_triggered: int = 0
 
 
 # ---------------------------------------------------------------------------
@@ -510,10 +516,12 @@ class PrivilegedExpert:
         self._frame_pre_junction_lane_change_violation: int = 0
         self._frame_consecutive_lane_change_violation: int = 0
         self._frame_straight_exit_lane_violation: int = 0
+        self._frame_route_watchdog_triggered: int = 0
         self._legality_wrong_way_filtered: int = 0
         self._legality_do_not_enter_filtered: int = 0
         self._legality_turn_mismatch_filtered: int = 0
         self._legality_continuity_kept: int = 0
+        self._route_watchdog_consecutive_frames: int = 0
         self._policy_distance_traveled: float = 0.0
         self._policy_last_location: Any | None = None
         self._policy_last_lane_change_distance: float = -1e9
@@ -837,10 +845,12 @@ class PrivilegedExpert:
         self._frame_pre_junction_lane_change_violation = 0
         self._frame_consecutive_lane_change_violation = 0
         self._frame_straight_exit_lane_violation = 0
+        self._frame_route_watchdog_triggered = 0
         self._legality_wrong_way_filtered = 0
         self._legality_do_not_enter_filtered = 0
         self._legality_turn_mismatch_filtered = 0
         self._legality_continuity_kept = 0
+        self._route_watchdog_consecutive_frames = 0
         self._policy_distance_traveled = 0.0
         self._policy_last_location = None
         self._policy_last_lane_change_distance = -1e9
@@ -885,6 +895,7 @@ class PrivilegedExpert:
         self._frame_pre_junction_lane_change_violation = 0
         self._frame_consecutive_lane_change_violation = 0
         self._frame_straight_exit_lane_violation = 0
+        self._frame_route_watchdog_triggered = 0
 
         try:
             self._refresh_route_tl_candidates(self.vehicle.get_transform())
@@ -960,6 +971,12 @@ class PrivilegedExpert:
 
         nav_label = self._apply_lane_change_policy(nav_label, ego_wp, transform.location)
 
+        buf_len = len(self._wp_buffer)
+        buf_head_dist = -1.0
+        if self._wp_buffer:
+            wp0_loc = self._wp_buffer[0][0].transform.location
+            buf_head_dist = transform.location.distance(wp0_loc)
+
         # --- 3.  Privileged perception ---
         tl_state, tl_distance = self._check_traffic_light(transform)
         ss_distance, ss_committed = self._check_stop_signs(transform, speed_kmh)
@@ -984,6 +1001,11 @@ class PrivilegedExpert:
             base_target,
             ys_distance,
             ys_has_conflict,
+        )
+        target_speed, mode = self._apply_route_continuity_watchdog(
+            buf_head_dist=buf_head_dist,
+            target_speed=target_speed,
+            mode=mode,
         )
 
         # Reset speed PID integral when leaving a stop/hold mode.
@@ -1036,12 +1058,6 @@ class PrivilegedExpert:
         )
 
         # --- 6.  Privileged info ---
-        buf_len = len(self._wp_buffer)
-        buf_head_dist = -1.0
-        if self._wp_buffer:
-            wp0_loc = self._wp_buffer[0][0].transform.location
-            buf_head_dist = transform.location.distance(wp0_loc)
-
         sat_hits = sum(1 for v in nearby_vehicles if v.get("obb_in_lane", False))
         dynamic_half = self._dynamic_half_lane(transform)
         lat_hits = sum(
@@ -1092,6 +1108,7 @@ class PrivilegedExpert:
             legality_do_not_enter_filtered=self._legality_do_not_enter_filtered,
             legality_turn_mismatch_filtered=self._legality_turn_mismatch_filtered,
             legality_continuity_kept=self._legality_continuity_kept,
+            route_watchdog_triggered=self._frame_route_watchdog_triggered,
         )
 
         return control, info
@@ -1668,6 +1685,40 @@ class PrivilegedExpert:
                 return float(accum)
             prev_loc = wp_loc
         return -1.0
+
+    def _apply_route_continuity_watchdog(
+        self,
+        *,
+        buf_head_dist: float,
+        target_speed: float,
+        mode: DrivingMode,
+    ) -> tuple[float, DrivingMode]:
+        """Emergency-stop when corridor collapses while the next target is far away."""
+        cfg = self.config
+        if not cfg.route_watchdog_enabled:
+            self._route_watchdog_consecutive_frames = 0
+            return target_speed, mode
+
+        if buf_head_dist < 0.0:
+            self._route_watchdog_consecutive_frames = 0
+            return target_speed, mode
+
+        collapsed = self._n_corridor_segments <= int(cfg.route_watchdog_min_corridor_segments)
+        far_head = buf_head_dist >= float(cfg.route_watchdog_wp_buffer_head_dist_m)
+        if collapsed and far_head:
+            self._route_watchdog_consecutive_frames += 1
+        else:
+            self._route_watchdog_consecutive_frames = 0
+            return target_speed, mode
+
+        min_frames = max(1, int(cfg.route_watchdog_min_frames))
+        if self._route_watchdog_consecutive_frames < min_frames:
+            return target_speed, mode
+
+        self._frame_route_watchdog_triggered = 1
+        if self._planner_policy_reason == PlannerPolicyReason.NONE:
+            self._planner_policy_reason = PlannerPolicyReason.ROUTE_CONTINUITY_WATCHDOG
+        return 0.0, DrivingMode.EMERGENCY_STOP
 
     @staticmethod
     def _is_lane_change_command(cmd: RoadOption) -> bool:

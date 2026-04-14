@@ -325,6 +325,12 @@ class _StreamingEpisodeWriter:
             dtype=np.int32,
             maxshape=(None,),
         )
+        self._ds_route_watchdog_triggered = self._h5.create_dataset(
+            S.ROUTE_WATCHDOG_TRIGGERED,
+            shape=(max_frames,),
+            dtype=np.int8,
+            maxshape=(None,),
+        )
 
         # Variable-length string datasets for actor JSON
         dt_str = h5py.string_dtype()
@@ -399,6 +405,7 @@ class _StreamingEpisodeWriter:
         self._ds_legality_do_not_enter_filtered[i] = info.legality_do_not_enter_filtered
         self._ds_legality_turn_mismatch_filtered[i] = info.legality_turn_mismatch_filtered
         self._ds_legality_continuity_kept[i] = info.legality_continuity_kept
+        self._ds_route_watchdog_triggered[i] = info.route_watchdog_triggered
         self._ds_nveh[i] = json.dumps(info.nearby_vehicles)
         self._ds_nped[i] = json.dumps(info.nearby_pedestrians)
 
@@ -462,6 +469,7 @@ class _StreamingEpisodeWriter:
             self._ds_legality_do_not_enter_filtered,
             self._ds_legality_turn_mismatch_filtered,
             self._ds_legality_continuity_kept,
+            self._ds_route_watchdog_triggered,
             self._ds_nveh,
             self._ds_nped,
         ]:

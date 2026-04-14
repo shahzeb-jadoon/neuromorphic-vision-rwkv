@@ -48,6 +48,10 @@ expert:
   planner_mandatory_exit_window_m: 30.0
   planner_exit_lane_leave_distance_m: 30.0
   planner_legality_max_skip_gap_m: 30.0
+  route_watchdog_enabled: true
+  route_watchdog_wp_buffer_head_dist_m: 30.0
+  route_watchdog_min_corridor_segments: 1
+  route_watchdog_min_frames: 3
 
 # Towns for training data collection
 towns:

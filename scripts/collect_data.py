@@ -148,6 +148,7 @@ def build_campaign(
         "planner_mandatory_exit_window_m",
         "planner_exit_lane_leave_distance_m",
         "planner_legality_max_skip_gap_m",
+        "route_watchdog_wp_buffer_head_dist_m",
     ]
     for policy_key in float_policy_fields:
         if policy_key in expert_cfg_dict:
@@ -157,10 +158,19 @@ def build_campaign(
         "planner_policy_enabled",
         "planner_legality_filter_enabled",
         "planner_allow_lane_id_sign_flip",
+        "route_watchdog_enabled",
     ]
     for policy_key in bool_policy_fields:
         if policy_key in expert_cfg_dict:
             expert_kw[policy_key] = bool(expert_cfg_dict[policy_key])
+
+    int_policy_fields = [
+        "route_watchdog_min_corridor_segments",
+        "route_watchdog_min_frames",
+    ]
+    for policy_key in int_policy_fields:
+        if policy_key in expert_cfg_dict:
+            expert_kw[policy_key] = int(expert_cfg_dict[policy_key])
 
     expert_config = ExpertConfig(**expert_kw)
 
