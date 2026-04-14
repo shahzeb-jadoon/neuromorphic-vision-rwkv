@@ -1179,7 +1179,10 @@ class ExpertDataCollector:
             #     Red    = emergency crossing risk
             #     Yellow = in-lane / predicted crossing risk
             #     White  = nearby non-critical
-            ped_half_w = expert.config.pedestrian_lane_half_width
+            ped_half_w = max(
+                float(getattr(expert, "_cached_half_lane", expert.config.lane_half_width)),
+                float(expert.config.lane_half_width),
+            )
             ped_emrg_dist = (
                 float(getattr(expert.config, "pedestrian_emergency_distance", 6.0)) + 5.0
             )
@@ -1191,6 +1194,7 @@ class ExpertDataCollector:
                 pred_ahead = bool(p_info.get("predicted_ahead", p_info.get("is_ahead", False)))
                 pred_lateral = float(p_info.get("predicted_lateral", lateral))
                 pred_dist = float(p_info.get("predicted_distance", p_info.get("distance", 0.0)))
+                effective_dist = min(float(p_info.get("distance", pred_dist)), pred_dist)
 
                 in_lane_now = bool(p_info.get("is_ahead", False)) and abs(lateral) < ped_half_w
                 in_lane_pred = pred_ahead and abs(pred_lateral) < ped_half_w
@@ -1203,7 +1207,7 @@ class ExpertDataCollector:
 
                 emergency_now = in_lane_now and longitudinal <= ped_emrg_dist
                 emergency_pred = in_lane_pred and pred_long <= ped_emrg_dist
-                emergency_dist = risk and float(p_info.get("distance", 999.0)) <= ped_emrg_dist
+                emergency_dist = risk and effective_dist <= ped_emrg_dist
                 emergency = emergency_now or emergency_pred or emergency_dist
 
                 if emergency:
@@ -1224,7 +1228,7 @@ class ExpertDataCollector:
                 )
                 debug.draw_string(
                     carla.Location(px, py, pz + 0.5),
-                    f"{p_info['distance']:.0f}m",
+                    f"{effective_dist:.0f}m",
                     draw_shadow=True,
                     color=p_color,
                     life_time=life,
@@ -1603,22 +1607,18 @@ class ExpertDataCollector:
         spd = info.current_speed if info is not None else 0.0
         tgt = info.target_speed if info is not None else 0.0
 
-        # Lead vehicle distance from nearby_vehicles (union check)
+        # Lead distance from the same gating logic used by runtime control.
         lead_str = "--"
-        half_w = getattr(expert, "_cached_half_lane", expert.config.lane_half_width)
-        allow_lateral_fallback = bool(
-            getattr(expert.config, "vehicle_allow_lateral_fallback", True)
-        )
         if info is not None:
-            for v_info in info.nearby_vehicles:
-                is_ahead_same = v_info["is_ahead"] and v_info["same_direction"]
-                if allow_lateral_fallback:
-                    in_lane = v_info["obb_in_lane"] or abs(v_info["lateral"]) < half_w
-                else:
-                    in_lane = bool(v_info["obb_in_lane"])
-                if is_ahead_same and in_lane:
-                    lead_str = f"{v_info['distance']:.0f}m"
-                    break
+            try:
+                lead_dist, _lead_speed, _lead_lat = expert._lead_vehicle_info(
+                    info.nearby_vehicles,
+                    float(info.current_speed),
+                )
+            except (AttributeError, RuntimeError, TypeError, ValueError):
+                lead_dist = None
+            if lead_dist is not None:
+                lead_str = f"{lead_dist:.0f}m"
 
         hud_text = f"F{frame_idx} | {mode_name}\n" f"{spd:.0f}/{tgt:.0f} km/h | lead:{lead_str}"
         debug.draw_string(
