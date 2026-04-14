@@ -548,6 +548,8 @@ class PrivilegedExpert:
         self._policy_last_location: Any | None = None
         self._policy_last_lane_change_distance: float = -1e9
         self._policy_last_roundabout_lane_change_distance: float = -1e9
+        self._topology_cycle_road_ids: set[int] = set()
+        self._rebuild_topology_cycle_cache()
 
     # ------------------------------------------------------------------
     # Route management
@@ -1233,6 +1235,69 @@ class PrivilegedExpert:
             end = min(self._route_index + lookahead, self._route_length)
             sources.extend(self._route[self._route_index : end])
         return sources
+
+    def _rebuild_topology_cycle_cache(self) -> None:
+        """Cache road IDs that participate in cycles in map topology graph."""
+        self._topology_cycle_road_ids = set()
+
+        try:
+            topology_edges = list(self.map.get_topology())
+        except (AttributeError, RuntimeError, TypeError):
+            return
+        if not topology_edges:
+            return
+
+        graph: dict[int, set[int]] = {}
+        reverse_graph: dict[int, set[int]] = {}
+        for wp_a, wp_b in topology_edges:
+            try:
+                road_a = int(wp_a.road_id)
+                road_b = int(wp_b.road_id)
+            except (AttributeError, TypeError, ValueError):
+                continue
+            graph.setdefault(road_a, set()).add(road_b)
+            graph.setdefault(road_b, set())
+            reverse_graph.setdefault(road_b, set()).add(road_a)
+            reverse_graph.setdefault(road_a, set())
+
+        nodes = set(graph) | set(reverse_graph)
+        if not nodes:
+            return
+
+        visited: set[int] = set()
+        order: list[int] = []
+
+        def _dfs_forward(node: int) -> None:
+            visited.add(node)
+            for nxt in graph.get(node, ()):  # pragma: no branch - tiny helper
+                if nxt not in visited:
+                    _dfs_forward(nxt)
+            order.append(node)
+
+        for node in nodes:
+            if node not in visited:
+                _dfs_forward(node)
+
+        visited.clear()
+
+        def _dfs_reverse(node: int, comp: set[int]) -> None:
+            visited.add(node)
+            comp.add(node)
+            for nxt in reverse_graph.get(node, ()):  # pragma: no branch - tiny helper
+                if nxt not in visited:
+                    _dfs_reverse(nxt, comp)
+
+        for node in reversed(order):
+            if node in visited:
+                continue
+            comp: set[int] = set()
+            _dfs_reverse(node, comp)
+            if len(comp) > 1:
+                self._topology_cycle_road_ids.update(comp)
+            elif len(comp) == 1:
+                singleton = next(iter(comp))
+                if singleton in graph.get(singleton, set()):
+                    self._topology_cycle_road_ids.add(singleton)
 
     def _fill_junction_gaps(self, transform: "carla.Transform" | None = None) -> None:
         """Insert intermediate waypoints where the buffer has large gaps.
@@ -1932,7 +1997,7 @@ class PrivilegedExpert:
         return has_turn and not has_straight
 
     def _is_roundabout_context(self, ego_wp: Any) -> bool:
-        """Heuristic roundabout context using local branching near junctions."""
+        """Infer roundabout context from route-local command mix and topology."""
         if ego_wp is None:
             return False
 
@@ -1943,9 +2008,47 @@ class PrivilegedExpert:
                 self._dist_to_next_junction > 0.0
                 and self._dist_to_next_junction <= float(cfg.planner_roundabout_context_window_m)
             )
-        if not near_junction:
-            return False
+        # Do not early-return here: roundabout body segments are often
+        # not flagged as junction in CARLA, so topology evidence may be
+        # the only reliable context signal.
 
+        # Route-window snapshot around ego.
+        window_m = max(5.0, float(cfg.planner_roundabout_context_window_m))
+        route_window: list[tuple[Any, RoadOption]] = []
+        accum = 0.0
+        prev_loc = ego_wp.transform.location
+        for rwp, rcmd in self._route_waypoint_sources(lookahead=240):
+            wp_loc = rwp.transform.location
+            try:
+                accum += prev_loc.distance(wp_loc)
+            except (AttributeError, RuntimeError, TypeError):
+                break
+            prev_loc = wp_loc
+            if accum > window_m:
+                break
+            route_window.append((rwp, rcmd))
+
+        route_road_ids = {
+            int(getattr(rwp, "road_id", -999999))
+            for rwp, _ in route_window
+            if getattr(rwp, "road_id", None) is not None
+        }
+        cmds = [cmd for _rwp, cmd in route_window]
+        has_leftward = any(cmd in (RoadOption.LEFT, RoadOption.CHANGELANELEFT) for cmd in cmds)
+        has_rightward = any(cmd in (RoadOption.RIGHT, RoadOption.CHANGELANERIGHT) for cmd in cmds)
+        has_straight = any(cmd == RoadOption.STRAIGHT for cmd in cmds)
+
+        topology_cycle_hit = bool(
+            route_road_ids.intersection(self._topology_cycle_road_ids)
+            or int(getattr(ego_wp, "road_id", -1)) in self._topology_cycle_road_ids
+        )
+        roundabout_mix = (has_leftward and has_rightward) or (
+            has_straight and (has_leftward or has_rightward)
+        )
+        if topology_cycle_hit and roundabout_mix:
+            return True
+
+        # Legacy fallback for sparse topology APIs / synthetic unit tests.
         try:
             nexts = ego_wp.next(2.0)
         except (AttributeError, RuntimeError, TypeError):
