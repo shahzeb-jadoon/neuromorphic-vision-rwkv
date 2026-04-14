@@ -92,6 +92,7 @@ STRAIGHT_EXIT_LANE_VIOLATION = "straight_exit_lane_violation"  # (N,) int8
 LEGALITY_WRONG_WAY_FILTERED = "legality_wrong_way_filtered"  # (N,) int32 cumulative
 LEGALITY_DO_NOT_ENTER_FILTERED = "legality_do_not_enter_filtered"  # (N,) int32 cumulative
 LEGALITY_TURN_MISMATCH_FILTERED = "legality_turn_mismatch_filtered"  # (N,) int32 cumulative
+LEGALITY_CONTINUITY_KEPT = "legality_continuity_kept"  # (N,) int32 cumulative
 
 # --- Metadata group and attribute names ---
 METADATA_GROUP = "metadata"

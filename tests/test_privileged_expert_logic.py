@@ -95,6 +95,7 @@ def _build_expert() -> PrivilegedExpert:
     expert._legality_wrong_way_filtered = 0
     expert._legality_do_not_enter_filtered = 0
     expert._legality_turn_mismatch_filtered = 0
+    expert._legality_continuity_kept = 0
     expert._policy_distance_traveled = 0.0
     expert._policy_last_location = None
     expert._policy_last_lane_change_distance = -1e9
@@ -674,6 +675,29 @@ def test_route_legality_filters_wrong_way_transition() -> None:
 
     assert [wp for wp, _ in filtered] == [wp0, wp_ok]
     assert expert._legality_wrong_way_filtered >= 1
+
+
+def test_route_legality_continuity_guard_keeps_large_skip_gap() -> None:
+    expert = _build_expert()
+    expert.config.planner_wrong_way_max_yaw_diff_deg = 80.0
+    expert.config.planner_legality_max_skip_gap_m = 5.0
+
+    wp0 = _Waypoint(0.0, 0.0, road_id=1, lane_id=1, yaw=0.0)
+    wrong_way_far = _Waypoint(-20.0, 0.0, road_id=1, lane_id=1, yaw=180.0)
+    wp_ok = _Waypoint(6.0, 0.0, road_id=1, lane_id=1, yaw=0.0)
+
+    filtered = expert._enforce_route_legality(
+        [
+            (wp0, RoadOption.LANEFOLLOW),
+            (wrong_way_far, RoadOption.LANEFOLLOW),
+            (wp_ok, RoadOption.LANEFOLLOW),
+        ]
+    )
+
+    assert filtered[0][0] is wp0
+    assert filtered[1][0] is wrong_way_far
+    assert expert._legality_wrong_way_filtered >= 1
+    assert expert._legality_continuity_kept >= 1
 
 
 def test_route_legality_rejects_lane_sign_flip_without_exception() -> None:

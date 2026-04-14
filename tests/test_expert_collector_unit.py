@@ -143,6 +143,7 @@ class TestHDF5Schema:
             S.PRE_JUNCTION_LANE_CHANGE_VIOLATION,
             S.CONSECUTIVE_LANE_CHANGE_VIOLATION,
             S.STRAIGHT_EXIT_LANE_VIOLATION,
+            S.LEGALITY_CONTINUITY_KEPT,
             S.NEARBY_VEHICLES,
             S.NEARBY_PEDESTRIANS,
         ]:
@@ -217,6 +218,7 @@ class _FakeFrameInfo:
         self.legality_wrong_way_filtered = 0
         self.legality_do_not_enter_filtered = 0
         self.legality_turn_mismatch_filtered = 0
+        self.legality_continuity_kept = 0
 
 
 class TestStreamingEpisodeWriter:
@@ -253,6 +255,7 @@ class TestStreamingEpisodeWriter:
             assert f[S.GAP_FILL_RPCS].shape == (n_frames,)
             assert f[S.PLANNER_POLICY_REASON].shape == (n_frames,)
             assert f[S.PRE_JUNCTION_LANE_CHANGE_VIOLATION].shape == (n_frames,)
+            assert f[S.LEGALITY_CONTINUITY_KEPT].shape == (n_frames,)
             assert S.STATIONARY in f
             assert S.METADATA_GROUP in f
             assert f[S.METADATA_GROUP].attrs[S.META_N_FRAMES] == n_frames

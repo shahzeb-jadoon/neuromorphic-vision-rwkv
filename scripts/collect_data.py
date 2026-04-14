@@ -147,6 +147,7 @@ def build_campaign(
         "planner_lane_change_consecutive_window_m",
         "planner_mandatory_exit_window_m",
         "planner_exit_lane_leave_distance_m",
+        "planner_legality_max_skip_gap_m",
     ]
     for policy_key in float_policy_fields:
         if policy_key in expert_cfg_dict:

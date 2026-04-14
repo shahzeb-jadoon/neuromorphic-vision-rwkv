@@ -227,6 +227,7 @@ class ExpertConfig:
     planner_lane_change_consecutive_window_m: float = 30.0
     planner_mandatory_exit_window_m: float = 30.0
     planner_exit_lane_leave_distance_m: float = 30.0
+    planner_legality_max_skip_gap_m: float = 30.0
 
 
 # ---------------------------------------------------------------------------
@@ -327,6 +328,7 @@ class FrameInfo:
     legality_wrong_way_filtered: int = 0
     legality_do_not_enter_filtered: int = 0
     legality_turn_mismatch_filtered: int = 0
+    legality_continuity_kept: int = 0
 
 
 # ---------------------------------------------------------------------------
@@ -505,6 +507,7 @@ class PrivilegedExpert:
         self._legality_wrong_way_filtered: int = 0
         self._legality_do_not_enter_filtered: int = 0
         self._legality_turn_mismatch_filtered: int = 0
+        self._legality_continuity_kept: int = 0
         self._policy_distance_traveled: float = 0.0
         self._policy_last_location: Any | None = None
         self._policy_last_lane_change_distance: float = -1e9
@@ -769,6 +772,7 @@ class PrivilegedExpert:
             return list(route)
 
         filtered: List[Tuple["carla.Waypoint", RoadOption]] = [route[0]]
+        continuity_kept = 0
         for idx in range(1, len(route)):
             wp_prev, _ = filtered[-1]
             wp_next, cmd_next = route[idx]
@@ -779,6 +783,21 @@ class PrivilegedExpert:
                 count_violation=True,
             ):
                 filtered.append((wp_next, cmd_next))
+                continue
+
+            # Keep continuity when filtering this waypoint would create an
+            # excessive skip gap in the active route geometry.
+            max_skip_gap = float(self.config.planner_legality_max_skip_gap_m)
+            if max_skip_gap > 0.0:
+                try:
+                    skip_gap = wp_prev.transform.location.distance(wp_next.transform.location)
+                except (AttributeError, TypeError):
+                    skip_gap = 0.0
+                if skip_gap > max_skip_gap:
+                    filtered.append((wp_next, cmd_next))
+                    continuity_kept += 1
+
+        self._legality_continuity_kept += continuity_kept
 
         if len(filtered) < 2:
             logger.warning(
@@ -795,6 +814,11 @@ class PrivilegedExpert:
                 len(route),
                 len(filtered),
             )
+        if continuity_kept > 0:
+            logger.info(
+                "Legality continuity guard kept %d transitions due to large skip gaps",
+                continuity_kept,
+            )
         return filtered
 
     def set_route(self, route: List[Tuple["carla.Waypoint", RoadOption]]) -> None:
@@ -810,6 +834,7 @@ class PrivilegedExpert:
         self._legality_wrong_way_filtered = 0
         self._legality_do_not_enter_filtered = 0
         self._legality_turn_mismatch_filtered = 0
+        self._legality_continuity_kept = 0
         self._policy_distance_traveled = 0.0
         self._policy_last_location = None
         self._policy_last_lane_change_distance = -1e9
@@ -1057,6 +1082,7 @@ class PrivilegedExpert:
             legality_wrong_way_filtered=self._legality_wrong_way_filtered,
             legality_do_not_enter_filtered=self._legality_do_not_enter_filtered,
             legality_turn_mismatch_filtered=self._legality_turn_mismatch_filtered,
+            legality_continuity_kept=self._legality_continuity_kept,
         )
 
         return control, info

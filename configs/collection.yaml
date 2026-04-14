@@ -47,6 +47,7 @@ expert:
   planner_lane_change_consecutive_window_m: 30.0
   planner_mandatory_exit_window_m: 30.0
   planner_exit_lane_leave_distance_m: 30.0
+  planner_legality_max_skip_gap_m: 30.0
 
 # Towns for training data collection
 towns:
