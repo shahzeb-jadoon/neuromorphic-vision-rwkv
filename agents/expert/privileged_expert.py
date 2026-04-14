@@ -864,6 +864,9 @@ class PrivilegedExpert:
         self._frame_turn_lane_legality_violation = 0
         self._frame_roundabout_lane_change_violation = 0
         self._frame_route_watchdog_triggered = 0
+        self._frame_turn_lane_legality_violation = 0
+        self._frame_roundabout_lane_change_violation = 0
+        self._frame_route_watchdog_triggered = 0
         self._legality_wrong_way_filtered = 0
         self._legality_do_not_enter_filtered = 0
         self._legality_turn_mismatch_filtered = 0
