@@ -84,7 +84,10 @@ def _build_expert() -> PrivilegedExpert:
     expert._gap_fill_rpcs = 0
     expert._gap_fill_diverged = 0
     expert._gap_fill_budget_exhausted = False
-    expert._gap_fill_tried = set()
+    expert._gap_fill_rpc_tried = set()
+    expert._gap_fill_bezier_tried = set()
+    expert._gap_fill_rpc_attempts = {}
+    expert._gap_fill_bezier_attempts = {}
     expert._arc_buffer = deque()
     expert._planner_policy_reason = PlannerPolicyReason.NONE
     expert._planner_policy_exception = PlannerPolicyException.NONE
@@ -554,6 +557,40 @@ def test_fill_junction_gaps_does_not_start_second_arc_while_one_is_active() -> N
     assert (
         expert._arc_buffer[0][0] is sentinel_arc_wp
     ), "_arc_buffer was overwritten while an arc was already active"
+
+
+def test_fill_junction_gaps_allows_rpc_retry_after_bezier_failure() -> None:
+    expert = _build_expert()
+    expert.config.gap_fill_bezier_retry_limit = 1
+    expert.config.gap_fill_rpc_retry_limit = 1
+
+    wp_prev = _Waypoint(0.0, 0.0, road_id=10, lane_id=1, yaw=0.0)
+    wp_next = _Waypoint(8.0, 0.0, road_id=10, lane_id=1, yaw=0.0)
+    wp2 = _Waypoint(2.0, 0.0, road_id=10, lane_id=1, yaw=0.0)
+    wp4 = _Waypoint(4.0, 0.0, road_id=10, lane_id=1, yaw=0.0)
+    wp7 = _Waypoint(7.0, 0.0, road_id=10, lane_id=1, yaw=0.0)
+
+    wp_prev._nexts = [wp2]
+    wp2._nexts = [wp4]
+    wp4._nexts = [wp7]
+    wp7._nexts = []
+
+    expert._wp_buffer = deque([(wp_prev, RoadOption.LANEFOLLOW), (wp_next, RoadOption.LANEFOLLOW)])
+
+    # First pass: Bezier fails while RPC is temporarily marked exhausted.
+    pair_key = (wp_prev.id, wp_next.id)
+    expert._gap_fill_rpc_attempts[pair_key] = 1
+    expert.map = SimpleNamespace(get_waypoint=lambda _loc: None)
+    expert._fill_junction_gaps(None)
+    assert pair_key in expert._gap_fill_bezier_tried
+    assert pair_key not in expert._gap_fill_rpc_tried
+    assert expert._gap_fill_rpcs == 0
+
+    # Second pass: enable RPC retries; pair should still be RPC-eligible.
+    expert._gap_fill_rpc_attempts[pair_key] = 0
+    expert._fill_junction_gaps(None)
+    assert pair_key in expert._gap_fill_rpc_tried
+    assert expert._gap_fill_rpcs > 0
 
 
 def test_advance_route_uses_segment_progress_even_when_heading_would_disagree() -> None:

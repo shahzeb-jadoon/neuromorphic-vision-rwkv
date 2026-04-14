@@ -203,6 +203,9 @@ class ExpertConfig:
     gap_fill_diverge_factor: float = 2.0
     gap_fill_rpc_budget: int = 50_000
     gap_fill_bezier_enabled: bool = True
+    gap_fill_bezier_retry_limit: int = 2
+    gap_fill_rpc_retry_limit: int = 2
+    gap_fill_bezier_max_pair_index: int = 2
     gap_fill_bezier_step: float = 0.5  # metres
     gap_fill_bezier_tangent_factor: float = 0.35  # control-handle length = gap * factor
     gap_fill_bezier_max_project_error: float = 2.5  # metres
@@ -460,7 +463,10 @@ class PrivilegedExpert:
         self._gap_fill_rpcs: int = 0
         self._gap_fill_diverged: int = 0
         self._gap_fill_budget_exhausted: bool = False
-        self._gap_fill_tried: set = set()  # (wp_prev.id, wp_next.id) pairs already probed
+        self._gap_fill_rpc_tried: set[tuple[int, int]] = set()
+        self._gap_fill_bezier_tried: set[tuple[int, int]] = set()
+        self._gap_fill_rpc_attempts: dict[tuple[int, int], int] = {}
+        self._gap_fill_bezier_attempts: dict[tuple[int, int], int] = {}
         # Bezier arc buffer — populated by _fill_junction_gaps, consumed by
         # _advance_route.  Kept separate from _wp_buffer so arc traversal
         # never modifies the route tracking state.
@@ -853,7 +859,10 @@ class PrivilegedExpert:
         self._gap_fill_rpcs = 0
         self._gap_fill_diverged = 0
         self._gap_fill_budget_exhausted = False
-        self._gap_fill_tried = set()
+        self._gap_fill_rpc_tried = set()
+        self._gap_fill_bezier_tried = set()
+        self._gap_fill_rpc_attempts = {}
+        self._gap_fill_bezier_attempts = {}
         self._fill_buffer()
         self.speed_pid.reset()
         self.steer_pid.reset()
@@ -1274,9 +1283,20 @@ class PrivilegedExpert:
             gap = wp_prev.transform.location.distance(wp_next.transform.location)
 
             if gap > _GAP_THRESHOLD:
-                # Skip gaps we've already probed and found diverging.
                 pair_key = (wp_prev.id, wp_next.id)
-                if pair_key in self._gap_fill_tried:
+                bezier_retries = max(1, int(cfg.gap_fill_bezier_retry_limit))
+                rpc_retries = max(1, int(cfg.gap_fill_rpc_retry_limit))
+                bezier_attempts = self._gap_fill_bezier_attempts.get(pair_key, 0)
+                rpc_attempts = self._gap_fill_rpc_attempts.get(pair_key, 0)
+                bezier_allowed = (
+                    cfg.gap_fill_bezier_enabled
+                    and not self._arc_buffer
+                    and j <= max(1, int(cfg.gap_fill_bezier_max_pair_index))
+                    and bezier_attempts < bezier_retries
+                )
+                rpc_allowed = rpc_attempts < rpc_retries
+
+                if not bezier_allowed and not rpc_allowed:
                     rebuilt.append((wp_next, cmd_next))
                     continue
 
@@ -1298,7 +1318,9 @@ class PrivilegedExpert:
                 # that are 50-100 m away, causing wpd to grow to 100m+.
                 # Skip if a Bezier arc is already active — don't start a second.
                 bezier_fills: list[tuple[Any, RoadOption]] | None = None
-                if cfg.gap_fill_bezier_enabled and not self._arc_buffer and j == 1:
+                if bezier_allowed:
+                    self._gap_fill_bezier_tried.add(pair_key)
+                    self._gap_fill_bezier_attempts[pair_key] = bezier_attempts + 1
                     target_loc = wp_next.transform.location
                     yaw0 = math.radians(float(wp_prev.transform.rotation.yaw))
                     yaw3 = math.radians(float(wp_next.transform.rotation.yaw))
@@ -1374,7 +1396,6 @@ class PrivilegedExpert:
                             bezier_fills = tentative_curve
 
                 if bezier_fills:
-                    self._gap_fill_tried.add(pair_key)
                     # Store arc in the dedicated arc buffer — do NOT insert
                     # into rebuilt.  This keeps _wp_buffer free of arc points
                     # so route tracking is never corrupted by overflow.
@@ -1382,7 +1403,9 @@ class PrivilegedExpert:
                     # append below, so _wp_buffer always has the correct exit.
                     self._arc_buffer = deque(bezier_fills)
                     # (fall through to wp_next append; skip RPC fallback)
-                else:
+                elif rpc_allowed:
+                    self._gap_fill_rpc_tried.add(pair_key)
+                    self._gap_fill_rpc_attempts[pair_key] = rpc_attempts + 1
                     # Accumulate fills tentatively — only commit if they
                     # actually converge toward wp_next.  If the loop exits
                     # via the divergence guard or iteration cap WITHOUT
@@ -1419,9 +1442,6 @@ class PrivilegedExpert:
                     # Diverging fills (wrong road) are silently discarded —
                     # the original gap is preserved, which is harmless
                     # (the corridor just has one longer segment there).
-                    # Mark this pair as tried either way so we don't
-                    # re-probe it on subsequent frames.
-                    self._gap_fill_tried.add(pair_key)
                     if converged and tentative:
                         rebuilt.extend(tentative)
                     elif tentative:
