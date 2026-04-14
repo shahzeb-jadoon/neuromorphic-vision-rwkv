@@ -880,9 +880,15 @@ def test_turn_lane_legality_blocks_unsupported_turn_command() -> None:
     expert.config.planner_turn_lane_validation_enabled = True
 
     ego_wp = _Waypoint(0.0, 0.0, road_id=1, lane_id=1, yaw=0.0)
-    left_branch = _Waypoint(5.0, 5.0, road_id=2, lane_id=1, yaw=45.0)
-    ego_wp._nexts = [left_branch]
-    expert._wp_buffer = deque([(ego_wp, RoadOption.LANEFOLLOW)])
+    approach_wp = _Waypoint(8.0, 0.0, road_id=1, lane_id=1, yaw=0.0)
+    left_turn_wp = _Waypoint(12.0, 0.0, road_id=2, lane_id=1, yaw=45.0)
+    left_turn_wp.is_junction = True
+    expert._wp_buffer = deque(
+        [
+            (approach_wp, RoadOption.LANEFOLLOW),
+            (left_turn_wp, RoadOption.LEFT),
+        ]
+    )
 
     label = expert._apply_lane_change_policy(RoadOption.RIGHT, ego_wp, _Loc(0.0, 0.0))
 
@@ -896,9 +902,15 @@ def test_turn_lane_legality_allows_supported_turn_command() -> None:
     expert.config.planner_turn_lane_validation_enabled = True
 
     ego_wp = _Waypoint(0.0, 0.0, road_id=1, lane_id=1, yaw=0.0)
-    left_branch = _Waypoint(5.0, 5.0, road_id=2, lane_id=1, yaw=45.0)
-    ego_wp._nexts = [left_branch]
-    expert._wp_buffer = deque([(ego_wp, RoadOption.LANEFOLLOW)])
+    approach_wp = _Waypoint(8.0, 0.0, road_id=1, lane_id=1, yaw=0.0)
+    left_turn_wp = _Waypoint(12.0, 0.0, road_id=2, lane_id=1, yaw=45.0)
+    left_turn_wp.is_junction = True
+    expert._wp_buffer = deque(
+        [
+            (approach_wp, RoadOption.LANEFOLLOW),
+            (left_turn_wp, RoadOption.LEFT),
+        ]
+    )
 
     label = expert._apply_lane_change_policy(RoadOption.LEFT, ego_wp, _Loc(0.0, 0.0))
 

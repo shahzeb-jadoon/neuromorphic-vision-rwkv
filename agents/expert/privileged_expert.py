@@ -1755,26 +1755,48 @@ class PrivilegedExpert:
     def _is_lane_change_command(cmd: RoadOption) -> bool:
         return cmd in (RoadOption.CHANGELANELEFT, RoadOption.CHANGELANERIGHT)
 
-    def _lane_supports_turn_command(self, ego_wp: Any, cmd: RoadOption) -> bool:
-        """Return True when lane topology supports the requested LEFT/RIGHT."""
+    def _lane_supports_turn_command(self, cmd: RoadOption, ego_loc: Any) -> bool:
+        """Return True when near-term route topology supports the requested turn.
+
+        The old immediate ``ego_wp.next(2.0)`` check under-reported valid turns
+        on approach lanes because CARLA often exposes only straight successors
+        until the ego is almost inside the junction connector.  Here we validate
+        against short route lookahead only when a junction is imminent.
+        """
         if cmd not in (RoadOption.LEFT, RoadOption.RIGHT):
             return True
 
-        try:
-            nexts = ego_wp.next(2.0)
-        except (AttributeError, RuntimeError, TypeError):
-            return True
-        if not nexts:
+        cfg = self.config
+        window_m = max(0.0, float(cfg.planner_lane_change_freeze_distance_m))
+        if window_m <= 0.0:
             return True
 
-        signed_angles = [self._transition_signed_angle_deg(ego_wp, cand) for cand in nexts]
-        valid_angles = [a for a in signed_angles if a is not None]
-        if not valid_angles:
+        # Distance-gated: do not enforce turn-lane legality far from the turn.
+        if self._dist_to_next_junction <= 0.0 or self._dist_to_next_junction > window_m:
             return True
 
-        if cmd == RoadOption.LEFT:
-            return any(a > 35.0 for a in valid_angles)
-        return any(a < -35.0 for a in valid_angles)
+        # Scan short route lookahead for the first explicit turn command.
+        first_turn: RoadOption | None = None
+        accum = 0.0
+        prev_loc = ego_loc
+        preview_limit = window_m + 5.0
+        for rwp, rcmd in self._route_waypoint_sources(lookahead=120):
+            wp_loc = rwp.transform.location
+            try:
+                accum += prev_loc.distance(wp_loc)
+            except (AttributeError, RuntimeError, TypeError):
+                return True
+            prev_loc = wp_loc
+            if accum > preview_limit:
+                break
+            if rcmd in (RoadOption.LEFT, RoadOption.RIGHT):
+                first_turn = rcmd
+                break
+
+        # Fail open when route preview is ambiguous.
+        if first_turn is None:
+            return True
+        return first_turn == cmd
 
     def _is_mandatory_exit_lane_change(self, ego_loc: Any) -> bool:
         """Heuristic: lane change is mandatory only within a local lookahead window."""
@@ -1911,7 +1933,7 @@ class PrivilegedExpert:
             cfg.planner_turn_lane_validation_enabled
             and out_label in (RoadOption.LEFT, RoadOption.RIGHT)
             and ego_wp is not None
-            and not self._lane_supports_turn_command(ego_wp, out_label)
+            and not self._lane_supports_turn_command(out_label, ego_loc)
         ):
             self._planner_policy_reason = PlannerPolicyReason.TURN_LANE_LEGALITY_BLOCKED
             self._frame_turn_lane_legality_violation = 1
