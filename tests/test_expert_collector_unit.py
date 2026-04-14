@@ -148,6 +148,7 @@ class TestHDF5Schema:
             S.ROUTE_WATCHDOG_TRIGGERED,
             S.NEARBY_VEHICLES,
             S.NEARBY_PEDESTRIANS,
+            S.ROUNDABOUT_LANE_CHANGE_VIOLATION,
         ]:
             assert isinstance(field, str)
             assert len(field) > 0
@@ -218,6 +219,7 @@ class _FakeFrameInfo:
         self.consecutive_lane_change_violation = 0
         self.straight_exit_lane_violation = 0
         self.turn_lane_legality_violation = 0
+        self.roundabout_lane_change_violation = 0
         self.legality_wrong_way_filtered = 0
         self.legality_do_not_enter_filtered = 0
         self.legality_turn_mismatch_filtered = 0
@@ -262,6 +264,7 @@ class TestStreamingEpisodeWriter:
             assert f[S.TURN_LANE_LEGALITY_VIOLATION].shape == (n_frames,)
             assert f[S.LEGALITY_CONTINUITY_KEPT].shape == (n_frames,)
             assert f[S.ROUTE_WATCHDOG_TRIGGERED].shape == (n_frames,)
+            assert f[S.ROUNDABOUT_LANE_CHANGE_VIOLATION].shape == (n_frames,)
             assert S.STATIONARY in f
             assert S.METADATA_GROUP in f
             assert f[S.METADATA_GROUP].attrs[S.META_N_FRAMES] == n_frames

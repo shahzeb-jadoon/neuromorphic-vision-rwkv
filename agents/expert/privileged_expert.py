@@ -241,6 +241,9 @@ class ExpertConfig:
     route_watchdog_wp_buffer_head_dist_m: float = 30.0
     route_watchdog_min_corridor_segments: int = 1
     route_watchdog_min_frames: int = 3
+    planner_roundabout_commitment_enabled: bool = True
+    planner_roundabout_context_window_m: float = 35.0
+    planner_roundabout_lane_change_cooldown_m: float = 35.0
 
 
 # ---------------------------------------------------------------------------
@@ -271,6 +274,7 @@ class PlannerPolicyReason(IntEnum):
     CONSECUTIVE_LANE_CHANGE_BLOCKED = auto()
     STRAIGHT_EXIT_LANE_WARNING = auto()
     TURN_LANE_LEGALITY_BLOCKED = auto()
+    ROUNDABOUT_LANE_CHANGE_BLOCKED = auto()
     ROUTE_CONTINUITY_WATCHDOG = auto()
 
 
@@ -341,6 +345,7 @@ class FrameInfo:
     consecutive_lane_change_violation: int = 0
     straight_exit_lane_violation: int = 0
     turn_lane_legality_violation: int = 0
+    roundabout_lane_change_violation: int = 0
     legality_wrong_way_filtered: int = 0
     legality_do_not_enter_filtered: int = 0
     legality_turn_mismatch_filtered: int = 0
@@ -525,6 +530,7 @@ class PrivilegedExpert:
         self._frame_consecutive_lane_change_violation: int = 0
         self._frame_straight_exit_lane_violation: int = 0
         self._frame_turn_lane_legality_violation: int = 0
+        self._frame_roundabout_lane_change_violation: int = 0
         self._frame_route_watchdog_triggered: int = 0
         self._legality_wrong_way_filtered: int = 0
         self._legality_do_not_enter_filtered: int = 0
@@ -534,6 +540,7 @@ class PrivilegedExpert:
         self._policy_distance_traveled: float = 0.0
         self._policy_last_location: Any | None = None
         self._policy_last_lane_change_distance: float = -1e9
+        self._policy_last_roundabout_lane_change_distance: float = -1e9
 
     # ------------------------------------------------------------------
     # Route management
@@ -855,8 +862,7 @@ class PrivilegedExpert:
         self._frame_consecutive_lane_change_violation = 0
         self._frame_straight_exit_lane_violation = 0
         self._frame_turn_lane_legality_violation = 0
-        self._frame_route_watchdog_triggered = 0
-        self._frame_turn_lane_legality_violation = 0
+        self._frame_roundabout_lane_change_violation = 0
         self._frame_route_watchdog_triggered = 0
         self._legality_wrong_way_filtered = 0
         self._legality_do_not_enter_filtered = 0
@@ -866,6 +872,7 @@ class PrivilegedExpert:
         self._policy_distance_traveled = 0.0
         self._policy_last_location = None
         self._policy_last_lane_change_distance = -1e9
+        self._policy_last_roundabout_lane_change_distance = -1e9
 
         route_waypoints = self._densify_route_transitions(route_waypoints)
         route_waypoints = self._enforce_route_legality(route_waypoints)
@@ -908,6 +915,7 @@ class PrivilegedExpert:
         self._frame_consecutive_lane_change_violation = 0
         self._frame_straight_exit_lane_violation = 0
         self._frame_turn_lane_legality_violation = 0
+        self._frame_roundabout_lane_change_violation = 0
         self._frame_route_watchdog_triggered = 0
 
         try:
@@ -984,7 +992,7 @@ class PrivilegedExpert:
 
         nav_label = self._apply_lane_change_policy(nav_label, ego_wp, transform.location)
         if (
-            self._frame_turn_lane_legality_violation > 0
+            (self._frame_turn_lane_legality_violation > 0 or self._frame_roundabout_lane_change_violation > 0)
             and nav_command in (RoadOption.LEFT, RoadOption.RIGHT)
         ):
             nav_command = RoadOption.LANEFOLLOW
@@ -1123,6 +1131,7 @@ class PrivilegedExpert:
             consecutive_lane_change_violation=self._frame_consecutive_lane_change_violation,
             straight_exit_lane_violation=self._frame_straight_exit_lane_violation,
             turn_lane_legality_violation=self._frame_turn_lane_legality_violation,
+            roundabout_lane_change_violation=self._frame_roundabout_lane_change_violation,
             legality_wrong_way_filtered=self._legality_wrong_way_filtered,
             legality_do_not_enter_filtered=self._legality_do_not_enter_filtered,
             legality_turn_mismatch_filtered=self._legality_turn_mismatch_filtered,
@@ -1814,6 +1823,38 @@ class PrivilegedExpert:
         has_turn = any(abs(a) > 35.0 for a in valid_angles)
         return has_turn and not has_straight
 
+    def _is_roundabout_context(self, ego_wp: Any) -> bool:
+        """Heuristic roundabout context using local branching near junctions."""
+        if ego_wp is None:
+            return False
+
+        cfg = self.config
+        near_junction = bool(getattr(ego_wp, "is_junction", False))
+        if not near_junction:
+            near_junction = (
+                self._dist_to_next_junction > 0.0
+                and self._dist_to_next_junction <= float(cfg.planner_roundabout_context_window_m)
+            )
+        if not near_junction:
+            return False
+
+        try:
+            nexts = ego_wp.next(2.0)
+        except (AttributeError, RuntimeError, TypeError):
+            return bool(getattr(ego_wp, "is_junction", False))
+        if not nexts:
+            return bool(getattr(ego_wp, "is_junction", False))
+
+        signed_angles = [self._transition_signed_angle_deg(ego_wp, cand) for cand in nexts]
+        valid_angles = [a for a in signed_angles if a is not None]
+        if not valid_angles:
+            return bool(getattr(ego_wp, "is_junction", False))
+
+        has_left = any(a > 35.0 for a in valid_angles)
+        has_right = any(a < -35.0 for a in valid_angles)
+        has_straight = any(abs(a) <= 30.0 for a in valid_angles)
+        return (has_left and has_right) or (has_straight and (has_left or has_right))
+
     def _apply_lane_change_policy(self, nav_label: RoadOption, ego_wp: Any, ego_loc: Any) -> RoadOption:
         """Apply BR-16/17/18 lane-change policy guardrails to nav labels."""
         cfg = self.config
@@ -1847,6 +1888,21 @@ class PrivilegedExpert:
 
         if self._is_lane_change_command(out_label):
             self._policy_last_lane_change_distance = self._policy_distance_traveled
+
+        if (
+            cfg.planner_roundabout_commitment_enabled
+            and self._is_lane_change_command(out_label)
+            and self._is_roundabout_context(ego_wp)
+        ):
+            dist_since_roundabout_lane_change = (
+                self._policy_distance_traveled - self._policy_last_roundabout_lane_change_distance
+            )
+            if dist_since_roundabout_lane_change < cfg.planner_roundabout_lane_change_cooldown_m:
+                self._planner_policy_reason = PlannerPolicyReason.ROUNDABOUT_LANE_CHANGE_BLOCKED
+                self._frame_roundabout_lane_change_violation = 1
+                out_label = RoadOption.LANEFOLLOW
+            else:
+                self._policy_last_roundabout_lane_change_distance = self._policy_distance_traveled
 
         if (
             cfg.planner_turn_lane_validation_enabled

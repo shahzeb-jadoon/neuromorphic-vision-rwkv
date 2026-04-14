@@ -157,6 +157,8 @@ def build_campaign(
         "oncoming_lead_longitudinal_max_m",
         "oncoming_lead_ttc_max_s",
         "oncoming_lead_min_closing_speed_kmh",
+        "planner_roundabout_context_window_m",
+        "planner_roundabout_lane_change_cooldown_m",
     ]
     for policy_key in float_policy_fields:
         if policy_key in expert_cfg_dict:
@@ -170,6 +172,7 @@ def build_campaign(
         "route_watchdog_enabled",
         "vehicle_allow_lateral_fallback",
         "vehicle_oncoming_conflict_gate_enabled",
+        "planner_roundabout_commitment_enabled",
     ]
     for policy_key in bool_policy_fields:
         if policy_key in expert_cfg_dict:

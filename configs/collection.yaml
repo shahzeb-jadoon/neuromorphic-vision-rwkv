@@ -60,6 +60,9 @@ expert:
   route_watchdog_wp_buffer_head_dist_m: 30.0
   route_watchdog_min_corridor_segments: 1
   route_watchdog_min_frames: 3
+  planner_roundabout_commitment_enabled: true
+  planner_roundabout_context_window_m: 35.0
+  planner_roundabout_lane_change_cooldown_m: 35.0
 
 # Towns for training data collection
 towns:

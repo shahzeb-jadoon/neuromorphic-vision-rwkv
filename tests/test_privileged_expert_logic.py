@@ -96,6 +96,7 @@ def _build_expert() -> PrivilegedExpert:
     expert._frame_consecutive_lane_change_violation = 0
     expert._frame_straight_exit_lane_violation = 0
     expert._frame_turn_lane_legality_violation = 0
+    expert._frame_roundabout_lane_change_violation = 0
     expert._frame_route_watchdog_triggered = 0
     expert._legality_wrong_way_filtered = 0
     expert._legality_do_not_enter_filtered = 0
@@ -105,6 +106,7 @@ def _build_expert() -> PrivilegedExpert:
     expert._policy_distance_traveled = 0.0
     expert._policy_last_location = None
     expert._policy_last_lane_change_distance = -1e9
+    expert._policy_last_roundabout_lane_change_distance = -1e9
     setattr(expert, "_route_curvature", lambda: 0.0)
     expert.vehicle = SimpleNamespace(
         bounding_box=SimpleNamespace(extent=SimpleNamespace(y=1.0)),
@@ -902,6 +904,61 @@ def test_turn_lane_legality_allows_supported_turn_command() -> None:
 
     assert label == RoadOption.LEFT
     assert expert._frame_turn_lane_legality_violation == 0
+
+
+def test_roundabout_lane_change_cooldown_blocks_repeated_change() -> None:
+    expert = _build_expert()
+    expert.config.planner_roundabout_commitment_enabled = True
+    expert.config.planner_roundabout_lane_change_cooldown_m = 35.0
+    expert.config.planner_roundabout_context_window_m = 40.0
+    expert.config.planner_lane_change_freeze_distance_m = 0.0
+    expert.config.planner_lane_change_consecutive_window_m = 0.0
+    expert._policy_distance_traveled = 120.0
+    expert._policy_last_lane_change_distance = 0.0
+    expert._policy_last_roundabout_lane_change_distance = 100.0
+
+    ego_wp = _Waypoint(0.0, 0.0, road_id=1, lane_id=1, yaw=0.0)
+    ego_wp.is_junction = True
+    left_next = _Waypoint(2.0, 2.0, road_id=2, lane_id=1, yaw=45.0)
+    right_next = _Waypoint(2.0, -2.0, road_id=3, lane_id=1, yaw=-45.0)
+    ego_wp._nexts = [left_next, right_next]
+
+    junc_wp = _Waypoint(8.0, 0.0, road_id=1, lane_id=1)
+    junc_wp.is_junction = True
+    expert._wp_buffer = deque([(junc_wp, RoadOption.LANEFOLLOW)])
+
+    label = expert._apply_lane_change_policy(RoadOption.CHANGELANELEFT, ego_wp, _Loc(0.0, 0.0))
+
+    assert label == RoadOption.LANEFOLLOW
+    assert expert._frame_roundabout_lane_change_violation == 1
+    assert expert._planner_policy_reason == PlannerPolicyReason.ROUNDABOUT_LANE_CHANGE_BLOCKED
+
+
+def test_roundabout_lane_change_allowed_after_cooldown_distance() -> None:
+    expert = _build_expert()
+    expert.config.planner_roundabout_commitment_enabled = True
+    expert.config.planner_roundabout_lane_change_cooldown_m = 35.0
+    expert.config.planner_roundabout_context_window_m = 40.0
+    expert.config.planner_lane_change_freeze_distance_m = 0.0
+    expert.config.planner_lane_change_consecutive_window_m = 0.0
+    expert._policy_distance_traveled = 180.0
+    expert._policy_last_lane_change_distance = 0.0
+    expert._policy_last_roundabout_lane_change_distance = 100.0
+
+    ego_wp = _Waypoint(0.0, 0.0, road_id=1, lane_id=1, yaw=0.0)
+    ego_wp.is_junction = True
+    left_next = _Waypoint(2.0, 2.0, road_id=2, lane_id=1, yaw=45.0)
+    right_next = _Waypoint(2.0, -2.0, road_id=3, lane_id=1, yaw=-45.0)
+    ego_wp._nexts = [left_next, right_next]
+
+    junc_wp = _Waypoint(8.0, 0.0, road_id=1, lane_id=1)
+    junc_wp.is_junction = True
+    expert._wp_buffer = deque([(junc_wp, RoadOption.LANEFOLLOW)])
+
+    label = expert._apply_lane_change_policy(RoadOption.CHANGELANERIGHT, ego_wp, _Loc(0.0, 0.0))
+
+    assert label == RoadOption.CHANGELANERIGHT
+    assert expert._frame_roundabout_lane_change_violation == 0
 
 
 def test_mandatory_exit_lane_change_requires_turn_within_window() -> None:
