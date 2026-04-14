@@ -12,9 +12,11 @@ v2  Added dual nav labels (planner + heuristic).
 v3  3-camera panoramic, custom expert (PrivilegedExpert), GPS/position
     data, traffic light state, nearby-actor bounding info.  Dropped
     legacy dual labels in favour of a single expert-derived nav command.
+v4  Added explicit nav telemetry channels (route-raw and speed-planning
+    commands) while keeping NAV_COMMAND as the primary training label.
 """
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 # --- Image data ---
 # Schema v3: panoramic image stitched from 3 cameras (H, W_total, 3) uint8.
@@ -27,10 +29,16 @@ THROTTLE = "throttle"
 BRAKE = "brake"
 
 # --- Navigation ---
-# Single ground-truth nav command from the PrivilegedExpert's route.
+# Primary training label after planner-policy filtering.
 # Values match agents.navigation.local_planner.RoadOption:
 #   LEFT=1, RIGHT=2, STRAIGHT=3, LANEFOLLOW=4
 NAV_COMMAND = "nav_command"
+
+# Extra telemetry channels for diagnostics (v4):
+# NAV_COMMAND_ROUTE is the raw route-local command before policy filtering.
+# NAV_COMMAND_SPEED is the command used by speed planning after safety guards.
+NAV_COMMAND_ROUTE = "nav_command_route"
+NAV_COMMAND_SPEED = "nav_command_speed"
 
 # Valid nav command IDs for schema v3 (used by validation / analysis scripts).
 # 1-4 are from RoadOption enum; 5-6 added for lane change support.

@@ -4,7 +4,7 @@ Drives a custom **PrivilegedExpert** agent through pre-planned routes
 while recording per-frame observations (3-camera panoramic, controls,
 navigation commands, ego state, nearby-actor metadata) to HDF5 files.
 
-Schema version: 3 (see ``src/data/hdf5_schema.py``).
+Schema version: 4 (see ``src/data/hdf5_schema.py``).
 
 Key differences from the v2 collector:
     - Uses ``PrivilegedExpert`` (custom PID + privileged perception)
@@ -214,6 +214,12 @@ class _StreamingEpisodeWriter:
         self._ds_nav = self._h5.create_dataset(
             S.NAV_COMMAND, shape=(max_frames,), dtype=np.int32, maxshape=(None,)
         )
+        self._ds_nav_route = self._h5.create_dataset(
+            S.NAV_COMMAND_ROUTE, shape=(max_frames,), dtype=np.int32, maxshape=(None,)
+        )
+        self._ds_nav_speed = self._h5.create_dataset(
+            S.NAV_COMMAND_SPEED, shape=(max_frames,), dtype=np.int32, maxshape=(None,)
+        )
         self._ds_pos = self._h5.create_dataset(
             S.POSITION, shape=(max_frames, 3), dtype=np.float32, maxshape=(None, 3)
         )
@@ -388,6 +394,8 @@ class _StreamingEpisodeWriter:
         self._ds_throttle[i] = float(control.throttle)
         self._ds_brake[i] = float(control.brake)
         self._ds_nav[i] = info.nav_command
+        self._ds_nav_route[i] = info.nav_command_route
+        self._ds_nav_speed[i] = info.nav_command_speed
         self._ds_pos[i] = np.array(info.position, dtype=np.float32)
         self._ds_rot[i] = np.array(info.rotation, dtype=np.float32)
         self._ds_vel[i] = np.array(info.velocity, dtype=np.float32)
@@ -455,6 +463,8 @@ class _StreamingEpisodeWriter:
             self._ds_throttle,
             self._ds_brake,
             self._ds_nav,
+            self._ds_nav_route,
+            self._ds_nav_speed,
             self._ds_pos,
             self._ds_rot,
             self._ds_vel,

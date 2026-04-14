@@ -302,6 +302,8 @@ class FrameInfo:
 
     # Navigation
     nav_command: int  # RoadOption value
+    nav_command_route: int  # pre-policy route-local command (RoadOption)
+    nav_command_speed: int  # command used by speed planner (RoadOption)
     route_completion: float  # 0.0 → 1.0
 
     # Targets
@@ -1003,6 +1005,7 @@ class PrivilegedExpert:
         # --- 2.  Route progress ---
         self._advance_route(transform)
         target_wp, nav_label, nav_command = self._get_target(transform)
+        nav_command_route = nav_label
         ego_wp = self.map.get_waypoint(transform.location)
 
         if self._policy_last_location is not None:
@@ -1119,6 +1122,8 @@ class PrivilegedExpert:
 
         info = FrameInfo(
             nav_command=int(nav_label),
+            nav_command_route=int(nav_command_route),
+            nav_command_speed=int(nav_command),
             route_completion=self.route_completion,
             target_speed=target_speed,
             current_speed=speed_kmh,

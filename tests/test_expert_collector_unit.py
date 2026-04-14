@@ -3,7 +3,7 @@
 Tests the non-CARLA parts: dataclasses, _detect_wsl2_host,
 _StreamingEpisodeWriter, and hash generation. CARLA is mocked where needed.
 
-Updated for schema v3: panoramic images, PrivilegedExpert, no NAV_MAP.
+Updated for schema v4: panoramic images, PrivilegedExpert, nav telemetry channels.
 """
 
 from __future__ import annotations
@@ -116,8 +116,8 @@ class TestDetectWSL2Host:
 class TestHDF5Schema:
     """Tests that schema constants are consistent."""
 
-    def test_schema_version_is_v3(self) -> None:
-        assert S.SCHEMA_VERSION == 3
+    def test_schema_version_is_v4(self) -> None:
+        assert S.SCHEMA_VERSION == 4
 
     def test_required_fields_exist(self) -> None:
         for field in [
@@ -127,6 +127,8 @@ class TestHDF5Schema:
             S.BRAKE,
             S.VELOCITY,
             S.NAV_COMMAND,
+            S.NAV_COMMAND_ROUTE,
+            S.NAV_COMMAND_SPEED,
             S.POSITION,
             S.ROTATION,
             S.TRAFFIC_LIGHT_STATE,
@@ -190,6 +192,8 @@ class _FakeFrameInfo:
 
     def __init__(self, nav_command: int = 4, speed_kmh: float = 30.0):
         self.nav_command = nav_command
+        self.nav_command_route = nav_command
+        self.nav_command_speed = nav_command
         self.position = [10.0, 20.0, 0.5]
         self.rotation = [0.0, 90.0, 0.0]
         self.velocity = [speed_kmh / 3.6, 0.0, 0.0]
@@ -239,7 +243,7 @@ class TestStreamingEpisodeWriter:
         return tmp_path / "episode_test1234.h5"
 
     def test_write_and_finalize(self, filepath: Path, config: EpisodeConfig) -> None:
-        """Writer creates a valid HDF5 file with all schema v3 fields."""
+        """Writer creates a valid HDF5 file with all schema v4 fields."""
         n_frames = 20
         writer = _StreamingEpisodeWriter(filepath, config, max_frames=config.max_frames)
 
@@ -257,6 +261,8 @@ class TestStreamingEpisodeWriter:
         with h5py.File(filepath, "r") as f:
             assert f[S.IMAGES].shape == (n_frames, config.camera_height, pano_w, 3)
             assert f[S.STEERING].shape == (n_frames,)
+            assert f[S.NAV_COMMAND_ROUTE].shape == (n_frames,)
+            assert f[S.NAV_COMMAND_SPEED].shape == (n_frames,)
             assert f[S.POSITION].shape == (n_frames, 3)
             assert f[S.GAP_FILL_RPCS].shape == (n_frames,)
             assert f[S.PLANNER_POLICY_REASON].shape == (n_frames,)
