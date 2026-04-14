@@ -872,6 +872,38 @@ def test_lane_change_freeze_blocks_non_mandatory_change() -> None:
     assert expert._planner_policy_reason == PlannerPolicyReason.PRE_JUNCTION_LANE_CHANGE_BLOCKED
 
 
+def test_mandatory_exit_lane_change_requires_turn_within_window() -> None:
+    expert = _build_expert()
+    expert.config.planner_mandatory_exit_window_m = 30.0
+
+    lc_wp = _Waypoint(10.0, 0.0, road_id=1, lane_id=1)
+    turn_wp = _Waypoint(20.0, 0.0, road_id=2, lane_id=1)
+    expert._wp_buffer = deque(
+        [
+            (lc_wp, RoadOption.CHANGELANELEFT),
+            (turn_wp, RoadOption.RIGHT),
+        ]
+    )
+
+    assert expert._is_mandatory_exit_lane_change(_Loc(0.0, 0.0)) is True
+
+
+def test_mandatory_exit_lane_change_ignores_far_turn_outside_window() -> None:
+    expert = _build_expert()
+    expert.config.planner_mandatory_exit_window_m = 30.0
+
+    lc_wp = _Waypoint(10.0, 0.0, road_id=1, lane_id=1)
+    far_turn_wp = _Waypoint(70.0, 0.0, road_id=2, lane_id=1)
+    expert._wp_buffer = deque(
+        [
+            (lc_wp, RoadOption.CHANGELANELEFT),
+            (far_turn_wp, RoadOption.RIGHT),
+        ]
+    )
+
+    assert expert._is_mandatory_exit_lane_change(_Loc(0.0, 0.0)) is False
+
+
 def test_route_watchdog_triggers_emergency_stop_after_streak() -> None:
     expert = _build_expert()
     expert.config.route_watchdog_enabled = True

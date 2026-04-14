@@ -1729,10 +1729,25 @@ class PrivilegedExpert:
     def _is_lane_change_command(cmd: RoadOption) -> bool:
         return cmd in (RoadOption.CHANGELANELEFT, RoadOption.CHANGELANERIGHT)
 
-    def _is_mandatory_exit_lane_change(self) -> bool:
-        """Heuristic: lane change is mandatory if a turn follows immediately."""
+    def _is_mandatory_exit_lane_change(self, ego_loc: Any) -> bool:
+        """Heuristic: lane change is mandatory only within a local lookahead window."""
+        window_m = max(0.0, float(self.config.planner_mandatory_exit_window_m))
+        if window_m <= 0.0:
+            return False
+
         seen_lane_change = False
+        accum = 0.0
+        prev_loc = ego_loc
         for _wp, cmd in self._wp_buffer:
+            wp_loc = _wp.transform.location
+            try:
+                accum += prev_loc.distance(wp_loc)
+            except (AttributeError, TypeError):
+                return False
+            prev_loc = wp_loc
+            if accum > window_m:
+                break
+
             if cmd in (RoadOption.LANEFOLLOW, RoadOption.VOID):
                 continue
             if self._is_lane_change_command(cmd):
@@ -1772,7 +1787,9 @@ class PrivilegedExpert:
             return nav_label
 
         out_label = nav_label
-        mandatory_exit = self._is_lane_change_command(nav_label) and self._is_mandatory_exit_lane_change()
+        mandatory_exit = self._is_lane_change_command(nav_label) and self._is_mandatory_exit_lane_change(
+            ego_loc
+        )
         if mandatory_exit:
             self._planner_policy_exception = PlannerPolicyException.MANDATORY_EXIT
 
