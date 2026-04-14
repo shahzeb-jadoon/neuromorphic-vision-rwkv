@@ -166,6 +166,7 @@ def build_campaign(
         "planner_policy_enabled",
         "planner_legality_filter_enabled",
         "planner_allow_lane_id_sign_flip",
+        "planner_turn_lane_validation_enabled",
         "route_watchdog_enabled",
         "vehicle_allow_lateral_fallback",
         "vehicle_oncoming_conflict_gate_enabled",

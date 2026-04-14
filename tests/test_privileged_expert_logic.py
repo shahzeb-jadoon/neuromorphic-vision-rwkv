@@ -95,6 +95,7 @@ def _build_expert() -> PrivilegedExpert:
     expert._frame_pre_junction_lane_change_violation = 0
     expert._frame_consecutive_lane_change_violation = 0
     expert._frame_straight_exit_lane_violation = 0
+    expert._frame_turn_lane_legality_violation = 0
     expert._frame_route_watchdog_triggered = 0
     expert._legality_wrong_way_filtered = 0
     expert._legality_do_not_enter_filtered = 0
@@ -870,6 +871,37 @@ def test_lane_change_freeze_blocks_non_mandatory_change() -> None:
     assert label == RoadOption.LANEFOLLOW
     assert expert._frame_pre_junction_lane_change_violation == 1
     assert expert._planner_policy_reason == PlannerPolicyReason.PRE_JUNCTION_LANE_CHANGE_BLOCKED
+
+
+def test_turn_lane_legality_blocks_unsupported_turn_command() -> None:
+    expert = _build_expert()
+    expert.config.planner_turn_lane_validation_enabled = True
+
+    ego_wp = _Waypoint(0.0, 0.0, road_id=1, lane_id=1, yaw=0.0)
+    left_branch = _Waypoint(5.0, 5.0, road_id=2, lane_id=1, yaw=45.0)
+    ego_wp._nexts = [left_branch]
+    expert._wp_buffer = deque([(ego_wp, RoadOption.LANEFOLLOW)])
+
+    label = expert._apply_lane_change_policy(RoadOption.RIGHT, ego_wp, _Loc(0.0, 0.0))
+
+    assert label == RoadOption.LANEFOLLOW
+    assert expert._frame_turn_lane_legality_violation == 1
+    assert expert._planner_policy_reason == PlannerPolicyReason.TURN_LANE_LEGALITY_BLOCKED
+
+
+def test_turn_lane_legality_allows_supported_turn_command() -> None:
+    expert = _build_expert()
+    expert.config.planner_turn_lane_validation_enabled = True
+
+    ego_wp = _Waypoint(0.0, 0.0, road_id=1, lane_id=1, yaw=0.0)
+    left_branch = _Waypoint(5.0, 5.0, road_id=2, lane_id=1, yaw=45.0)
+    ego_wp._nexts = [left_branch]
+    expert._wp_buffer = deque([(ego_wp, RoadOption.LANEFOLLOW)])
+
+    label = expert._apply_lane_change_policy(RoadOption.LEFT, ego_wp, _Loc(0.0, 0.0))
+
+    assert label == RoadOption.LEFT
+    assert expert._frame_turn_lane_legality_violation == 0
 
 
 def test_mandatory_exit_lane_change_requires_turn_within_window() -> None:

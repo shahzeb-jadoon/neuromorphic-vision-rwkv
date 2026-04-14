@@ -50,6 +50,7 @@ expert:
   planner_wrong_way_max_yaw_diff_deg: 110.0
   planner_allow_lane_id_sign_flip: false
   planner_turn_mismatch_threshold_deg: 20.0
+  planner_turn_lane_validation_enabled: true
   planner_lane_change_freeze_distance_m: 30.0
   planner_lane_change_consecutive_window_m: 30.0
   planner_mandatory_exit_window_m: 30.0

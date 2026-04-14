@@ -231,6 +231,7 @@ class ExpertConfig:
     planner_wrong_way_max_yaw_diff_deg: float = 110.0
     planner_allow_lane_id_sign_flip: bool = False
     planner_turn_mismatch_threshold_deg: float = 20.0
+    planner_turn_lane_validation_enabled: bool = True
     planner_lane_change_freeze_distance_m: float = 30.0
     planner_lane_change_consecutive_window_m: float = 30.0
     planner_mandatory_exit_window_m: float = 30.0
@@ -269,6 +270,7 @@ class PlannerPolicyReason(IntEnum):
     PRE_JUNCTION_LANE_CHANGE_BLOCKED = auto()
     CONSECUTIVE_LANE_CHANGE_BLOCKED = auto()
     STRAIGHT_EXIT_LANE_WARNING = auto()
+    TURN_LANE_LEGALITY_BLOCKED = auto()
     ROUTE_CONTINUITY_WATCHDOG = auto()
 
 
@@ -338,6 +340,7 @@ class FrameInfo:
     pre_junction_lane_change_violation: int = 0
     consecutive_lane_change_violation: int = 0
     straight_exit_lane_violation: int = 0
+    turn_lane_legality_violation: int = 0
     legality_wrong_way_filtered: int = 0
     legality_do_not_enter_filtered: int = 0
     legality_turn_mismatch_filtered: int = 0
@@ -521,6 +524,7 @@ class PrivilegedExpert:
         self._frame_pre_junction_lane_change_violation: int = 0
         self._frame_consecutive_lane_change_violation: int = 0
         self._frame_straight_exit_lane_violation: int = 0
+        self._frame_turn_lane_legality_violation: int = 0
         self._frame_route_watchdog_triggered: int = 0
         self._legality_wrong_way_filtered: int = 0
         self._legality_do_not_enter_filtered: int = 0
@@ -850,6 +854,9 @@ class PrivilegedExpert:
         self._frame_pre_junction_lane_change_violation = 0
         self._frame_consecutive_lane_change_violation = 0
         self._frame_straight_exit_lane_violation = 0
+        self._frame_turn_lane_legality_violation = 0
+        self._frame_route_watchdog_triggered = 0
+        self._frame_turn_lane_legality_violation = 0
         self._frame_route_watchdog_triggered = 0
         self._legality_wrong_way_filtered = 0
         self._legality_do_not_enter_filtered = 0
@@ -900,6 +907,7 @@ class PrivilegedExpert:
         self._frame_pre_junction_lane_change_violation = 0
         self._frame_consecutive_lane_change_violation = 0
         self._frame_straight_exit_lane_violation = 0
+        self._frame_turn_lane_legality_violation = 0
         self._frame_route_watchdog_triggered = 0
 
         try:
@@ -975,6 +983,11 @@ class PrivilegedExpert:
         self._policy_last_location = transform.location
 
         nav_label = self._apply_lane_change_policy(nav_label, ego_wp, transform.location)
+        if (
+            self._frame_turn_lane_legality_violation > 0
+            and nav_command in (RoadOption.LEFT, RoadOption.RIGHT)
+        ):
+            nav_command = RoadOption.LANEFOLLOW
 
         buf_len = len(self._wp_buffer)
         buf_head_dist = -1.0
@@ -1109,6 +1122,7 @@ class PrivilegedExpert:
             pre_junction_lane_change_violation=self._frame_pre_junction_lane_change_violation,
             consecutive_lane_change_violation=self._frame_consecutive_lane_change_violation,
             straight_exit_lane_violation=self._frame_straight_exit_lane_violation,
+            turn_lane_legality_violation=self._frame_turn_lane_legality_violation,
             legality_wrong_way_filtered=self._legality_wrong_way_filtered,
             legality_do_not_enter_filtered=self._legality_do_not_enter_filtered,
             legality_turn_mismatch_filtered=self._legality_turn_mismatch_filtered,
@@ -1729,6 +1743,27 @@ class PrivilegedExpert:
     def _is_lane_change_command(cmd: RoadOption) -> bool:
         return cmd in (RoadOption.CHANGELANELEFT, RoadOption.CHANGELANERIGHT)
 
+    def _lane_supports_turn_command(self, ego_wp: Any, cmd: RoadOption) -> bool:
+        """Return True when lane topology supports the requested LEFT/RIGHT."""
+        if cmd not in (RoadOption.LEFT, RoadOption.RIGHT):
+            return True
+
+        try:
+            nexts = ego_wp.next(2.0)
+        except (AttributeError, RuntimeError, TypeError):
+            return True
+        if not nexts:
+            return True
+
+        signed_angles = [self._transition_signed_angle_deg(ego_wp, cand) for cand in nexts]
+        valid_angles = [a for a in signed_angles if a is not None]
+        if not valid_angles:
+            return True
+
+        if cmd == RoadOption.LEFT:
+            return any(a > 35.0 for a in valid_angles)
+        return any(a < -35.0 for a in valid_angles)
+
     def _is_mandatory_exit_lane_change(self, ego_loc: Any) -> bool:
         """Heuristic: lane change is mandatory only within a local lookahead window."""
         window_m = max(0.0, float(self.config.planner_mandatory_exit_window_m))
@@ -1812,6 +1847,16 @@ class PrivilegedExpert:
 
         if self._is_lane_change_command(out_label):
             self._policy_last_lane_change_distance = self._policy_distance_traveled
+
+        if (
+            cfg.planner_turn_lane_validation_enabled
+            and out_label in (RoadOption.LEFT, RoadOption.RIGHT)
+            and ego_wp is not None
+            and not self._lane_supports_turn_command(ego_wp, out_label)
+        ):
+            self._planner_policy_reason = PlannerPolicyReason.TURN_LANE_LEGALITY_BLOCKED
+            self._frame_turn_lane_legality_violation = 1
+            out_label = RoadOption.LANEFOLLOW
 
         in_exit_window = (
             out_label == RoadOption.STRAIGHT

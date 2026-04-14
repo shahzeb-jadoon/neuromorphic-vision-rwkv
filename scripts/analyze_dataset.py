@@ -45,6 +45,9 @@ def analyze_dataset(data_dir: Path, save_samples: int = 0) -> None:
     episode_lengths = []
     policy_episodes = 0
     policy_frames = 0
+    ev03_violations = 0
+    ev03_episodes = 0
+    ev03_frames = 0
     ev08_violations = 0
     ev09_violations = 0
     ev10_violations = 0
@@ -80,6 +83,10 @@ def analyze_dataset(data_dir: Path, save_samples: int = 0) -> None:
             if all(field in f for field in policy_fields):
                 policy_episodes += 1
                 policy_frames += n_frames
+                if S.TURN_LANE_LEGALITY_VIOLATION in f:
+                    ev03_episodes += 1
+                    ev03_frames += n_frames
+                    ev03_violations += int(np.sum(f[S.TURN_LANE_LEGALITY_VIOLATION][:] > 0))
                 ev08_violations += int(np.sum(f[S.PRE_JUNCTION_LANE_CHANGE_VIOLATION][:] > 0))
                 ev09_violations += int(np.sum(f[S.CONSECUTIVE_LANE_CHANGE_VIOLATION][:] > 0))
                 ev10_violations += int(np.sum(f[S.STRAIGHT_EXIT_LANE_VIOLATION][:] > 0))
@@ -158,7 +165,19 @@ def analyze_dataset(data_dir: Path, save_samples: int = 0) -> None:
             status = "PASS" if count == 0 else "FAIL"
             print(f"  {label}: {count} violations ({rate:.2f} / 1k frames) -> {status}")
 
+        def _ev_line_cov(label: str, count: int, frames: int, episodes_with_field: int) -> None:
+            rate = 1000.0 * count / max(frames, 1)
+            status = "PASS" if count == 0 else "FAIL"
+            print(
+                f"  {label}: {count} violations ({rate:.2f} / 1k frames) -> {status} "
+                f"[{episodes_with_field}/{policy_episodes} episodes]"
+            )
+
         print(f"  Episodes with policy telemetry: {policy_episodes}/{len(episodes)}")
+        if ev03_episodes > 0:
+            _ev_line_cov("EV-03 turn-lane legality", ev03_violations, ev03_frames, ev03_episodes)
+        else:
+            print("  EV-03 turn-lane legality: telemetry not present")
         _ev_line("EV-08 pre-junction lane-change", ev08_violations)
         _ev_line("EV-09 consecutive lane-change", ev09_violations)
         _ev_line("EV-10 straight-in-exit-lane", ev10_violations)

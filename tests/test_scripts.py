@@ -207,6 +207,10 @@ class TestAnalyzeDataset:
                 S.STRAIGHT_EXIT_LANE_VIOLATION,
                 data=np.array([0, 0, 0, 1], dtype=np.int8),
             )
+            f.create_dataset(
+                S.TURN_LANE_LEGALITY_VIOLATION,
+                data=np.array([0, 1, 0, 0], dtype=np.int8),
+            )
 
             meta = f.create_group(S.METADATA_GROUP)
             meta.attrs[S.META_TOWN] = "Town01"
@@ -227,7 +231,8 @@ class TestAnalyzeDataset:
 
         assert result.returncode == 0, f"Analysis failed:\n{result.stderr}"
         output = result.stdout
+        assert "ev-03 turn-lane legality: 1 violations" in output.lower()
         assert "pre-junction lane-change: 2 violations" in output
         assert "consecutive lane-change: 1 violations" in output
         assert "straight-in-exit-lane: 1 violations" in output
-        assert output.count("-> FAIL") == 3
+        assert output.count("-> FAIL") == 4

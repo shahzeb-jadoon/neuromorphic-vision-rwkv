@@ -143,6 +143,7 @@ class TestHDF5Schema:
             S.PRE_JUNCTION_LANE_CHANGE_VIOLATION,
             S.CONSECUTIVE_LANE_CHANGE_VIOLATION,
             S.STRAIGHT_EXIT_LANE_VIOLATION,
+            S.TURN_LANE_LEGALITY_VIOLATION,
             S.LEGALITY_CONTINUITY_KEPT,
             S.ROUTE_WATCHDOG_TRIGGERED,
             S.NEARBY_VEHICLES,
@@ -216,6 +217,7 @@ class _FakeFrameInfo:
         self.pre_junction_lane_change_violation = 0
         self.consecutive_lane_change_violation = 0
         self.straight_exit_lane_violation = 0
+        self.turn_lane_legality_violation = 0
         self.legality_wrong_way_filtered = 0
         self.legality_do_not_enter_filtered = 0
         self.legality_turn_mismatch_filtered = 0
@@ -257,6 +259,7 @@ class TestStreamingEpisodeWriter:
             assert f[S.GAP_FILL_RPCS].shape == (n_frames,)
             assert f[S.PLANNER_POLICY_REASON].shape == (n_frames,)
             assert f[S.PRE_JUNCTION_LANE_CHANGE_VIOLATION].shape == (n_frames,)
+            assert f[S.TURN_LANE_LEGALITY_VIOLATION].shape == (n_frames,)
             assert f[S.LEGALITY_CONTINUITY_KEPT].shape == (n_frames,)
             assert f[S.ROUTE_WATCHDOG_TRIGGERED].shape == (n_frames,)
             assert S.STATIONARY in f

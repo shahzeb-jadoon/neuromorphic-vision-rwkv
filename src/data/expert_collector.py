@@ -301,6 +301,12 @@ class _StreamingEpisodeWriter:
             dtype=np.int8,
             maxshape=(None,),
         )
+        self._ds_turn_lane_legality_violation = self._h5.create_dataset(
+            S.TURN_LANE_LEGALITY_VIOLATION,
+            shape=(max_frames,),
+            dtype=np.int8,
+            maxshape=(None,),
+        )
         self._ds_legality_wrong_way_filtered = self._h5.create_dataset(
             S.LEGALITY_WRONG_WAY_FILTERED,
             shape=(max_frames,),
@@ -401,6 +407,7 @@ class _StreamingEpisodeWriter:
         self._ds_pre_junction_lane_change_violation[i] = info.pre_junction_lane_change_violation
         self._ds_consecutive_lane_change_violation[i] = info.consecutive_lane_change_violation
         self._ds_straight_exit_lane_violation[i] = info.straight_exit_lane_violation
+        self._ds_turn_lane_legality_violation[i] = info.turn_lane_legality_violation
         self._ds_legality_wrong_way_filtered[i] = info.legality_wrong_way_filtered
         self._ds_legality_do_not_enter_filtered[i] = info.legality_do_not_enter_filtered
         self._ds_legality_turn_mismatch_filtered[i] = info.legality_turn_mismatch_filtered
@@ -465,6 +472,7 @@ class _StreamingEpisodeWriter:
             self._ds_pre_junction_lane_change_violation,
             self._ds_consecutive_lane_change_violation,
             self._ds_straight_exit_lane_violation,
+            self._ds_turn_lane_legality_violation,
             self._ds_legality_wrong_way_filtered,
             self._ds_legality_do_not_enter_filtered,
             self._ds_legality_turn_mismatch_filtered,

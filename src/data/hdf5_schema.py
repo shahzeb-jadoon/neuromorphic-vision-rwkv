@@ -89,6 +89,7 @@ DIST_TO_NEXT_JUNCTION = "dist_to_next_junction"  # (N,) float32 metres (-1 if un
 PRE_JUNCTION_LANE_CHANGE_VIOLATION = "pre_junction_lane_change_violation"  # (N,) int8
 CONSECUTIVE_LANE_CHANGE_VIOLATION = "consecutive_lane_change_violation"  # (N,) int8
 STRAIGHT_EXIT_LANE_VIOLATION = "straight_exit_lane_violation"  # (N,) int8
+TURN_LANE_LEGALITY_VIOLATION = "turn_lane_legality_violation"  # (N,) int8
 LEGALITY_WRONG_WAY_FILTERED = "legality_wrong_way_filtered"  # (N,) int32 cumulative
 LEGALITY_DO_NOT_ENTER_FILTERED = "legality_do_not_enter_filtered"  # (N,) int32 cumulative
 LEGALITY_TURN_MISMATCH_FILTERED = "legality_turn_mismatch_filtered"  # (N,) int32 cumulative
