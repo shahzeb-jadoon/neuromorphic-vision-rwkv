@@ -75,6 +75,7 @@ def _build_expert() -> PrivilegedExpert:
     expert._smoothed_curvature = 0.0
     expert._wp_buffer = deque()
     expert._route = []
+    expert._route_wp_identity_to_index = {}
     expert._route_index = 0
     expert._route_length = 0
     expert._route_tl_candidates = set()
@@ -90,6 +91,7 @@ def _build_expert() -> PrivilegedExpert:
     expert._gap_fill_bezier_attempts = {}
     expert._gap_fill_pair_blacklist = set()
     expert._arc_buffer = deque()
+    expert._steer_from_arc = 0
     expert._planner_policy_reason = PlannerPolicyReason.NONE
     expert._planner_policy_exception = PlannerPolicyException.NONE
     expert._dist_to_next_junction = -1.0
@@ -110,6 +112,7 @@ def _build_expert() -> PrivilegedExpert:
     expert._policy_last_location = None
     expert._policy_last_lane_change_distance = -1e9
     expert._policy_last_roundabout_lane_change_distance = -1e9
+    expert._policy_block_streak = 0
     expert._topology_cycle_road_ids = set()
     setattr(expert, "_route_curvature", lambda: 0.0)
     expert.vehicle = SimpleNamespace(

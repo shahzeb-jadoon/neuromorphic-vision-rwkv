@@ -337,6 +337,13 @@ class FrameInfo:
     n_corridor_segments: int = 0  # segments built by _build_route_corridor
     wp_buffer_size: int = 0  # current waypoint buffer length
     wp_buffer_head_dist: float = -1.0  # distance (m) from ego to buffer[0]
+    wp_buffer_head_index: int = -1  # route index of buffer[0] (-1 if synthetic/unknown)
+    wp_buffer_head_road_id: int = -1  # road id of buffer[0] waypoint
+    wp_buffer_head_lane_id: int = -1  # lane id of buffer[0] waypoint
+    arc_active: int = 0  # 1 when Bezier arc buffer is currently active
+    arc_size: int = 0  # number of points currently in arc buffer
+    policy_block_streak: int = 0  # consecutive blocked lane-change frames
+    steer_from_arc: int = 0  # 1 when steering target came from arc buffer
     sat_detections: int = 0  # vehicles with obb_in_lane=True
     lateral_detections: int = 0  # vehicles that lateral check would catch
 
@@ -460,6 +467,7 @@ class PrivilegedExpert:
         self._route_length: int = 0
         self._route_index: int = 0
         self._wp_buffer: deque = deque(maxlen=self.config.waypoint_buffer_size)
+        self._route_wp_identity_to_index: Dict[int, int] = {}
 
         # Driving state
         self.mode = DrivingMode.FOLLOW_LANE
@@ -499,6 +507,7 @@ class PrivilegedExpert:
         # _advance_route.  Kept separate from _wp_buffer so arc traversal
         # never modifies the route tracking state.
         self._arc_buffer: deque = deque()
+        self._steer_from_arc: int = 0
         self._stop_sign_wait_counter: int = 0
         self._stop_sign_active: int | None = None  # actor ID
 
@@ -552,6 +561,7 @@ class PrivilegedExpert:
         self._policy_last_location: Any | None = None
         self._policy_last_lane_change_distance: float = -1e9
         self._policy_last_roundabout_lane_change_distance: float = -1e9
+        self._policy_block_streak: int = 0
         self._topology_cycle_road_ids: set[int] = set()
         self._rebuild_topology_cycle_cache()
 
@@ -891,10 +901,17 @@ class PrivilegedExpert:
         self._policy_last_location = None
         self._policy_last_lane_change_distance = -1e9
         self._policy_last_roundabout_lane_change_distance = -1e9
+        self._policy_block_streak = 0
+        self._steer_from_arc = 0
 
         route_waypoints = self._densify_route_transitions(route_waypoints)
         route_waypoints = self._enforce_route_legality(route_waypoints)
         self._route = route_waypoints
+        self._route_wp_identity_to_index = {}
+        for idx, (wp, _cmd) in enumerate(route_waypoints):
+            wp_identity = id(wp)
+            if wp_identity not in self._route_wp_identity_to_index:
+                self._route_wp_identity_to_index[wp_identity] = idx
         self._route_length = len(route_waypoints)
         self._route_index = 0
         self._wp_buffer.clear()
@@ -963,6 +980,13 @@ class PrivilegedExpert:
             return 1.0
         return min(1.0, self._route_index / self._route_length)
 
+    def _route_index_for_waypoint(self, wp: Any) -> int:
+        """Return the route index for *wp* when it originated from the route.
+
+        Synthetic waypoints inserted by gap filling / route-end extension return -1.
+        """
+        return self._route_wp_identity_to_index.get(id(wp), -1)
+
     # ------------------------------------------------------------------
     # Main step
     # ------------------------------------------------------------------
@@ -1013,6 +1037,21 @@ class PrivilegedExpert:
         self._policy_last_location = transform.location
 
         nav_label = self._apply_lane_change_policy(nav_label, ego_wp, transform.location)
+        block_reasons = {
+            PlannerPolicyReason.PRE_JUNCTION_LANE_CHANGE_BLOCKED,
+            PlannerPolicyReason.CONSECUTIVE_LANE_CHANGE_BLOCKED,
+            PlannerPolicyReason.ROUNDABOUT_LANE_CHANGE_BLOCKED,
+        }
+        policy_blocked_lane_change = (
+            nav_command_route in (RoadOption.CHANGELANELEFT, RoadOption.CHANGELANERIGHT)
+            and nav_label == RoadOption.LANEFOLLOW
+            and self._planner_policy_reason in block_reasons
+        )
+        if policy_blocked_lane_change:
+            self._policy_block_streak += 1
+        else:
+            self._policy_block_streak = 0
+
         if (
             (self._frame_turn_lane_legality_violation > 0 or self._frame_roundabout_lane_change_violation > 0)
             and nav_command in (RoadOption.LEFT, RoadOption.RIGHT)
@@ -1021,9 +1060,16 @@ class PrivilegedExpert:
 
         buf_len = len(self._wp_buffer)
         buf_head_dist = -1.0
+        buf_head_index = -1
+        buf_head_road_id = -1
+        buf_head_lane_id = -1
         if self._wp_buffer:
-            wp0_loc = self._wp_buffer[0][0].transform.location
+            wp0 = self._wp_buffer[0][0]
+            wp0_loc = wp0.transform.location
             buf_head_dist = transform.location.distance(wp0_loc)
+            buf_head_index = self._route_index_for_waypoint(wp0)
+            buf_head_road_id = int(getattr(wp0, "road_id", -1))
+            buf_head_lane_id = int(getattr(wp0, "lane_id", -1))
         heading_error_deg = self._target_heading_error_deg(transform, target_wp)
 
         # --- 3.  Privileged perception ---
@@ -1150,6 +1196,13 @@ class PrivilegedExpert:
             n_corridor_segments=self._n_corridor_segments,
             wp_buffer_size=buf_len,
             wp_buffer_head_dist=round(buf_head_dist, 2),
+            wp_buffer_head_index=buf_head_index,
+            wp_buffer_head_road_id=buf_head_road_id,
+            wp_buffer_head_lane_id=buf_head_lane_id,
+            arc_active=int(bool(self._arc_buffer)),
+            arc_size=len(self._arc_buffer),
+            policy_block_streak=self._policy_block_streak,
+            steer_from_arc=self._steer_from_arc,
             sat_detections=sat_hits,
             lateral_detections=lat_hits,
             gap_fill_rpcs=self._gap_fill_rpcs,
@@ -1789,6 +1842,7 @@ class PrivilegedExpert:
         # target so ego follows the smooth junction path.  Nav command
         # scanning always uses _wp_buffer (route commands, not arc points).
         steer_buf = self._arc_buffer if self._arc_buffer else self._wp_buffer
+        self._steer_from_arc = int(bool(self._arc_buffer))
         target_wp, _ = steer_buf[0]
         for wp, _ in steer_buf:
             if ego_loc.distance(wp.transform.location) >= follow_dist:

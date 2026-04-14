@@ -3,7 +3,8 @@
 Tests the non-CARLA parts: dataclasses, _detect_wsl2_host,
 _StreamingEpisodeWriter, and hash generation. CARLA is mocked where needed.
 
-Updated for schema v4: panoramic images, PrivilegedExpert, nav telemetry channels.
+Updated for schema v6: panoramic images, PrivilegedExpert, nav telemetry channels,
+explicit waypoint-head telemetry channels, and arc/policy diagnostics.
 """
 
 from __future__ import annotations
@@ -16,6 +17,7 @@ import h5py
 import numpy as np
 import pytest
 
+from agents.navigation.local_planner import RoadOption
 from src.data import hdf5_schema as S
 from src.data.expert_collector import (
     EpisodeConfig,
@@ -116,8 +118,8 @@ class TestDetectWSL2Host:
 class TestHDF5Schema:
     """Tests that schema constants are consistent."""
 
-    def test_schema_version_is_v4(self) -> None:
-        assert S.SCHEMA_VERSION == 4
+    def test_schema_version_is_v6(self) -> None:
+        assert S.SCHEMA_VERSION == 6
 
     def test_required_fields_exist(self) -> None:
         for field in [
@@ -139,6 +141,13 @@ class TestHDF5Schema:
             S.TARGET_SPEED,
             S.DRIVING_MODE,
             S.GAP_FILL_RPCS,
+            S.WP_BUFFER_HEAD_INDEX,
+            S.WP_BUFFER_HEAD_ROAD_ID,
+            S.WP_BUFFER_HEAD_LANE_ID,
+            S.ARC_ACTIVE,
+            S.ARC_SIZE,
+            S.POLICY_BLOCK_STREAK,
+            S.STEER_FROM_ARC,
             S.PLANNER_POLICY_REASON,
             S.PLANNER_POLICY_EXCEPTION,
             S.DIST_TO_NEXT_JUNCTION,
@@ -210,6 +219,13 @@ class _FakeFrameInfo:
         self.n_corridor_segments = 10
         self.wp_buffer_size = 20
         self.wp_buffer_head_dist = 3.5
+        self.wp_buffer_head_index = 120
+        self.wp_buffer_head_road_id = 14
+        self.wp_buffer_head_lane_id = 2
+        self.arc_active = 0
+        self.arc_size = 0
+        self.policy_block_streak = 0
+        self.steer_from_arc = 0
         self.sat_detections = 0
         self.lateral_detections = 0
         self.gap_fill_diverged = 0
@@ -243,7 +259,7 @@ class TestStreamingEpisodeWriter:
         return tmp_path / "episode_test1234.h5"
 
     def test_write_and_finalize(self, filepath: Path, config: EpisodeConfig) -> None:
-        """Writer creates a valid HDF5 file with all schema v4 fields."""
+        """Writer creates a valid HDF5 file with all schema v6 fields."""
         n_frames = 20
         writer = _StreamingEpisodeWriter(filepath, config, max_frames=config.max_frames)
 
@@ -265,6 +281,13 @@ class TestStreamingEpisodeWriter:
             assert f[S.NAV_COMMAND_SPEED].shape == (n_frames,)
             assert f[S.POSITION].shape == (n_frames, 3)
             assert f[S.GAP_FILL_RPCS].shape == (n_frames,)
+            assert f[S.WP_BUFFER_HEAD_INDEX].shape == (n_frames,)
+            assert f[S.WP_BUFFER_HEAD_ROAD_ID].shape == (n_frames,)
+            assert f[S.WP_BUFFER_HEAD_LANE_ID].shape == (n_frames,)
+            assert f[S.ARC_ACTIVE].shape == (n_frames,)
+            assert f[S.ARC_SIZE].shape == (n_frames,)
+            assert f[S.POLICY_BLOCK_STREAK].shape == (n_frames,)
+            assert f[S.STEER_FROM_ARC].shape == (n_frames,)
             assert f[S.PLANNER_POLICY_REASON].shape == (n_frames,)
             assert f[S.PRE_JUNCTION_LANE_CHANGE_VIOLATION].shape == (n_frames,)
             assert f[S.TURN_LANE_LEGALITY_VIOLATION].shape == (n_frames,)
@@ -330,3 +353,48 @@ class TestStreamingEpisodeWriter:
         result = writer.finalize(status="completed", collision_frame=None)
         assert result.nav_distribution["LaneFollow"] == 10
         assert result.nav_distribution["Left"] == 5
+
+
+class _FakeWaypoint:
+    def __init__(self, x: float, y: float, road_id: int, lane_id: int) -> None:
+        self.transform = MagicMock()
+        self.transform.location = _FakeLocation(x, y)
+        self.road_id = road_id
+        self.lane_id = lane_id
+
+
+class _FakeLocation:
+    def __init__(self, x: float, y: float) -> None:
+        self.x = x
+        self.y = y
+        self.z = 0.0
+
+    def distance(self, other: "_FakeLocation") -> float:
+        dx = self.x - other.x
+        dy = self.y - other.y
+        return float((dx * dx + dy * dy) ** 0.5)
+
+
+class TestRouteSanitizer:
+    def test_flags_large_same_command_transition(self) -> None:
+        wp0 = _FakeWaypoint(0.0, 0.0, 1, 1)
+        wp1 = _FakeWaypoint(35.0, 0.0, 1, 1)
+        wp2 = _FakeWaypoint(37.0, 0.0, 1, 1)
+
+        route = [
+            (wp0, RoadOption.LANEFOLLOW),
+            (wp1, RoadOption.LANEFOLLOW),
+            (wp2, RoadOption.LEFT),
+        ]
+
+        report = ExpertDataCollector._route_sanitizer_report(
+            route=route,
+            warn_gap_m=12.0,
+            severe_gap_m=30.0,
+            max_issues=10,
+        )
+
+        assert report["warn_transition_count"] == 1
+        assert report["severe_transition_count"] == 1
+        assert len(report["issues"]) == 1
+        assert report["issues"][0]["severity"] == "severe"

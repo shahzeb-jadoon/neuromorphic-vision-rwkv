@@ -14,9 +14,13 @@ v3  3-camera panoramic, custom expert (PrivilegedExpert), GPS/position
     legacy dual labels in favour of a single expert-derived nav command.
 v4  Added explicit nav telemetry channels (route-raw and speed-planning
     commands) while keeping NAV_COMMAND as the primary training label.
+v5  Added explicit wp_buffer head waypoint telemetry (route index, road id,
+    lane id) for one-glance route-head forensics.
+v6  Added arc/policy interaction telemetry channels for policy-vs-steering
+    diagnostics (arc activity, policy block streak, steering source).
 """
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 6
 
 # --- Image data ---
 # Schema v3: panoramic image stitched from 3 cameras (H, W_total, 3) uint8.
@@ -84,6 +88,13 @@ STATIONARY = "stationary"  # (N,) bool  speed < 0.5 km/h
 N_CORRIDOR_SEGMENTS = "n_corridor_segments"  # (N,) int32
 WP_BUFFER_SIZE = "wp_buffer_size"  # (N,) int32
 WP_BUFFER_HEAD_DIST = "wp_buffer_head_dist"  # (N,) float32 metres
+WP_BUFFER_HEAD_INDEX = "wp_buffer_head_index"  # (N,) int32 route index (-1 if synthetic/unknown)
+WP_BUFFER_HEAD_ROAD_ID = "wp_buffer_head_road_id"  # (N,) int32
+WP_BUFFER_HEAD_LANE_ID = "wp_buffer_head_lane_id"  # (N,) int32
+ARC_ACTIVE = "arc_active"  # (N,) int8 1 if Bezier arc buffer active
+ARC_SIZE = "arc_size"  # (N,) int32 number of waypoints in _arc_buffer
+POLICY_BLOCK_STREAK = "policy_block_streak"  # (N,) int32 consecutive policy blocks
+STEER_FROM_ARC = "steer_from_arc"  # (N,) int8 1 if steering target came from arc
 SAT_DETECTIONS = "sat_detections"  # (N,) int32
 LATERAL_DETECTIONS = "lateral_detections"  # (N,) int32
 GAP_FILL_RPCS = "gap_fill_rpcs"  # (N,) int32 cumulative gap-fill RPC attempts

@@ -137,6 +137,11 @@ class EpisodeConfig:
     # restart it.  0 = disabled.
     rss_limit_mb: int = 8192  # 8 GB default
 
+    # Route sidecar sanitizer (S1: flag-only).
+    route_sanitizer_warn_gap_m: float = 12.0
+    route_sanitizer_severe_gap_m: float = 30.0
+    route_sanitizer_max_issues: int = 64
+
 
 @dataclass
 class EpisodeResult:
@@ -264,6 +269,30 @@ class _StreamingEpisodeWriter:
         )
         self._ds_wpbh = self._h5.create_dataset(
             S.WP_BUFFER_HEAD_DIST, shape=(max_frames,), dtype=np.float32, maxshape=(None,)
+        )
+        self._ds_wp_head_index = self._h5.create_dataset(
+            S.WP_BUFFER_HEAD_INDEX, shape=(max_frames,), dtype=np.int32, maxshape=(None,)
+        )
+        self._ds_wp_head_road_id = self._h5.create_dataset(
+            S.WP_BUFFER_HEAD_ROAD_ID, shape=(max_frames,), dtype=np.int32, maxshape=(None,)
+        )
+        self._ds_wp_head_lane_id = self._h5.create_dataset(
+            S.WP_BUFFER_HEAD_LANE_ID, shape=(max_frames,), dtype=np.int32, maxshape=(None,)
+        )
+        self._ds_arc_active = self._h5.create_dataset(
+            S.ARC_ACTIVE, shape=(max_frames,), dtype=np.int8, maxshape=(None,)
+        )
+        self._ds_arc_size = self._h5.create_dataset(
+            S.ARC_SIZE, shape=(max_frames,), dtype=np.int32, maxshape=(None,)
+        )
+        self._ds_policy_block_streak = self._h5.create_dataset(
+            S.POLICY_BLOCK_STREAK,
+            shape=(max_frames,),
+            dtype=np.int32,
+            maxshape=(None,),
+        )
+        self._ds_steer_from_arc = self._h5.create_dataset(
+            S.STEER_FROM_ARC, shape=(max_frames,), dtype=np.int8, maxshape=(None,)
         )
         self._ds_sat = self._h5.create_dataset(
             S.SAT_DETECTIONS, shape=(max_frames,), dtype=np.int32, maxshape=(None,)
@@ -410,6 +439,13 @@ class _StreamingEpisodeWriter:
         self._ds_ncorr[i] = info.n_corridor_segments
         self._ds_wpbs[i] = info.wp_buffer_size
         self._ds_wpbh[i] = info.wp_buffer_head_dist
+        self._ds_wp_head_index[i] = info.wp_buffer_head_index
+        self._ds_wp_head_road_id[i] = info.wp_buffer_head_road_id
+        self._ds_wp_head_lane_id[i] = info.wp_buffer_head_lane_id
+        self._ds_arc_active[i] = info.arc_active
+        self._ds_arc_size[i] = info.arc_size
+        self._ds_policy_block_streak[i] = info.policy_block_streak
+        self._ds_steer_from_arc[i] = info.steer_from_arc
         self._ds_sat[i] = info.sat_detections
         self._ds_lat[i] = info.lateral_detections
         self._ds_gap_fill_rpcs[i] = info.gap_fill_rpcs
@@ -478,6 +514,13 @@ class _StreamingEpisodeWriter:
             self._ds_ncorr,
             self._ds_wpbs,
             self._ds_wpbh,
+            self._ds_wp_head_index,
+            self._ds_wp_head_road_id,
+            self._ds_wp_head_lane_id,
+            self._ds_arc_active,
+            self._ds_arc_size,
+            self._ds_policy_block_streak,
+            self._ds_steer_from_arc,
             self._ds_sat,
             self._ds_lat,
             self._ds_gap_fill_rpcs,
@@ -1745,6 +1788,7 @@ class ExpertDataCollector:
         writer: _StreamingEpisodeWriter | None = None
         collision_frame: int | None = None
         route_sidecar_path: Path | None = None
+        route_sanitizer_report: dict[str, Any] | None = None
 
         try:
             assert self.world is not None
@@ -1992,11 +2036,26 @@ class ExpertDataCollector:
 
             # Persist route geometry for deterministic diagnostics and
             # future replay analysis.
+            route_sanitizer_report = self._route_sanitizer_report(
+                route=list(expert._route),
+                warn_gap_m=config.route_sanitizer_warn_gap_m,
+                severe_gap_m=config.route_sanitizer_severe_gap_m,
+                max_issues=config.route_sanitizer_max_issues,
+            )
+            if route_sanitizer_report["warn_transition_count"] > 0:
+                logger.warning(
+                    "Route sanitizer flagged %d transition(s) (%d severe); max gap %.2fm",
+                    route_sanitizer_report["warn_transition_count"],
+                    route_sanitizer_report["severe_transition_count"],
+                    route_sanitizer_report["max_gap_m"],
+                )
+
             route_sidecar_path = self._write_route_sidecar(
                 episode_hash=episode_hash,
                 config=config,
                 route=list(expert._route),
                 route_source=("provided" if route_waypoints else "generated"),
+                sanitizer_report=route_sanitizer_report,
             )
             if route_sidecar_path is not None:
                 logger.info("Saved route sidecar: %s", route_sidecar_path.name)
@@ -2293,12 +2352,88 @@ class ExpertDataCollector:
         }
         return mapping.get(name, RoadOption.LANEFOLLOW)
 
+    @staticmethod
+    def _route_sanitizer_report(
+        route: list[tuple[Any, RoadOption]],
+        warn_gap_m: float,
+        severe_gap_m: float,
+        max_issues: int,
+    ) -> dict[str, Any]:
+        """Flag suspicious route transitions without mutating the route.
+
+        S1 intentionally keeps collection behavior unchanged and records
+        diagnostics only.
+        """
+        if len(route) < 2:
+            return {
+                "warn_gap_m": float(warn_gap_m),
+                "severe_gap_m": float(severe_gap_m),
+                "warn_transition_count": 0,
+                "severe_transition_count": 0,
+                "max_gap_m": 0.0,
+                "issues": [],
+            }
+
+        issues: list[dict[str, Any]] = []
+        warn_count = 0
+        severe_count = 0
+        max_gap = 0.0
+
+        for idx in range(len(route) - 1):
+            wp_prev, cmd_prev = route[idx]
+            wp_next, cmd_next = route[idx + 1]
+            loc_prev = wp_prev.transform.location
+            loc_next = wp_next.transform.location
+            gap_m = float(loc_prev.distance(loc_next))
+            max_gap = max(max_gap, gap_m)
+
+            same_command = cmd_prev == cmd_next
+            road_changed = int(getattr(wp_prev, "road_id", -1)) != int(
+                getattr(wp_next, "road_id", -1)
+            )
+
+            flagged = gap_m >= warn_gap_m and (same_command or road_changed)
+            if not flagged:
+                continue
+
+            warn_count += 1
+            severity = "severe" if gap_m >= severe_gap_m else "warn"
+            if severity == "severe":
+                severe_count += 1
+
+            if len(issues) < max(1, int(max_issues)):
+                issues.append(
+                    {
+                        "from_index": idx,
+                        "to_index": idx + 1,
+                        "gap_m": round(gap_m, 3),
+                        "severity": severity,
+                        "same_command": bool(same_command),
+                        "road_option_from": str(cmd_prev.name),
+                        "road_option_to": str(cmd_next.name),
+                        "road_id_from": int(getattr(wp_prev, "road_id", -1)),
+                        "road_id_to": int(getattr(wp_next, "road_id", -1)),
+                        "lane_id_from": int(getattr(wp_prev, "lane_id", -1)),
+                        "lane_id_to": int(getattr(wp_next, "lane_id", -1)),
+                    }
+                )
+
+        return {
+            "warn_gap_m": float(warn_gap_m),
+            "severe_gap_m": float(severe_gap_m),
+            "warn_transition_count": int(warn_count),
+            "severe_transition_count": int(severe_count),
+            "max_gap_m": round(max_gap, 3),
+            "issues": issues,
+        }
+
     def _write_route_sidecar(
         self,
         episode_hash: str,
         config: EpisodeConfig,
         route: list[tuple[Any, RoadOption]],
         route_source: str,
+        sanitizer_report: dict[str, Any] | None = None,
     ) -> Path | None:
         """Write route waypoints used for this episode to a JSON sidecar."""
         if not route:
@@ -2336,6 +2471,8 @@ class ExpertDataCollector:
             "waypoints": route_points,
             "created_utc": datetime.now(timezone.utc).isoformat(),
         }
+        if sanitizer_report is not None:
+            payload["sanitizer"] = sanitizer_report
 
         sidecar = self.output_dir / f"episode_{episode_hash}.route.json"
         sidecar.write_text(json.dumps(payload, indent=2))
