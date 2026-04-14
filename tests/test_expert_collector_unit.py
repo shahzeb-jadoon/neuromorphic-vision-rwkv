@@ -42,6 +42,8 @@ class TestEpisodeConfig:
         assert cfg.camera_height == 320
         assert cfg.camera_fov == 60
         assert cfg.camera_yaws == (-60.0, 0.0, 60.0)
+        assert cfg.route_fail_fast_enabled is True
+        assert cfg.route_fail_fast_watchdog_streak_frames == 20
 
     def test_override(self) -> None:
         cfg = EpisodeConfig(town="Town03", weather="WetNoon", max_frames=500)
@@ -398,3 +400,42 @@ class TestRouteSanitizer:
         assert report["severe_transition_count"] == 1
         assert len(report["issues"]) == 1
         assert report["issues"][0]["severity"] == "severe"
+
+
+class TestRouteFailFast:
+    def test_aborts_on_watchdog_streak_threshold(self) -> None:
+        cfg = EpisodeConfig(route_fail_fast_enabled=True, route_fail_fast_watchdog_streak_frames=8)
+
+        abort, reason = ExpertDataCollector._route_fail_fast_decision(
+            config=cfg,
+            route_sanitizer_report=None,
+            route_watchdog_streak=8,
+        )
+
+        assert abort is True
+        assert reason == "watchdog_streak_8"
+
+    def test_aborts_earlier_when_sanitizer_marked_severe(self) -> None:
+        cfg = EpisodeConfig(route_fail_fast_enabled=True, route_fail_fast_watchdog_streak_frames=20)
+        report = {"severe_transition_count": 2}
+
+        abort, reason = ExpertDataCollector._route_fail_fast_decision(
+            config=cfg,
+            route_sanitizer_report=report,
+            route_watchdog_streak=5,
+        )
+
+        assert abort is True
+        assert reason == "severe_sanitizer_watchdog_streak_5_of_5"
+
+    def test_no_abort_when_fail_fast_disabled(self) -> None:
+        cfg = EpisodeConfig(route_fail_fast_enabled=False, route_fail_fast_watchdog_streak_frames=1)
+
+        abort, reason = ExpertDataCollector._route_fail_fast_decision(
+            config=cfg,
+            route_sanitizer_report={"severe_transition_count": 99},
+            route_watchdog_streak=999,
+        )
+
+        assert abort is False
+        assert reason is None

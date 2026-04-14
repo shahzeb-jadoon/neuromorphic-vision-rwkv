@@ -142,12 +142,16 @@ class EpisodeConfig:
     route_sanitizer_severe_gap_m: float = 30.0
     route_sanitizer_max_issues: int = 64
 
+    # S2: fail-fast on persistent route-health failures.
+    route_fail_fast_enabled: bool = True
+    route_fail_fast_watchdog_streak_frames: int = 20
+
 
 @dataclass
 class EpisodeResult:
     """Result of a single episode collection."""
 
-    status: str  # "completed", "collision", "crashed", "timeout", "memory_limit"
+    status: str  # "completed", "collision", "crashed", "timeout", "memory_limit", "route_invalid"
     filename: str | None = None
     episode_hash: str | None = None
     n_frames: int = 0
@@ -1789,6 +1793,8 @@ class ExpertDataCollector:
         collision_frame: int | None = None
         route_sidecar_path: Path | None = None
         route_sanitizer_report: dict[str, Any] | None = None
+        route_watchdog_streak = 0
+        fail_fast_reason: str | None = None
 
         try:
             assert self.world is not None
@@ -2142,6 +2148,25 @@ class ExpertDataCollector:
                 control, info = expert.run_step(dt)
                 vehicle.apply_control(control)
 
+                if int(info.route_watchdog_triggered) > 0:
+                    route_watchdog_streak += 1
+                else:
+                    route_watchdog_streak = 0
+
+                should_abort_route, reason = self._route_fail_fast_decision(
+                    config=config,
+                    route_sanitizer_report=route_sanitizer_report,
+                    route_watchdog_streak=route_watchdog_streak,
+                )
+                if should_abort_route:
+                    fail_fast_reason = reason or "route_watchdog_streak"
+                    logger.error(
+                        "Route fail-fast triggered at frame %d: %s",
+                        frame_idx,
+                        fail_fast_reason,
+                    )
+                    break
+
                 # --- Spectator follow (real-time visualization) ---
                 if config.spectator_follow:
                     self._update_spectator(self.world, vehicle, config.spectator_offset)
@@ -2218,6 +2243,8 @@ class ExpertDataCollector:
             )
             if memory_limit_hit:
                 status = "memory_limit"
+            elif fail_fast_reason is not None:
+                status = "route_invalid"
             elif timed_out:
                 status = "timeout"
             elif collision_frame is not None:
@@ -2231,6 +2258,8 @@ class ExpertDataCollector:
             result.duration_seconds = time.time() - start_time
             result.recording_path = recording_path
             result.route_path = route_sidecar_path.name if route_sidecar_path is not None else None
+            if fail_fast_reason is not None:
+                result.error_message = fail_fast_reason
             return result
 
         except Exception as e:
@@ -2328,6 +2357,32 @@ class ExpertDataCollector:
     # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
+
+    @staticmethod
+    def _route_fail_fast_decision(
+        config: EpisodeConfig,
+        route_sanitizer_report: dict[str, Any] | None,
+        route_watchdog_streak: int,
+    ) -> tuple[bool, str | None]:
+        """Return whether to abort the episode due to persistent route invalidity."""
+        if not config.route_fail_fast_enabled:
+            return False, None
+
+        base_limit = max(1, int(config.route_fail_fast_watchdog_streak_frames))
+        if route_watchdog_streak >= base_limit:
+            return True, f"watchdog_streak_{route_watchdog_streak}"
+
+        severe_count = 0
+        if route_sanitizer_report is not None:
+            severe_count = int(route_sanitizer_report.get("severe_transition_count", 0))
+
+        severe_limit = max(1, base_limit // 4)
+        if severe_count > 0 and route_watchdog_streak >= severe_limit:
+            return True, (
+                "severe_sanitizer_watchdog_streak_" f"{route_watchdog_streak}_of_{severe_limit}"
+            )
+
+        return False, None
 
     @staticmethod
     def _parse_road_option(name: str) -> RoadOption:
