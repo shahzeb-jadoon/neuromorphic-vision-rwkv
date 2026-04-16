@@ -143,6 +143,10 @@ def build_campaign(
         expert_kw["turn_speed_factor"] = float(expert_cfg_dict["turn_speed_factor"])
     if "steering_noise_sigma" in expert_cfg_dict:
         expert_kw["steering_noise_sigma"] = float(expert_cfg_dict["steering_noise_sigma"])
+    if "route_planner_backend" in expert_cfg_dict:
+        expert_kw["route_planner_backend"] = (
+            str(expert_cfg_dict["route_planner_backend"]).strip().lower()
+        )
 
     float_policy_fields = [
         "planner_wrong_way_max_yaw_diff_deg",
@@ -163,6 +167,10 @@ def build_campaign(
         "oncoming_lead_min_closing_speed_kmh",
         "planner_roundabout_context_window_m",
         "planner_roundabout_lane_change_cooldown_m",
+        "lane_graph_sampling_resolution_m",
+        "lane_graph_lane_change_cost",
+        "lane_graph_late_lane_change_penalty",
+        "lane_graph_turn_threshold_deg",
     ]
     for policy_key in float_policy_fields:
         if policy_key in expert_cfg_dict:
@@ -187,6 +195,7 @@ def build_campaign(
         "route_watchdog_min_corridor_segments",
         "route_watchdog_min_frames",
         "route_watchdog_stall_min_frames",
+        "lane_graph_max_search_expansions",
     ]
     for policy_key in int_policy_fields:
         if policy_key in expert_cfg_dict:

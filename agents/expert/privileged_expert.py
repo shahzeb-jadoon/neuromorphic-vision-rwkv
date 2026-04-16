@@ -13,8 +13,8 @@ Design principles:
 
 Depends only on:
     - ``carla`` Python package (``pip install carla==0.9.16``)
-    - ``agents.navigation.global_route_planner.GlobalRoutePlanner``
-      (already vendored)
+    - A route planner exposing ``trace_route(origin, destination)``
+      and returning ``list[(Waypoint, RoadOption)]``
     - ``agents.navigation.local_planner.RoadOption`` enum (already vendored)
 
 Reference implementations studied:
@@ -49,7 +49,6 @@ except ImportError:
 
 try:
     from agents.navigation.local_planner import RoadOption
-    from agents.navigation.global_route_planner import GlobalRoutePlanner
 except (ImportError, ModuleNotFoundError):
     pass
 
@@ -225,6 +224,18 @@ class ExpertConfig:
     route_densify_max_factor: float = 3.0
     route_densify_diverge_factor: float = 2.0
     route_densify_projection_fallback: bool = True
+
+    # --- Route planner backend ---
+    # Backend selector used by the data collector when instantiating
+    # the planner passed into PrivilegedExpert.
+    #   - "grp": CARLA GlobalRoutePlanner (legacy)
+    #   - "lane_graph": custom lane-level A* planner
+    route_planner_backend: str = "lane_graph"
+    lane_graph_sampling_resolution_m: float = 1.0
+    lane_graph_lane_change_cost: float = 25.0
+    lane_graph_late_lane_change_penalty: float = 300.0
+    lane_graph_turn_threshold_deg: float = 35.0
+    lane_graph_max_search_expansions: int = 250_000
 
     # --- Waypoint planner policy scaffolding ---
     planner_policy_enabled: bool = True
@@ -415,7 +426,7 @@ class PrivilegedExpert:
     """Full custom expert agent for CARLA data collection.
 
     Produces smooth, predictable driving demonstrations by combining:
-        - A* route from ``GlobalRoutePlanner``
+        - Route trace from a planner backend (GRP or lane graph)
         - PID lateral / longitudinal controllers
         - Privileged hazard detection (traffic lights, vehicles, pedestrians)
 
@@ -434,7 +445,7 @@ class PrivilegedExpert:
         self,
         vehicle: "carla.Vehicle",
         world: "carla.World",
-        route_planner: GlobalRoutePlanner,
+        route_planner: Any,
         config: ExpertConfig | None = None,
     ) -> None:
         if not CARLA_AVAILABLE:

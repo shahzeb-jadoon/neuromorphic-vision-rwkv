@@ -82,6 +82,7 @@ try:
         PrivilegedExpert,
     )
     from agents.navigation.global_route_planner import GlobalRoutePlanner
+    from agents.navigation.lane_graph_planner import LaneGraphPlanner
 
     CARLA_AVAILABLE = True
 except (ImportError, ModuleNotFoundError):
@@ -1993,8 +1994,26 @@ class ExpertDataCollector:
             collision_sensor.listen(on_collision)
 
             # --- Setup PrivilegedExpert ---
-            route_planner = GlobalRoutePlanner(carla_map, sampling_resolution=2.0)
+            planner_backend = str(config.expert_config.route_planner_backend).strip().lower()
+            if planner_backend == "lane_graph":
+                route_planner = LaneGraphPlanner(
+                    carla_map,
+                    sampling_resolution=config.expert_config.lane_graph_sampling_resolution_m,
+                    lane_change_base_cost=config.expert_config.lane_graph_lane_change_cost,
+                    late_lane_change_penalty=(
+                        config.expert_config.lane_graph_late_lane_change_penalty
+                    ),
+                    lane_change_freeze_distance_m=(
+                        config.expert_config.planner_lane_change_freeze_distance_m
+                    ),
+                    turn_threshold_deg=config.expert_config.lane_graph_turn_threshold_deg,
+                    max_search_expansions=config.expert_config.lane_graph_max_search_expansions,
+                )
+            else:
+                route_planner = GlobalRoutePlanner(carla_map, sampling_resolution=2.0)
+
             expert = PrivilegedExpert(vehicle, self.world, route_planner, config.expert_config)
+            logger.info("Expert route planner backend: %s", planner_backend)
 
             # Build route
             if route_waypoints:
