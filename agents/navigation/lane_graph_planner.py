@@ -13,7 +13,7 @@ import logging
 import math
 from dataclasses import dataclass
 from enum import Enum
-from typing import Dict, List, Tuple
+from typing import Any, Dict, List, Tuple
 
 import carla
 
@@ -86,6 +86,7 @@ class LaneGraphPlanner:
         self._edge_kind_lookup: Dict[Tuple[int, int], EdgeKind] = {}
         self._lane_members: Dict[Tuple[int, int, int], List[int]] = {}
         self._dist_to_junction_m: Dict[int, float] = {}
+        self._grp_fallback: Any | None = None
 
         self._build_graph()
 
@@ -116,12 +117,28 @@ class LaneGraphPlanner:
             lane_type=carla.LaneType.Driving,
         )
         if start_wp is None or end_wp is None:
+            logger.warning(
+                "LaneGraphPlanner projection failed for origin/destination; attempting GRP fallback"
+            )
+            grp_route = self._trace_route_with_grp_fallback(origin, destination)
+            if grp_route:
+                return grp_route
             raise RuntimeError("LaneGraphPlanner: failed to project origin/destination to driving lanes")
 
         start_id = self._nearest_node_id(start_wp)
         goal_id = self._nearest_node_id(end_wp)
         node_path = self._a_star(start_id, goal_id)
         if not node_path:
+            logger.warning(
+                "LaneGraphPlanner found no lane-level path from %s/%s to %s/%s; attempting GRP fallback",
+                start_wp.road_id,
+                start_wp.lane_id,
+                end_wp.road_id,
+                end_wp.lane_id,
+            )
+            grp_route = self._trace_route_with_grp_fallback(origin, destination)
+            if grp_route:
+                return grp_route
             raise RuntimeError(
                 "LaneGraphPlanner: no lane-level route found "
                 f"from {start_wp.road_id}/{start_wp.lane_id} to {end_wp.road_id}/{end_wp.lane_id}"
@@ -142,6 +159,28 @@ class LaneGraphPlanner:
             route.append((end_wp, RoadOption.LANEFOLLOW))
 
         return route
+
+    def _trace_route_with_grp_fallback(
+        self,
+        origin: carla.Location,
+        destination: carla.Location,
+    ) -> List[Tuple[carla.Waypoint, RoadOption]]:
+        """Fallback to CARLA's GlobalRoutePlanner when lane-graph search fails."""
+        try:
+            from agents.navigation.global_route_planner import GlobalRoutePlanner
+
+            if self._grp_fallback is None:
+                self._grp_fallback = GlobalRoutePlanner(self._wmap, sampling_resolution=2.0)
+
+            route = self._grp_fallback.trace_route(origin, destination)
+            if route:
+                logger.warning("LaneGraphPlanner GRP fallback succeeded with %d route waypoints", len(route))
+            else:
+                logger.warning("LaneGraphPlanner GRP fallback returned an empty route")
+            return route
+        except Exception as exc:
+            logger.error("LaneGraphPlanner GRP fallback failed: %s", exc)
+            return []
 
     # ------------------------------------------------------------------
     # Graph construction
