@@ -35,6 +35,13 @@ class RouteConfig:
     min_waypoints: int = 100
     max_waypoints: int = 500
     sampling_resolution: float = 2.0  # meters between waypoints
+    route_planner_backend: str = "lane_graph"
+    lane_graph_sampling_resolution_m: float = 1.0
+    lane_graph_lane_change_cost: float = 25.0
+    lane_graph_late_lane_change_penalty: float = 300.0
+    lane_graph_lane_change_freeze_distance_m: float = 30.0
+    lane_graph_turn_threshold_deg: float = 35.0
+    lane_graph_max_search_expansions: int = 250_000
 
 
 class BalancedRouteGenerator:
@@ -61,10 +68,43 @@ class BalancedRouteGenerator:
         self.map = world.get_map()
         self.topology = self.map.get_topology()
         self.spawn_points = self.map.get_spawn_points()
+        self.route_planner = self._build_route_planner()
 
         # Build intersection graph
         self._junctions = self._find_junctions()
         logger.info("Found %d junctions in %s", len(self._junctions), self.map.name)
+
+    def _build_route_planner(self) -> Any:
+        """Build the route planner backend used for segment tracing."""
+        backend = str(self.config.route_planner_backend).strip().lower()
+
+        if backend == "lane_graph":
+            try:
+                from agents.navigation.lane_graph_planner import LaneGraphPlanner
+
+                planner = LaneGraphPlanner(
+                    self.map,
+                    sampling_resolution=self.config.lane_graph_sampling_resolution_m,
+                    lane_change_base_cost=self.config.lane_graph_lane_change_cost,
+                    late_lane_change_penalty=self.config.lane_graph_late_lane_change_penalty,
+                    lane_change_freeze_distance_m=(
+                        self.config.lane_graph_lane_change_freeze_distance_m
+                    ),
+                    turn_threshold_deg=self.config.lane_graph_turn_threshold_deg,
+                    max_search_expansions=self.config.lane_graph_max_search_expansions,
+                )
+                logger.info("RouteGenerator planner backend: lane_graph")
+                return planner
+            except Exception as e:
+                logger.warning(
+                    "Lane-graph planner init failed (%s); falling back to GRP",
+                    e,
+                )
+
+        from agents.navigation.global_route_planner import GlobalRoutePlanner
+
+        logger.info("RouteGenerator planner backend: grp")
+        return GlobalRoutePlanner(self.map, self.config.sampling_resolution)
 
     def _find_junctions(self) -> list[dict[str, Any]]:
         """Find all junctions and their possible exit directions.
@@ -240,21 +280,20 @@ class BalancedRouteGenerator:
         start_wp: Any,
         end_wp: Any,
     ) -> list[tuple[Any, str]]:
-        """Trace a route between two waypoints using CARLA's planner.
+        """Trace a route between two waypoints using configured planner.
 
         Returns list of (transform, road_option_name) tuples.
         """
         try:
-            from agents.navigation.global_route_planner import (
-                GlobalRoutePlanner,
+            route = self.route_planner.trace_route(
+                start_wp.transform.location,
+                end_wp.transform.location,
             )
-
-            grp = GlobalRoutePlanner(self.map, self.config.sampling_resolution)
-            route = grp.trace_route(start_wp.transform.location, end_wp.transform.location)
 
             result = []
             for wp, road_option in route:
-                result.append((wp.transform, road_option.name))
+                option_name = getattr(road_option, "name", str(road_option))
+                result.append((wp.transform, option_name))
 
             return result
 

@@ -624,11 +624,36 @@ def main() -> None:
     )
     collector.connect()
 
-    # Route config
+    # Route config (kept consistent with expert planner backend)
+    route_backend = "lane_graph"
+    lane_graph_sampling_resolution_m = 1.0
+    lane_graph_lane_change_cost = 25.0
+    lane_graph_late_lane_change_penalty = 300.0
+    lane_graph_lane_change_freeze_distance_m = 30.0
+    lane_graph_turn_threshold_deg = 35.0
+    lane_graph_max_search_expansions = 250_000
+
+    if campaign:
+        cfg0 = campaign[0][0].expert_config
+        route_backend = str(cfg0.route_planner_backend).strip().lower()
+        lane_graph_sampling_resolution_m = float(cfg0.lane_graph_sampling_resolution_m)
+        lane_graph_lane_change_cost = float(cfg0.lane_graph_lane_change_cost)
+        lane_graph_late_lane_change_penalty = float(cfg0.lane_graph_late_lane_change_penalty)
+        lane_graph_lane_change_freeze_distance_m = float(cfg0.planner_lane_change_freeze_distance_m)
+        lane_graph_turn_threshold_deg = float(cfg0.lane_graph_turn_threshold_deg)
+        lane_graph_max_search_expansions = int(cfg0.lane_graph_max_search_expansions)
+
     route_cfg = RouteConfig(
         strategy=args.route_strategy,
         target_left=args.target_left,
         target_right=args.target_right,
+        route_planner_backend=route_backend,
+        lane_graph_sampling_resolution_m=lane_graph_sampling_resolution_m,
+        lane_graph_lane_change_cost=lane_graph_lane_change_cost,
+        lane_graph_late_lane_change_penalty=lane_graph_late_lane_change_penalty,
+        lane_graph_lane_change_freeze_distance_m=lane_graph_lane_change_freeze_distance_m,
+        lane_graph_turn_threshold_deg=lane_graph_turn_threshold_deg,
+        lane_graph_max_search_expansions=lane_graph_max_search_expansions,
     )
 
     # Run campaign
