@@ -27,6 +27,251 @@ def _distance3(a: dict[str, Any], b: dict[str, Any]) -> float:
     return float(math.sqrt(dx * dx + dy * dy + dz * dz))
 
 
+def _as_int(value: Any, default: int = -1) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return int(default)
+
+
+def _infer_junction_connectors(waypoints: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Infer connector-road transfers from waypoint triples.
+
+    A connector transfer is when a junction waypoint road links a non-junction
+    road entering the junction to a different non-junction road exiting it.
+    """
+    aggregate: dict[int, dict[str, Any]] = {}
+    for idx in range(1, len(waypoints) - 1):
+        prev_wp = waypoints[idx - 1]
+        mid_wp = waypoints[idx]
+        next_wp = waypoints[idx + 1]
+
+        if not bool(mid_wp.get("is_junction", False)):
+            continue
+        if bool(prev_wp.get("is_junction", False)) or bool(next_wp.get("is_junction", False)):
+            continue
+
+        in_road = int(prev_wp.get("road_id", -1))
+        out_road = int(next_wp.get("road_id", -1))
+        in_lane = int(prev_wp.get("lane_id", -1))
+        out_lane = int(next_wp.get("lane_id", -1))
+        connector_road = int(mid_wp.get("road_id", -1))
+
+        if in_road == out_road and in_lane == out_lane:
+            continue
+
+        entry = aggregate.setdefault(
+            connector_road,
+            {
+                "connector_road_id": connector_road,
+                "transfer_count": 0,
+                "incoming_roads": set(),
+                "outgoing_roads": set(),
+            },
+        )
+        entry["transfer_count"] += 1
+        entry["incoming_roads"].add(in_road)
+        entry["outgoing_roads"].add(out_road)
+
+    connectors: list[dict[str, Any]] = []
+    for road_id in sorted(aggregate):
+        entry = aggregate[road_id]
+        connectors.append(
+            {
+                "connector_road_id": int(entry["connector_road_id"]),
+                "transfer_count": int(entry["transfer_count"]),
+                "incoming_roads": sorted(int(v) for v in entry["incoming_roads"]),
+                "outgoing_roads": sorted(int(v) for v in entry["outgoing_roads"]),
+            }
+        )
+    return connectors
+
+
+def validate_route_links(sidecar: dict[str, Any], *, max_issues: int) -> dict[str, Any]:
+    """Validate that route link metadata matches waypoint-level properties."""
+    waypoints = list(sidecar.get("waypoints", []))
+    route_links = sidecar.get("route_links")
+    expected_transitions = max(0, len(waypoints) - 1)
+
+    if not isinstance(route_links, dict):
+        return {
+            "present": False,
+            "transition_count": expected_transitions,
+            "mismatch_count": 0,
+            "issues": [],
+        }
+
+    issues: list[dict[str, Any]] = []
+
+    declared_transition_count = int(route_links.get("transition_count", -1))
+    if declared_transition_count != expected_transitions and len(issues) < max(1, int(max_issues)):
+        issues.append(
+            {
+                "kind": "transition_count_mismatch",
+                "expected": expected_transitions,
+                "actual": declared_transition_count,
+            }
+        )
+
+    links = list(route_links.get("links", []))
+    if len(links) != expected_transitions and len(issues) < max(1, int(max_issues)):
+        issues.append(
+            {
+                "kind": "link_list_length_mismatch",
+                "expected": expected_transitions,
+                "actual": len(links),
+            }
+        )
+
+    for idx in range(min(len(links), expected_transitions)):
+        link = links[idx]
+        wp0 = waypoints[idx]
+        wp1 = waypoints[idx + 1]
+
+        expected_connector = None
+        if bool(wp0.get("is_junction", False)) or bool(wp1.get("is_junction", False)):
+            expected_connector = (
+                int(wp0.get("road_id", -1))
+                if bool(wp0.get("is_junction", False))
+                else int(wp1.get("road_id", -1))
+            )
+
+        checks = (
+            ("from_index", int(link.get("from_index", -1)), idx),
+            ("to_index", int(link.get("to_index", -1)), idx + 1),
+            ("road_id_from", int(link.get("road_id_from", -1)), int(wp0.get("road_id", -1))),
+            ("road_id_to", int(link.get("road_id_to", -1)), int(wp1.get("road_id", -1))),
+            ("lane_id_from", int(link.get("lane_id_from", -1)), int(wp0.get("lane_id", -1))),
+            ("lane_id_to", int(link.get("lane_id_to", -1)), int(wp1.get("lane_id", -1))),
+        )
+
+        for field, actual_field, expected_field in checks:
+            if actual_field == expected_field:
+                continue
+            if len(issues) >= max(1, int(max_issues)):
+                break
+            issues.append(
+                {
+                    "kind": "link_field_mismatch",
+                    "index": idx,
+                    "field": field,
+                    "expected": expected_field,
+                    "actual": actual_field,
+                }
+            )
+
+        actual_connector = link.get("connector_road_id")
+        if expected_connector is None:
+            if actual_connector is not None and len(issues) < max(1, int(max_issues)):
+                issues.append(
+                    {
+                        "kind": "unexpected_connector_road_id",
+                        "index": idx,
+                        "actual": actual_connector,
+                    }
+                )
+        else:
+            if (actual_connector is None or int(actual_connector) != expected_connector) and len(
+                issues
+            ) < max(1, int(max_issues)):
+                issues.append(
+                    {
+                        "kind": "connector_road_id_mismatch",
+                        "index": idx,
+                        "expected": expected_connector,
+                        "actual": actual_connector,
+                    }
+                )
+
+    inferred_connectors = _infer_junction_connectors(waypoints)
+    inferred_by_id: dict[int, dict[str, Any]] = {
+        _as_int(item.get("connector_road_id", -1)): item for item in inferred_connectors
+    }
+
+    reported_connectors_raw = list(route_links.get("junction_connectors", []))
+    reported_connectors: list[dict[str, Any]] = []
+    for item in reported_connectors_raw:
+        if not isinstance(item, dict):
+            continue
+        reported_connectors.append(
+            {
+                "connector_road_id": _as_int(item.get("connector_road_id", -1)),
+                "transfer_count": _as_int(item.get("transfer_count", 0), default=0),
+                "incoming_roads": sorted(_as_int(v) for v in item.get("incoming_roads", [])),
+                "outgoing_roads": sorted(_as_int(v) for v in item.get("outgoing_roads", [])),
+            }
+        )
+    reported_by_id: dict[int, dict[str, Any]] = {
+        _as_int(item.get("connector_road_id", -1)): item for item in reported_connectors
+    }
+
+    if set(inferred_by_id) != set(reported_by_id) and len(issues) < max(1, int(max_issues)):
+        issues.append(
+            {
+                "kind": "junction_connector_id_set_mismatch",
+                "expected": sorted(inferred_by_id),
+                "actual": sorted(reported_by_id),
+            }
+        )
+
+    for connector_id, expected_connector_meta in inferred_by_id.items():
+        reported_connector = reported_by_id.get(connector_id)
+        if reported_connector is None:
+            continue
+
+        fields = (
+            (
+                "transfer_count",
+                int(reported_connector.get("transfer_count", 0)),
+                int(expected_connector_meta.get("transfer_count", 0)),
+            ),
+            (
+                "incoming_roads",
+                sorted(int(v) for v in reported_connector.get("incoming_roads", [])),
+                sorted(int(v) for v in expected_connector_meta.get("incoming_roads", [])),
+            ),
+            (
+                "outgoing_roads",
+                sorted(int(v) for v in reported_connector.get("outgoing_roads", [])),
+                sorted(int(v) for v in expected_connector_meta.get("outgoing_roads", [])),
+            ),
+        )
+        for field, actual_value, expected_value in fields:
+            if actual_value == expected_value:
+                continue
+            if len(issues) >= max(1, int(max_issues)):
+                break
+            issues.append(
+                {
+                    "kind": "junction_connector_field_mismatch",
+                    "connector_road_id": connector_id,
+                    "field": field,
+                    "expected": expected_value,
+                    "actual": actual_value,
+                }
+            )
+
+    declared_transfer_count = int(route_links.get("junction_connector_transfer_count", -1))
+    inferred_transfer_count = int(sum(item["transfer_count"] for item in inferred_connectors))
+    if declared_transfer_count != inferred_transfer_count and len(issues) < max(1, int(max_issues)):
+        issues.append(
+            {
+                "kind": "junction_connector_transfer_count_mismatch",
+                "expected": inferred_transfer_count,
+                "actual": declared_transfer_count,
+            }
+        )
+
+    return {
+        "present": True,
+        "transition_count": expected_transitions,
+        "mismatch_count": len(issues),
+        "issues": issues,
+        "junction_connector_transfer_count": inferred_transfer_count,
+        "junction_connectors": inferred_connectors,
+    }
+
+
 def analyze_route_sidecar(
     sidecar: dict[str, Any],
     *,
@@ -94,6 +339,8 @@ def analyze_route_sidecar(
                 }
             )
 
+    link_validation = validate_route_links(sidecar, max_issues=max_issues)
+
     return {
         "warn_gap_m": float(warn_gap_m),
         "severe_gap_m": float(severe_gap_m),
@@ -102,6 +349,7 @@ def analyze_route_sidecar(
         "severe_transition_count": int(severe_transition_count),
         "wrong_way_transition_count": int(wrong_way_transition_count),
         "max_gap_m": round(max_gap_m, 3),
+        "route_links": link_validation,
         "issues": issues,
     }
 

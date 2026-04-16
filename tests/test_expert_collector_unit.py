@@ -358,11 +358,20 @@ class TestStreamingEpisodeWriter:
 
 
 class _FakeWaypoint:
-    def __init__(self, x: float, y: float, road_id: int, lane_id: int) -> None:
+    def __init__(
+        self,
+        x: float,
+        y: float,
+        road_id: int,
+        lane_id: int,
+        *,
+        is_junction: bool = False,
+    ) -> None:
         self.transform = MagicMock()
         self.transform.location = _FakeLocation(x, y)
         self.road_id = road_id
         self.lane_id = lane_id
+        self.is_junction = is_junction
 
 
 class _FakeLocation:
@@ -400,6 +409,28 @@ class TestRouteSanitizer:
         assert report["severe_transition_count"] == 1
         assert len(report["issues"]) == 1
         assert report["issues"][0]["severity"] == "severe"
+
+
+class TestRouteTransitionLinkReport:
+    def test_tracks_junction_connector_transfers(self) -> None:
+        wp0 = _FakeWaypoint(0.0, 0.0, 10, 1, is_junction=False)
+        wp1 = _FakeWaypoint(2.0, 0.0, 100, 1, is_junction=True)
+        wp2 = _FakeWaypoint(4.0, 1.0, 20, 1, is_junction=False)
+
+        route = [
+            (wp0, RoadOption.LANEFOLLOW),
+            (wp1, RoadOption.LEFT),
+            (wp2, RoadOption.LANEFOLLOW),
+        ]
+
+        report = ExpertDataCollector._route_transition_link_report(route)
+
+        assert report["transition_count"] == 2
+        assert report["junction_connector_transfer_count"] == 1
+        assert len(report["junction_connectors"]) == 1
+        assert report["junction_connectors"][0]["connector_road_id"] == 100
+        assert report["junction_connectors"][0]["incoming_roads"] == [10]
+        assert report["junction_connectors"][0]["outgoing_roads"] == [20]
 
 
 class TestRouteFailFast:

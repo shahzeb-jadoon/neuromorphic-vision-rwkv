@@ -136,7 +136,7 @@ class EpisodeConfig:
     # on most maps.  When RSS exceeds this limit (MB), the episode is
     # stopped gracefully and the worker exits so the orchestrator can
     # restart it.  0 = disabled.
-    rss_limit_mb: int = 8192  # 8 GB default
+    rss_limit_mb: int = 10240  # 8 GB default (Changed to 10 GB)
 
     # Route sidecar sanitizer (S1: flag-only).
     route_sanitizer_warn_gap_m: float = 12.0
@@ -2075,12 +2075,31 @@ class ExpertDataCollector:
                     route_sanitizer_report["max_gap_m"],
                 )
 
+            planner_diagnostics: dict[str, Any] | None = None
+            planner_diag_payload: dict[str, Any] = {}
+            for key, getter_name in (
+                ("last_plan", "get_last_plan_diagnostics"),
+                ("graph", "get_graph_diagnostics"),
+            ):
+                getter = getattr(route_planner, getter_name, None)
+                if not callable(getter):
+                    continue
+                try:
+                    value = getter()
+                except Exception:
+                    continue
+                if value:
+                    planner_diag_payload[key] = value
+            if planner_diag_payload:
+                planner_diagnostics = planner_diag_payload
+
             route_sidecar_path = self._write_route_sidecar(
                 episode_hash=episode_hash,
                 config=config,
                 route=list(expert._route),
                 route_source=("provided" if route_waypoints else "generated"),
                 sanitizer_report=route_sanitizer_report,
+                planner_diagnostics=planner_diagnostics,
             )
             if route_sidecar_path is not None:
                 logger.info("Saved route sidecar: %s", route_sidecar_path.name)
@@ -2501,6 +2520,131 @@ class ExpertDataCollector:
             "issues": issues,
         }
 
+    @staticmethod
+    def _route_transition_link_report(route: list[tuple[Any, RoadOption]]) -> dict[str, Any]:
+        """Summarize route transitions, with explicit junction-connector links.
+
+        A key diagnostic is that roads inside junctions often act as connectors
+        between roads outside the junction; we surface that as first-class data.
+        """
+        if len(route) < 2:
+            return {
+                "transition_count": 0,
+                "max_gap_m": 0.0,
+                "link_kind_counts": {},
+                "junction_connector_transfer_count": 0,
+                "junction_connectors": [],
+                "links": [],
+            }
+
+        links: list[dict[str, Any]] = []
+        kind_counts: dict[str, int] = {}
+        max_gap_m = 0.0
+
+        for idx in range(len(route) - 1):
+            wp_from, cmd_from = route[idx]
+            wp_to, cmd_to = route[idx + 1]
+
+            from_road = int(getattr(wp_from, "road_id", -1))
+            to_road = int(getattr(wp_to, "road_id", -1))
+            from_lane = int(getattr(wp_from, "lane_id", -1))
+            to_lane = int(getattr(wp_to, "lane_id", -1))
+            from_junction = bool(getattr(wp_from, "is_junction", False))
+            to_junction = bool(getattr(wp_to, "is_junction", False))
+            gap_m = float(wp_from.transform.location.distance(wp_to.transform.location))
+            max_gap_m = max(max_gap_m, gap_m)
+
+            if from_junction and to_junction:
+                kind = "junction_internal"
+            elif (not from_junction) and to_junction:
+                kind = "into_junction_connector"
+            elif from_junction and (not to_junction):
+                kind = "out_of_junction_connector"
+            elif from_road != to_road:
+                kind = "direct_road_change"
+            elif from_lane != to_lane:
+                kind = "lane_shift"
+            else:
+                kind = "continuous"
+
+            kind_counts[kind] = kind_counts.get(kind, 0) + 1
+
+            link: dict[str, Any] = {
+                "from_index": idx,
+                "to_index": idx + 1,
+                "kind": kind,
+                "gap_m": round(gap_m, 3),
+                "road_option_from": str(cmd_from.name),
+                "road_option_to": str(cmd_to.name),
+                "road_id_from": from_road,
+                "road_id_to": to_road,
+                "lane_id_from": from_lane,
+                "lane_id_to": to_lane,
+                "is_junction_from": from_junction,
+                "is_junction_to": to_junction,
+            }
+            if from_junction or to_junction:
+                link["connector_road_id"] = from_road if from_junction else to_road
+            links.append(link)
+
+        connector_aggregate: dict[int, dict[str, Any]] = {}
+        for idx in range(1, len(route) - 1):
+            wp_prev, _ = route[idx - 1]
+            wp_mid, _ = route[idx]
+            wp_next, _ = route[idx + 1]
+
+            if not bool(getattr(wp_mid, "is_junction", False)):
+                continue
+            if bool(getattr(wp_prev, "is_junction", False)) or bool(
+                getattr(wp_next, "is_junction", False)
+            ):
+                continue
+
+            in_road = int(getattr(wp_prev, "road_id", -1))
+            out_road = int(getattr(wp_next, "road_id", -1))
+            in_lane = int(getattr(wp_prev, "lane_id", -1))
+            out_lane = int(getattr(wp_next, "lane_id", -1))
+            connector_road = int(getattr(wp_mid, "road_id", -1))
+
+            if in_road == out_road and in_lane == out_lane:
+                continue
+
+            agg = connector_aggregate.setdefault(
+                connector_road,
+                {
+                    "connector_road_id": connector_road,
+                    "transfer_count": 0,
+                    "incoming_roads": set(),
+                    "outgoing_roads": set(),
+                },
+            )
+            agg["transfer_count"] += 1
+            agg["incoming_roads"].add(in_road)
+            agg["outgoing_roads"].add(out_road)
+
+        junction_connectors: list[dict[str, Any]] = []
+        for road_id in sorted(connector_aggregate):
+            agg = connector_aggregate[road_id]
+            junction_connectors.append(
+                {
+                    "connector_road_id": int(agg["connector_road_id"]),
+                    "transfer_count": int(agg["transfer_count"]),
+                    "incoming_roads": sorted(int(r) for r in agg["incoming_roads"]),
+                    "outgoing_roads": sorted(int(r) for r in agg["outgoing_roads"]),
+                }
+            )
+
+        return {
+            "transition_count": int(len(links)),
+            "max_gap_m": round(max_gap_m, 3),
+            "link_kind_counts": kind_counts,
+            "junction_connector_transfer_count": int(
+                sum(item["transfer_count"] for item in junction_connectors)
+            ),
+            "junction_connectors": junction_connectors,
+            "links": links,
+        }
+
     def _write_route_sidecar(
         self,
         episode_hash: str,
@@ -2508,6 +2652,7 @@ class ExpertDataCollector:
         route: list[tuple[Any, RoadOption]],
         route_source: str,
         sanitizer_report: dict[str, Any] | None = None,
+        planner_diagnostics: dict[str, Any] | None = None,
     ) -> Path | None:
         """Write route waypoints used for this episode to a JSON sidecar."""
         if not route:
@@ -2532,6 +2677,8 @@ class ExpertDataCollector:
                 }
             )
 
+        transition_links = self._route_transition_link_report(route)
+
         payload = {
             "episode_hash": episode_hash,
             "town": config.town,
@@ -2541,12 +2688,16 @@ class ExpertDataCollector:
             "fps": int(config.fps),
             "max_frames": int(config.max_frames),
             "route_source": route_source,
+            "route_planner_backend": str(config.expert_config.route_planner_backend),
             "n_waypoints": len(route_points),
             "waypoints": route_points,
+            "route_links": transition_links,
             "created_utc": datetime.now(timezone.utc).isoformat(),
         }
         if sanitizer_report is not None:
             payload["sanitizer"] = sanitizer_report
+        if planner_diagnostics is not None:
+            payload["planner_diagnostics"] = planner_diagnostics
 
         sidecar = self.output_dir / f"episode_{episode_hash}.route.json"
         sidecar.write_text(json.dumps(payload, indent=2))
