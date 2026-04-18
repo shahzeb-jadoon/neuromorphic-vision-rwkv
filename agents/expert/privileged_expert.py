@@ -207,9 +207,9 @@ class ExpertConfig:
     gap_fill_diverge_factor: float = 2.0
     gap_fill_rpc_budget: int = 50_000
     gap_fill_bezier_enabled: bool = True
-    gap_fill_bezier_retry_limit: int = 2
+    gap_fill_bezier_retry_limit: int = 1
     gap_fill_rpc_retry_limit: int = 2
-    gap_fill_bezier_max_pair_index: int = 2
+    gap_fill_bezier_max_pair_index: int = 1
     gap_fill_bezier_step: float = 0.5  # metres
     gap_fill_bezier_tangent_factor: float = 0.35  # control-handle length = gap * factor
     gap_fill_bezier_max_project_error: float = 2.5  # metres

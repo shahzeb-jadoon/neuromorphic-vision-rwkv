@@ -127,6 +127,13 @@ def _build_expert() -> PrivilegedExpert:
     return expert
 
 
+def test_expert_config_defaults_use_conservative_arc_settings() -> None:
+    cfg = ExpertConfig()
+    assert cfg.gap_fill_bezier_retry_limit == 1
+    assert cfg.gap_fill_bezier_max_pair_index == 1
+    assert cfg.planner_policy_steer_consistency_gate_enabled is True
+
+
 def test_plan_speed_tl_mode_not_masked_by_lower_target(monkeypatch: MonkeyPatch) -> None:
     expert = _build_expert()
     expert._prev_target = 10.0
