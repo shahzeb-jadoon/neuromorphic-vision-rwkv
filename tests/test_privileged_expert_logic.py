@@ -662,6 +662,44 @@ def test_fill_junction_gaps_allows_rpc_retry_after_bezier_failure() -> None:
     assert expert._gap_fill_rpcs > 0
 
 
+def test_fill_junction_gaps_rpc_uses_adjacent_lane_bridge_for_lateral_gap() -> None:
+    expert = _build_expert()
+    expert.config.gap_fill_bezier_enabled = False
+    expert.config.gap_fill_rpc_retry_limit = 1
+
+    wp_prev = _Waypoint(0.0, 0.0, road_id=10, lane_id=1, yaw=0.0)
+    wp_next = _Waypoint(8.0, 0.0, road_id=10, lane_id=2, yaw=0.0)
+
+    # Same-lane forward chain is wrong-road and should not be used.
+    wp_wrong = _Waypoint(2.0, 4.0, road_id=11, lane_id=1, yaw=0.0)
+    wp_prev._nexts = [wp_wrong]
+    wp_wrong._nexts = []
+
+    # Adjacent lane bridge (left) plus forward chain should converge.
+    wp_left = _Waypoint(0.0, 1.5, road_id=10, lane_id=2, yaw=0.0)
+    wp_left2 = _Waypoint(4.0, 1.5, road_id=10, lane_id=2, yaw=0.0)
+    wp_left3 = _Waypoint(7.0, 1.5, road_id=10, lane_id=2, yaw=0.0)
+    wp_prev._left = wp_left
+    wp_left._nexts = [wp_left2]
+    wp_left2._nexts = [wp_left3]
+    wp_left3._nexts = []
+
+    expert._wp_buffer = deque(
+        [
+            (wp_prev, RoadOption.LANEFOLLOW),
+            (wp_next, RoadOption.CHANGELANELEFT),
+        ]
+    )
+
+    expert._fill_junction_gaps(None)
+
+    route_wps = [wp for wp, _ in expert._wp_buffer]
+    assert wp_left in route_wps
+    assert wp_left2 in route_wps
+    assert wp_wrong not in route_wps
+    assert expert._gap_fill_diverged == 0
+
+
 def test_fill_junction_gaps_startup_circuit_breaker_blacklists_diverging_pair() -> None:
     expert = _build_expert()
     expert.config.gap_fill_startup_circuit_breaker_enabled = True

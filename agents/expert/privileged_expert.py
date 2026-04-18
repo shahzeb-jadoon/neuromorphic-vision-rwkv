@@ -1460,6 +1460,101 @@ class PrivilegedExpert:
             )
             return bx, by, bz
 
+        def _same_road_lane(a: Any, b: Any) -> bool:
+            return bool(
+                a is not None
+                and b is not None
+                and int(getattr(a, "road_id", 0)) == int(getattr(b, "road_id", 0))
+                and int(getattr(a, "lane_id", 0)) == int(getattr(b, "lane_id", 0))
+            )
+
+        def _ordered_adjacent_lanes(wp: Any, cmd: RoadOption) -> list[Any]:
+            left_wp = None
+            right_wp = None
+            try:
+                left_wp = wp.get_left_lane()
+            except (AttributeError, RuntimeError, TypeError):
+                left_wp = None
+            try:
+                right_wp = wp.get_right_lane()
+            except (AttributeError, RuntimeError, TypeError):
+                right_wp = None
+
+            if cmd == RoadOption.CHANGELANELEFT:
+                ordered = [left_wp, right_wp]
+            elif cmd == RoadOption.CHANGELANERIGHT:
+                ordered = [right_wp, left_wp]
+            else:
+                ordered = [left_wp, right_wp]
+            return [cand for cand in ordered if cand is not None]
+
+        def _seed_lateral_bridge(
+            wp_start: Any,
+            wp_target: Any,
+            cmd: RoadOption,
+            origin_loc: Any,
+            diverge_limit_m: float,
+        ) -> tuple[Any, list[tuple[Any, RoadOption]]]:
+            if _same_road_lane(wp_start, wp_target):
+                return wp_start, []
+
+            current = wp_start
+            target_loc = wp_target.transform.location
+            current_dist = current.transform.location.distance(target_loc)
+            bridge: list[tuple[Any, RoadOption]] = []
+
+            for _ in range(3):
+                if _same_road_lane(current, wp_target):
+                    break
+                candidates = _ordered_adjacent_lanes(current, cmd)
+                if not candidates:
+                    break
+
+                best = min(
+                    candidates,
+                    key=lambda cand: (
+                        0 if _same_road_lane(cand, wp_target) else 1,
+                        0
+                        if int(getattr(cand, "road_id", 0))
+                        == int(getattr(wp_target, "road_id", 0))
+                        else 1,
+                        abs(
+                            int(getattr(cand, "lane_id", 0))
+                            - int(getattr(wp_target, "lane_id", 0))
+                        ),
+                        cand.transform.location.distance(target_loc),
+                    ),
+                )
+
+                best_loc = best.transform.location
+                best_dist = best_loc.distance(target_loc)
+                same_target_road = int(getattr(best, "road_id", 0)) == int(
+                    getattr(wp_target, "road_id", 0)
+                )
+                if best_dist >= current_dist - 0.25 and not same_target_road:
+                    break
+                if best_loc.distance(origin_loc) > diverge_limit_m:
+                    break
+
+                bridge.append((best, cmd))
+                current = best
+                current_dist = best_dist
+
+            return current, bridge
+
+        def _pick_best_next(nexts: list[Any], target_loc: Any) -> Any | None:
+            best = None
+            best_dist = float("inf")
+            for cand in nexts:
+                try:
+                    cand_dist = cand.transform.location.distance(target_loc)
+                except (AttributeError, RuntimeError, TypeError):
+                    continue
+                if cand_dist < best_dist:
+                    best = cand
+                    best_dist = cand_dist
+            return best
+
         # Gap filling disabled by config or budget exhausted
         if cfg.gap_fill_max_factor == 0:
             return
@@ -1618,25 +1713,64 @@ class PrivilegedExpert:
                     tentative: list[tuple] = []
                     converged = False
                     try:
-                        nexts = wp_prev.next(_FILL_STEP)
+                        target_loc = wp_next.transform.location
+                        start_wp = wp_prev
+                        seen_ids = {int(getattr(wp_prev, "id", -1)), int(getattr(wp_next, "id", -1))}
+
+                        # Lane-change-aware bridge: if the sparse pair starts
+                        # and ends on different lanes, try adjacent-lane hops
+                        # before forward next() chaining.
+                        if not _same_road_lane(wp_prev, wp_next):
+                            start_wp, lateral_bridge = _seed_lateral_bridge(
+                                wp_prev,
+                                wp_next,
+                                cmd_next,
+                                origin,
+                                diverge_limit,
+                            )
+                            for bridge_wp, bridge_cmd in lateral_bridge:
+                                bridge_id = int(getattr(bridge_wp, "id", -1))
+                                if bridge_id != -1 and bridge_id in seen_ids:
+                                    continue
+                                if bridge_id != -1:
+                                    seen_ids.add(bridge_id)
+                                tentative.append((bridge_wp, bridge_cmd))
+
+                        if start_wp.transform.location.distance(target_loc) < _FILL_STEP:
+                            converged = True
+
+                        last_target_dist = start_wp.transform.location.distance(target_loc)
+                        nexts = start_wp.next(_FILL_STEP)
                         rpcs_this_call += 1
                         fills = 0
-                        while nexts and fills < max_fills:
-                            nxt = nexts[0]
-                            dist_to_target = nxt.transform.location.distance(
-                                wp_next.transform.location
-                            )
+                        while not converged and nexts and fills < max_fills:
+                            nxt = _pick_best_next(nexts, target_loc)
+                            if nxt is None:
+                                break
+
+                            nxt_id = int(getattr(nxt, "id", -1))
+                            if nxt_id != -1 and nxt_id in seen_ids:
+                                break
+
+                            dist_to_target = nxt.transform.location.distance(target_loc)
                             if dist_to_target < _FILL_STEP:
                                 converged = True
                                 break  # close enough to the next original wp
+                            # Forward chain should keep reducing distance to
+                            # the sparse target; if not, abort this attempt.
+                            if dist_to_target > last_target_dist + _FILL_STEP:
+                                break
                             # Divergence guard
                             dist_from_origin = nxt.transform.location.distance(origin)
                             if dist_from_origin > diverge_limit:
                                 break
                             tentative.append((nxt, cmd_next))
+                            if nxt_id != -1:
+                                seen_ids.add(nxt_id)
                             nexts = nxt.next(_FILL_STEP)
                             rpcs_this_call += 1
                             fills += 1
+                            last_target_dist = dist_to_target
                     except (AttributeError, RuntimeError):
                         pass  # graceful degradation
 
