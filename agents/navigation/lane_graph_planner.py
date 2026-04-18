@@ -35,8 +35,8 @@ from agents.navigation.local_planner import RoadOption
 logger = logging.getLogger(__name__)
 
 
-GRAPH_CACHE_VERSION = 2
-GRAPH_CACHE_LOGIC_TAG = "lane-graph-v2"
+GRAPH_CACHE_VERSION = 3
+GRAPH_CACHE_LOGIC_TAG = "lane-graph-v3-branch-preserving"
 
 
 class EdgeKind(Enum):
@@ -61,7 +61,7 @@ class Edge:
 class SegmentNode:
     """Lane-segment graph node.
 
-    ``segment_id`` is anchored to CARLA's start waypoint ID for the segment.
+    ``segment_id`` is anchored to a CARLA topology pair ``start_id:end_id``.
     """
 
     segment_id: str
@@ -127,7 +127,7 @@ class LaneGraphPlanner:
         self._lane_members: Dict[Tuple[int, int, int], List[str]] = {}
         self._entry_wp_by_segment: Dict[str, carla.Waypoint] = {}
         self._exit_wp_by_segment: Dict[str, carla.Waypoint] = {}
-        self._entry_wp_id_to_segment: Dict[int, str] = {}
+        self._entry_wp_id_to_segments: Dict[int, List[str]] = {}
         self._dist_to_junction_m: Dict[str, float] = {}
         self._connector_links_by_road: Dict[int, dict[str, Any]] = {}
         self._segment_wp_cache: Dict[str, List[carla.Waypoint]] = {}
@@ -351,7 +351,7 @@ class LaneGraphPlanner:
         self._lane_members.clear()
         self._entry_wp_by_segment.clear()
         self._exit_wp_by_segment.clear()
-        self._entry_wp_id_to_segment.clear()
+        self._entry_wp_id_to_segments.clear()
         self._segment_wp_cache.clear()
 
         build_t0 = time.perf_counter()
@@ -362,7 +362,7 @@ class LaneGraphPlanner:
             if wp_end.lane_type != carla.LaneType.Driving:
                 continue
 
-            seg_id = self._segment_id_for_waypoint(wp_start)
+            seg_id = self._segment_id_for_topology_pair(wp_start, wp_end)
             if seg_id in self._segments:
                 continue
 
@@ -411,7 +411,7 @@ class LaneGraphPlanner:
             self._edges[seg_id] = []
             self._entry_wp_by_segment[seg_id] = wp_start
             self._exit_wp_by_segment[seg_id] = wp_end
-            self._entry_wp_id_to_segment[int(wp_start.id)] = seg_id
+            self._entry_wp_id_to_segments.setdefault(int(wp_start.id), []).append(seg_id)
             self._segment_wp_cache[seg_id] = list(sampled_wps)
 
             lane_key = (node.road_id, node.section_id, node.lane_id)
@@ -420,8 +420,9 @@ class LaneGraphPlanner:
         # Forward continuity edges.
         for seg_id, node in self._segments.items():
             end_wp = self._exit_wp_by_segment[seg_id]
-            direct_id = self._entry_wp_id_to_segment.get(int(end_wp.id))
-            if direct_id is not None and direct_id != seg_id:
+            for direct_id in self._entry_wp_id_to_segments.get(int(end_wp.id), []):
+                if direct_id == seg_id:
+                    continue
                 dist = self._distance_xyz(node.exit_xyz, self._segments[direct_id].entry_xyz)
                 self._upsert_edge(seg_id, direct_id, dist, dist, EdgeKind.FORWARD)
 
@@ -536,7 +537,7 @@ class LaneGraphPlanner:
             self._lane_members = {}
             self._entry_wp_by_segment = {}
             self._exit_wp_by_segment = {}
-            self._entry_wp_id_to_segment = {}
+            self._entry_wp_id_to_segments = {}
             self._segment_wp_cache = {}
 
             for raw in payload.get("segments", []):
@@ -609,8 +610,9 @@ class LaneGraphPlanner:
         except Exception:
             return False
 
-    def _segment_id_for_waypoint(self, wp: carla.Waypoint) -> str:
-        return str(int(wp.id))
+    @staticmethod
+    def _segment_id_for_topology_pair(wp_start: carla.Waypoint, wp_end: carla.Waypoint) -> str:
+        return f"{int(wp_start.id)}:{int(wp_end.id)}"
 
     def _sample_segment_waypoints(
         self,
@@ -688,9 +690,22 @@ class LaneGraphPlanner:
         self._edge_kind_lookup[key] = kind
 
     def _resolve_segment_for_waypoint(self, wp: carla.Waypoint) -> str | None:
-        direct = self._entry_wp_id_to_segment.get(int(wp.id))
-        if direct is not None:
-            return direct
+        direct = self._entry_wp_id_to_segments.get(int(wp.id), [])
+        if len(direct) == 1:
+            return direct[0]
+        if len(direct) > 1:
+            wp_xyz = (
+                float(wp.transform.location.x),
+                float(wp.transform.location.y),
+                float(wp.transform.location.z),
+            )
+            return min(
+                direct,
+                key=lambda seg_id: (
+                    self._distance_xyz(wp_xyz, self._segments[seg_id].exit_xyz),
+                    seg_id,
+                ),
+            )
         lane_key = (int(wp.road_id), int(wp.section_id), int(wp.lane_id))
         candidates = self._lane_members.get(lane_key)
         if not candidates:
