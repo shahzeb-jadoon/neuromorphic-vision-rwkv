@@ -42,6 +42,9 @@ class RouteConfig:
     lane_graph_lane_change_freeze_distance_m: float = 30.0
     lane_graph_turn_threshold_deg: float = 35.0
     lane_graph_max_search_expansions: int = 250_000
+    validate_junction_approach_exit: bool = True
+    validation_max_regen_attempts: int = 3
+    validation_max_issues: int = 16
 
 
 class BalancedRouteGenerator:
@@ -72,7 +75,13 @@ class BalancedRouteGenerator:
 
         # Build intersection graph
         self._junctions = self._find_junctions()
+        self._approach_exit_links = self._build_approach_exit_links()
         logger.info("Found %d junctions in %s", len(self._junctions), self.map.name)
+        logger.info(
+            "Route validator approach->exit links: approaches=%d links=%d",
+            len(self._approach_exit_links),
+            sum(len(v) for v in self._approach_exit_links.values()),
+        )
 
     def _build_route_planner(self) -> Any:
         """Build the route planner backend used for segment tracing."""
@@ -130,6 +139,39 @@ class BalancedRouteGenerator:
 
         return list(junction_map.values())
 
+    def _build_approach_exit_links(self) -> dict[tuple[int, int], set[tuple[int, int]]]:
+        """Build legal approach->exit lane mappings using topology connectors."""
+        connector_incoming: dict[int, set[tuple[int, int]]] = defaultdict(set)
+        connector_outgoing: dict[int, set[tuple[int, int]]] = defaultdict(set)
+
+        for wp_start, wp_end in self.topology:
+            if wp_start.lane_type != carla.LaneType.Driving:
+                continue
+            if wp_end.lane_type != carla.LaneType.Driving:
+                continue
+
+            start_is_junction = bool(getattr(wp_start, "is_junction", False))
+            end_is_junction = bool(getattr(wp_end, "is_junction", False))
+
+            if (not start_is_junction) and end_is_junction:
+                approach_key = (int(wp_start.road_id), int(wp_start.lane_id))
+                connector_incoming[int(wp_end.road_id)].add(approach_key)
+
+            if start_is_junction and (not end_is_junction):
+                connector_road_id = int(wp_start.road_id)
+                exit_key = (int(wp_end.road_id), int(wp_end.lane_id))
+                connector_outgoing[connector_road_id].add(exit_key)
+
+        links: dict[tuple[int, int], set[tuple[int, int]]] = defaultdict(set)
+        for connector_road_id, incoming in connector_incoming.items():
+            outgoing = connector_outgoing.get(connector_road_id, set())
+            if not incoming or not outgoing:
+                continue
+            for approach_key in incoming:
+                links[approach_key].update(outgoing)
+
+        return {k: set(v) for k, v in links.items()}
+
     def generate_route(
         self,
         rng: np.random.Generator | None = None,
@@ -143,12 +185,107 @@ class BalancedRouteGenerator:
         if rng is None:
             rng = np.random.default_rng()
 
-        if self.config.strategy == "random":
-            return self._generate_random_route(rng)
-        elif self.config.strategy == "balanced":
-            return self._generate_balanced_route(rng)
-        else:
-            raise ValueError(f"Unknown strategy: {self.config.strategy}")
+        max_attempts = max(1, int(self.config.validation_max_regen_attempts))
+        for attempt_idx in range(max_attempts):
+            if self.config.strategy == "random":
+                route = self._generate_random_route(rng)
+            elif self.config.strategy == "balanced":
+                route = self._generate_balanced_route(rng)
+            else:
+                raise ValueError(f"Unknown strategy: {self.config.strategy}")
+
+            if not route:
+                continue
+
+            if not bool(self.config.validate_junction_approach_exit):
+                return route
+
+            report = self._validate_approach_conditioned_route(route)
+            if int(report["invalid_transition_count"]) == 0:
+                return route
+
+            logger.warning(
+                "Route validator rejected route (%d invalid transition(s)) on attempt %d/%d",
+                int(report["invalid_transition_count"]),
+                attempt_idx + 1,
+                max_attempts,
+            )
+            if report["issues"]:
+                logger.warning("Route validator sample issue: %s", report["issues"][0])
+
+        return []
+
+    def _validate_approach_conditioned_route(
+        self,
+        route: list[tuple[Any, str]],
+    ) -> dict[str, Any]:
+        """Validate that approach->exit transitions match legal connector mappings."""
+        report: dict[str, Any] = {
+            "checked_transition_count": 0,
+            "invalid_transition_count": 0,
+            "issues": [],
+        }
+        if not route:
+            return report
+        if not self._approach_exit_links:
+            return report
+
+        projected: list[tuple[int, Any]] = []
+        for idx, (transform, _road_option) in enumerate(route):
+            wp = self.map.get_waypoint(
+                transform.location,
+                project_to_road=True,
+                lane_type=carla.LaneType.Driving,
+            )
+            if wp is None:
+                continue
+            projected.append((idx, wp))
+
+        if len(projected) < 2:
+            return report
+
+        max_issues = max(1, int(self.config.validation_max_issues))
+        pending_approach: tuple[int, int] | None = None
+
+        for (idx_a, wp_a), (idx_b, wp_b) in zip(projected, projected[1:]):
+            a_is_junction = bool(getattr(wp_a, "is_junction", False))
+            b_is_junction = bool(getattr(wp_b, "is_junction", False))
+
+            if (not a_is_junction) and b_is_junction:
+                pending_approach = (int(wp_a.road_id), int(wp_a.lane_id))
+                continue
+
+            if pending_approach is not None and a_is_junction and (not b_is_junction):
+                report["checked_transition_count"] += 1
+                exit_key = (int(wp_b.road_id), int(wp_b.lane_id))
+                allowed = self._approach_exit_links.get(pending_approach)
+                if allowed is not None and len(allowed) > 0 and exit_key not in allowed:
+                    report["invalid_transition_count"] += 1
+                    if len(report["issues"]) < max_issues:
+                        report["issues"].append(
+                            {
+                                "from_index": int(idx_a),
+                                "to_index": int(idx_b),
+                                "approach_road_id": int(pending_approach[0]),
+                                "approach_lane_id": int(pending_approach[1]),
+                                "exit_road_id": int(exit_key[0]),
+                                "exit_lane_id": int(exit_key[1]),
+                                "allowed_exits": [
+                                    {
+                                        "road_id": int(road_id),
+                                        "lane_id": int(lane_id),
+                                    }
+                                    for road_id, lane_id in sorted(allowed)
+                                ],
+                            }
+                        )
+                pending_approach = None
+                continue
+
+            if not b_is_junction:
+                pending_approach = None
+
+        return report
 
     def _generate_random_route(
         self,

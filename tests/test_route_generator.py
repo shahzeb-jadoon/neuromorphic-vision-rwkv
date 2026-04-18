@@ -17,7 +17,7 @@ from unittest.mock import MagicMock, patch
 import numpy as np
 import pytest
 
-from src.data.route_generator import BalancedRouteGenerator, RouteConfig
+from src.data.route_generator import BalancedRouteGenerator, RouteConfig, carla
 
 # ── Test RouteConfig defaults ──────────────────────────────────────────
 
@@ -359,3 +359,125 @@ class TestBalancedRouteStitching:
                         assert trace_mock.call_count == 2
                         assert extend_mock.call_count == 1
                         assert extend_mock.call_args.args[0] is entry_wp
+
+
+class _TopoWaypoint:
+    def __init__(self, road_id: int, lane_id: int, is_junction: bool, x: float) -> None:
+        self.road_id = road_id
+        self.lane_id = lane_id
+        self.is_junction = is_junction
+        self.lane_type = carla.LaneType.Driving
+        self.transform = MockTransform(MockLocation(x, 0.0))
+
+
+class TestApproachConditionedValidation:
+    def test_builds_approach_exit_links_from_topology(self) -> None:
+        with patch.object(BalancedRouteGenerator, "__init__", lambda self, *a, **kw: None):
+            gen = BalancedRouteGenerator.__new__(BalancedRouteGenerator)
+
+        # 48/1 can legally exit via connector 791->30/1 and 727->32/-2.
+        wp_48 = _TopoWaypoint(48, 1, False, 0.0)
+        wp_791 = _TopoWaypoint(791, 1, True, 1.0)
+        wp_727 = _TopoWaypoint(727, 1, True, 1.0)
+        wp_30 = _TopoWaypoint(30, 1, False, 2.0)
+        wp_32 = _TopoWaypoint(32, -2, False, 2.0)
+
+        gen.topology = [
+            (wp_48, wp_791),
+            (wp_791, wp_30),
+            (wp_48, wp_727),
+            (wp_727, wp_32),
+        ]
+
+        links = gen._build_approach_exit_links()
+
+        assert (48, 1) in links
+        assert links[(48, 1)] == {(30, 1), (32, -2)}
+
+    def test_flags_invalid_approach_exit_transition(self) -> None:
+        with patch.object(BalancedRouteGenerator, "__init__", lambda self, *a, **kw: None):
+            gen = BalancedRouteGenerator.__new__(BalancedRouteGenerator)
+
+        gen.config = RouteConfig(validation_max_issues=4)
+        gen._approach_exit_links = {(48, 1): {(30, 1)}}
+
+        wp_a = _TopoWaypoint(48, 1, False, 0.0)
+        wp_b = _TopoWaypoint(791, 1, True, 1.0)
+        wp_c = _TopoWaypoint(39, -2, False, 2.0)  # invalid exit for approach 48/1
+
+        route = [
+            (MockTransform(MockLocation(0.0, 0.0)), "LaneFollow"),
+            (MockTransform(MockLocation(1.0, 0.0)), "Straight"),
+            (MockTransform(MockLocation(2.0, 0.0)), "LaneFollow"),
+        ]
+
+        gen.map = MagicMock()
+
+        def _map_get_waypoint(
+            location: MockLocation, *args: object, **kwargs: object
+        ) -> _TopoWaypoint:
+            if abs(float(location.x) - 0.0) < 1e-6:
+                return wp_a
+            if abs(float(location.x) - 1.0) < 1e-6:
+                return wp_b
+            return wp_c
+
+        with patch.object(gen.map, "get_waypoint", side_effect=_map_get_waypoint):
+            report = gen._validate_approach_conditioned_route(route)
+
+        assert report["checked_transition_count"] == 1
+        assert report["invalid_transition_count"] == 1
+        assert len(report["issues"]) == 1
+
+    def test_generate_route_retries_until_validation_passes(self) -> None:
+        with patch.object(BalancedRouteGenerator, "__init__", lambda self, *a, **kw: None):
+            gen = BalancedRouteGenerator.__new__(BalancedRouteGenerator)
+
+        gen.config = RouteConfig(
+            strategy="balanced",
+            validate_junction_approach_exit=True,
+            validation_max_regen_attempts=2,
+        )
+
+        route_bad = [(MockTransform(MockLocation(0.0, 0.0)), "LaneFollow")]
+        route_good = [(MockTransform(MockLocation(1.0, 0.0)), "LaneFollow")]
+
+        with patch.object(gen, "_generate_balanced_route", side_effect=[route_bad, route_good]):
+            with patch.object(
+                gen,
+                "_validate_approach_conditioned_route",
+                side_effect=[
+                    {"invalid_transition_count": 1, "issues": []},
+                    {"invalid_transition_count": 0, "issues": []},
+                ],
+            ) as validate_mock:
+                route = gen.generate_route(np.random.default_rng(0))
+
+        assert route == route_good
+        assert validate_mock.call_count == 2
+
+    def test_generate_route_returns_empty_after_validation_rejects_all(self) -> None:
+        with patch.object(BalancedRouteGenerator, "__init__", lambda self, *a, **kw: None):
+            gen = BalancedRouteGenerator.__new__(BalancedRouteGenerator)
+
+        gen.config = RouteConfig(
+            strategy="balanced",
+            validate_junction_approach_exit=True,
+            validation_max_regen_attempts=2,
+        )
+
+        route_bad = [(MockTransform(MockLocation(0.0, 0.0)), "LaneFollow")]
+
+        with patch.object(gen, "_generate_balanced_route", side_effect=[route_bad, route_bad]):
+            with patch.object(
+                gen,
+                "_validate_approach_conditioned_route",
+                side_effect=[
+                    {"invalid_transition_count": 1, "issues": []},
+                    {"invalid_transition_count": 1, "issues": []},
+                ],
+            ) as validate_mock:
+                route = gen.generate_route(np.random.default_rng(0))
+
+        assert route == []
+        assert validate_mock.call_count == 2
