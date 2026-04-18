@@ -35,6 +35,10 @@ from agents.navigation.local_planner import RoadOption
 logger = logging.getLogger(__name__)
 
 
+GRAPH_CACHE_VERSION = 2
+GRAPH_CACHE_LOGIC_TAG = "lane-graph-v2"
+
+
 class EdgeKind(Enum):
     """Internal graph edge categories."""
 
@@ -295,7 +299,7 @@ class LaneGraphPlanner:
     def _cache_path(self) -> Path:
         map_name = str(getattr(self._wmap, "name", "unknown_map")).replace("/", "_")
         key_blob = (
-            f"{map_name}|{self._sampling_resolution:.3f}|"
+            f"{GRAPH_CACHE_VERSION}|{GRAPH_CACHE_LOGIC_TAG}|{map_name}|{self._sampling_resolution:.3f}|"
             f"{self._lane_change_base_cost:.3f}|{self._late_lane_change_penalty:.3f}|"
             f"{self._lane_change_freeze_distance_m:.3f}"
         )
@@ -472,7 +476,8 @@ class LaneGraphPlanner:
 
     def _save_graph_cache(self, cache_path: Path) -> None:
         payload = {
-            "cache_version": 1,
+            "cache_version": GRAPH_CACHE_VERSION,
+            "cache_logic_tag": GRAPH_CACHE_LOGIC_TAG,
             "map_name": str(getattr(self._wmap, "name", "")),
             "sampling_resolution_m": float(self._sampling_resolution),
             "lane_change_base_cost": float(self._lane_change_base_cost),
@@ -517,7 +522,9 @@ class LaneGraphPlanner:
         except Exception:
             return False
 
-        if int(payload.get("cache_version", -1)) != 1:
+        if int(payload.get("cache_version", -1)) != GRAPH_CACHE_VERSION:
+            return False
+        if str(payload.get("cache_logic_tag", "")) != GRAPH_CACHE_LOGIC_TAG:
             return False
         if str(payload.get("map_name", "")) != str(getattr(self._wmap, "name", "")):
             return False
