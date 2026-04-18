@@ -149,6 +149,11 @@ def build_campaign(
         )
 
     float_policy_fields = [
+        "gap_fill_max_factor",
+        "gap_fill_diverge_factor",
+        "gap_fill_bezier_step",
+        "gap_fill_bezier_tangent_factor",
+        "gap_fill_bezier_max_project_error",
         "planner_wrong_way_max_yaw_diff_deg",
         "planner_turn_mismatch_threshold_deg",
         "planner_lane_change_freeze_distance_m",
@@ -186,12 +191,18 @@ def build_campaign(
         "vehicle_oncoming_conflict_gate_enabled",
         "planner_roundabout_commitment_enabled",
         "gap_fill_startup_circuit_breaker_enabled",
+        "gap_fill_bezier_enabled",
+        "planner_policy_steer_consistency_gate_enabled",
     ]
     for policy_key in bool_policy_fields:
         if policy_key in expert_cfg_dict:
             expert_kw[policy_key] = bool(expert_cfg_dict[policy_key])
 
     int_policy_fields = [
+        "gap_fill_rpc_budget",
+        "gap_fill_bezier_retry_limit",
+        "gap_fill_rpc_retry_limit",
+        "gap_fill_bezier_max_pair_index",
         "route_watchdog_min_corridor_segments",
         "route_watchdog_min_frames",
         "route_watchdog_stall_min_frames",
