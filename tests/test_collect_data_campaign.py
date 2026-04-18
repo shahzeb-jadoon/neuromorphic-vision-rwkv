@@ -32,6 +32,9 @@ def test_build_campaign_maps_arc_and_policy_controls(tmp_path: Path) -> None:
         "gap_fill_bezier_max_pair_index": 1,
         "gap_fill_bezier_enabled": False,
         "planner_policy_steer_consistency_gate_enabled": False,
+        "arc_watchdog_enabled": True,
+        "arc_watchdog_stall_min_frames": 55,
+        "arc_watchdog_progress_epsilon_m": 0.11,
     }
 
     manifest = CollectionManifest(tmp_path / "collection_manifest.json")
@@ -52,6 +55,9 @@ def test_build_campaign_maps_arc_and_policy_controls(tmp_path: Path) -> None:
     assert expert_cfg.gap_fill_bezier_max_pair_index == 1
     assert expert_cfg.gap_fill_bezier_enabled is False
     assert expert_cfg.planner_policy_steer_consistency_gate_enabled is False
+    assert expert_cfg.arc_watchdog_enabled is True
+    assert expert_cfg.arc_watchdog_stall_min_frames == 55
+    assert expert_cfg.arc_watchdog_progress_epsilon_m == 0.11
 
 
 def test_build_campaign_keeps_steer_consistency_gate_enabled_by_default(tmp_path: Path) -> None:

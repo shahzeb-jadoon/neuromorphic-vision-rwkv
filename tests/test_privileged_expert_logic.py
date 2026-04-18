@@ -91,6 +91,9 @@ def _build_expert() -> PrivilegedExpert:
     expert._gap_fill_bezier_attempts = {}
     expert._gap_fill_pair_blacklist = set()
     expert._arc_buffer = deque()
+    expert._arc_watchdog_stall_frames = 0
+    expert._arc_watchdog_prev_head_dist = None
+    expert._arc_watchdog_trigger_count = 0
     expert._steer_from_arc = 0
     expert._planner_policy_reason = PlannerPolicyReason.NONE
     expert._planner_policy_exception = PlannerPolicyException.NONE
@@ -132,6 +135,7 @@ def test_expert_config_defaults_use_conservative_arc_settings() -> None:
     assert cfg.gap_fill_bezier_retry_limit == 1
     assert cfg.gap_fill_bezier_max_pair_index == 1
     assert cfg.planner_policy_steer_consistency_gate_enabled is True
+    assert cfg.arc_watchdog_enabled is True
 
 
 def test_plan_speed_tl_mode_not_masked_by_lower_target(monkeypatch: MonkeyPatch) -> None:
@@ -749,6 +753,40 @@ def test_advance_route_uses_segment_progress_even_when_heading_would_disagree() 
     # x=2.5 is past midpoint, so wp0 should now be consumed.
     expert._advance_route(_Transform(_Loc(2.5, 0.0), yaw=180.0))
     assert expert._wp_buffer[0][0] is wp1
+
+
+def test_advance_route_arc_watchdog_clears_stalled_arc_buffer() -> None:
+    expert = _build_expert()
+    expert.config.arc_watchdog_enabled = True
+    expert.config.arc_watchdog_stall_min_frames = 1
+    expert.config.arc_watchdog_progress_epsilon_m = 0.01
+
+    arc0 = _Waypoint(6.0, 0.0, road_id=10, lane_id=1)
+    arc1 = _Waypoint(10.0, 0.0, road_id=10, lane_id=1)
+    route0 = _Waypoint(12.0, 0.0, road_id=10, lane_id=1)
+    route1 = _Waypoint(14.0, 0.0, road_id=10, lane_id=1)
+
+    expert._arc_buffer = deque(
+        [
+            (arc0, RoadOption.LANEFOLLOW),
+            (arc1, RoadOption.LANEFOLLOW),
+        ]
+    )
+    expert._wp_buffer = deque(
+        [
+            (route0, RoadOption.LANEFOLLOW),
+            (route1, RoadOption.LANEFOLLOW),
+        ]
+    )
+    setattr(expert, "_fill_buffer", lambda _transform: None)
+
+    ego_transform = _Transform(_Loc(0.0, 0.0), yaw=0.0)
+    expert._advance_route(ego_transform)
+    assert len(expert._arc_buffer) == 2
+
+    expert._advance_route(ego_transform)
+    assert len(expert._arc_buffer) == 0
+    assert expert._arc_watchdog_trigger_count == 1
 
 
 def test_densify_route_transitions_inserts_waypoints_for_large_gap() -> None:

@@ -262,6 +262,9 @@ class ExpertConfig:
     planner_roundabout_context_window_m: float = 35.0
     planner_roundabout_lane_change_cooldown_m: float = 35.0
     planner_policy_steer_consistency_gate_enabled: bool = True
+    arc_watchdog_enabled: bool = True
+    arc_watchdog_stall_min_frames: int = 80
+    arc_watchdog_progress_epsilon_m: float = 0.05
 
 
 # ---------------------------------------------------------------------------
@@ -519,6 +522,9 @@ class PrivilegedExpert:
         # _advance_route.  Kept separate from _wp_buffer so arc traversal
         # never modifies the route tracking state.
         self._arc_buffer: deque = deque()
+        self._arc_watchdog_stall_frames: int = 0
+        self._arc_watchdog_prev_head_dist: float | None = None
+        self._arc_watchdog_trigger_count: int = 0
         self._steer_from_arc: int = 0
         self._stop_sign_wait_counter: int = 0
         self._stop_sign_active: int | None = None  # actor ID
@@ -580,6 +586,10 @@ class PrivilegedExpert:
     # ------------------------------------------------------------------
     # Route management
     # ------------------------------------------------------------------
+
+    def _reset_arc_watchdog_state(self) -> None:
+        self._arc_watchdog_stall_frames = 0
+        self._arc_watchdog_prev_head_dist = None
 
     def _project_route_gap_samples(
         self,
@@ -932,6 +942,8 @@ class PrivilegedExpert:
         # Also clear any stale arc from a previous route (new expert is created
         # per episode in the collector, but belt-and-suspenders here).
         self._arc_buffer.clear()
+        self._reset_arc_watchdog_state()
+        self._arc_watchdog_trigger_count = 0
         self._gap_fill_rpcs = 0
         self._gap_fill_diverged = 0
         self._gap_fill_budget_exhausted = False
@@ -1848,18 +1860,59 @@ class PrivilegedExpert:
 
         if self._arc_buffer:
             # Arc is active — advance the arc, freeze the route buffer.
+            arc_popped = False
             while len(self._arc_buffer) > 1 and _progress_past(self._arc_buffer):
                 self._arc_buffer.popleft()
+                arc_popped = True
             if len(self._arc_buffer) <= 1:
                 # Arc exhausted — clear it so _get_target falls back to
                 # _wp_buffer.  The route buffer still holds junction_exit
                 # as its front entry; normal catchup popping handles it.
                 self._arc_buffer.clear()
+                self._reset_arc_watchdog_state()
+            elif self.config.arc_watchdog_enabled:
+                try:
+                    arc_head = self._arc_buffer[0][0].transform.location
+                    head_dist = location.distance(arc_head)
+                except (AttributeError, RuntimeError, TypeError):
+                    head_dist = None
+
+                if head_dist is None:
+                    self._arc_watchdog_stall_frames += 1
+                elif self._arc_watchdog_prev_head_dist is None or arc_popped:
+                    self._arc_watchdog_stall_frames = 0
+                else:
+                    progress_eps = max(0.01, float(self.config.arc_watchdog_progress_epsilon_m))
+                    if head_dist < self._arc_watchdog_prev_head_dist - progress_eps:
+                        self._arc_watchdog_stall_frames = 0
+                    else:
+                        self._arc_watchdog_stall_frames += 1
+
+                if head_dist is not None:
+                    self._arc_watchdog_prev_head_dist = float(head_dist)
+
+                if self._arc_watchdog_stall_frames >= max(
+                    1, int(self.config.arc_watchdog_stall_min_frames)
+                ):
+                    logger.warning(
+                        "Arc watchdog cleared stalled arc buffer (stall_frames=%d, "
+                        "route_index=%d, arc_size=%d)",
+                        self._arc_watchdog_stall_frames,
+                        self._route_index,
+                        len(self._arc_buffer),
+                    )
+                    self._arc_buffer.clear()
+                    self._arc_watchdog_trigger_count += 1
+                    self._reset_arc_watchdog_state()
+            else:
+                self._reset_arc_watchdog_state()
             # Still call _fill_buffer so route waypoints reload normally,
             # but _fill_junction_gaps will skip new Bezier generation while
             # _arc_buffer is non-empty (no double-arc).
             self._fill_buffer(transform)
             return
+
+        self._reset_arc_watchdog_state()
 
         # Normal route buffer advancement.
         while len(self._wp_buffer) > 1 and _progress_past(self._wp_buffer):

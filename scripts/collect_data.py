@@ -176,6 +176,7 @@ def build_campaign(
         "lane_graph_lane_change_cost",
         "lane_graph_late_lane_change_penalty",
         "lane_graph_turn_threshold_deg",
+        "arc_watchdog_progress_epsilon_m",
     ]
     for policy_key in float_policy_fields:
         if policy_key in expert_cfg_dict:
@@ -193,6 +194,7 @@ def build_campaign(
         "gap_fill_startup_circuit_breaker_enabled",
         "gap_fill_bezier_enabled",
         "planner_policy_steer_consistency_gate_enabled",
+        "arc_watchdog_enabled",
     ]
     for policy_key in bool_policy_fields:
         if policy_key in expert_cfg_dict:
@@ -207,6 +209,7 @@ def build_campaign(
         "route_watchdog_min_frames",
         "route_watchdog_stall_min_frames",
         "lane_graph_max_search_expansions",
+        "arc_watchdog_stall_min_frames",
     ]
     for policy_key in int_policy_fields:
         if policy_key in expert_cfg_dict:
