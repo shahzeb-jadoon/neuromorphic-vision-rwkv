@@ -103,6 +103,17 @@ class MockLocation:
     y: float
     z: float = 0.0
 
+    def distance(self, other: "MockLocation") -> float:
+        dx = float(self.x - other.x)
+        dy = float(self.y - other.y)
+        dz = float(self.z - other.z)
+        return float((dx * dx + dy * dy + dz * dz) ** 0.5)
+
+
+@dataclass
+class MockTransform:
+    location: MockLocation
+
 
 class TestFindTargetJunction:
     """Test _find_target_junction — geometry + distance filtering."""
@@ -225,3 +236,126 @@ class TestExtendRoute:
         wp.next = MagicMock(return_value=[])
         result = generator._extend_route(wp, 100)
         assert len(result) == 0
+
+
+class TestBalancedRouteStitching:
+    @staticmethod
+    def _make_waypoint(x: float, y: float) -> MagicMock:
+        wp = MagicMock()
+        wp.transform = MockTransform(MockLocation(x, y))
+        return wp
+
+    def test_traces_through_selected_junction_exit(self) -> None:
+        with patch.object(BalancedRouteGenerator, "__init__", lambda self, *a, **kw: None):
+            gen = BalancedRouteGenerator.__new__(BalancedRouteGenerator)
+
+        gen.config = RouteConfig(min_waypoints=0, max_waypoints=500, sampling_resolution=2.0)
+
+        spawn_loc = MockLocation(0.0, 0.0)
+        spawn = MagicMock()
+        spawn.location = spawn_loc
+        gen.spawn_points = [spawn]
+
+        start_wp = self._make_waypoint(0.0, 0.0)
+        entry_wp = self._make_waypoint(10.0, 0.0)
+        exit_wp = self._make_waypoint(12.0, 0.0)
+
+        gen.map = MagicMock()
+
+        def _map_get_waypoint(location: MockLocation, *args: object, **kwargs: object) -> MagicMock:
+            if location is spawn_loc:
+                return start_wp
+            if abs(float(location.x) - 10.0) < 1e-6:
+                return entry_wp
+            if abs(float(location.x) - 12.0) < 1e-6:
+                return exit_wp
+            return start_wp
+
+        target_junction = {
+            "junction_id": 1,
+            "location": MockLocation(10.0, 0.0),
+            "entry_waypoints": [entry_wp],
+            "exit_waypoints": [exit_wp],
+        }
+        gen._junctions = [target_junction]
+
+        seg_to_entry = [
+            (MockTransform(MockLocation(1.0, 0.0)), "LaneFollow"),
+            (MockTransform(MockLocation(10.0, 0.0)), "LaneFollow"),
+        ]
+        seg_through_junction = [
+            (MockTransform(MockLocation(10.0, 0.0)), "LaneFollow"),
+            (MockTransform(MockLocation(12.0, 0.0)), "Left"),
+        ]
+        with patch.object(gen.map, "get_waypoint", side_effect=_map_get_waypoint):
+            with patch.object(
+                gen,
+                "_find_target_junction",
+                side_effect=[target_junction, None],
+            ):
+                with patch.object(
+                    gen,
+                    "_trace_route",
+                    side_effect=[seg_to_entry, seg_through_junction],
+                ) as trace_mock:
+                    route = gen._generate_balanced_route(np.random.default_rng(0))
+
+                    coords = [(float(tf.location.x), float(tf.location.y)) for tf, _ in route]
+                    assert coords == [(1.0, 0.0), (10.0, 0.0), (12.0, 0.0)]
+                    assert trace_mock.call_count == 2
+                    assert trace_mock.call_args_list[1].args[0] is entry_wp
+                    assert trace_mock.call_args_list[1].args[1] is exit_wp
+
+    def test_failed_junction_trace_keeps_continuous_tail(self) -> None:
+        with patch.object(BalancedRouteGenerator, "__init__", lambda self, *a, **kw: None):
+            gen = BalancedRouteGenerator.__new__(BalancedRouteGenerator)
+
+        gen.config = RouteConfig(min_waypoints=6, max_waypoints=500, sampling_resolution=2.0)
+
+        spawn_loc = MockLocation(0.0, 0.0)
+        spawn = MagicMock()
+        spawn.location = spawn_loc
+        gen.spawn_points = [spawn]
+
+        start_wp = self._make_waypoint(0.0, 0.0)
+        entry_wp = self._make_waypoint(10.0, 0.0)
+        exit_wp = self._make_waypoint(12.0, 0.0)
+
+        gen.map = MagicMock()
+
+        def _map_get_waypoint(location: MockLocation, *args: object, **kwargs: object) -> MagicMock:
+            if location is spawn_loc:
+                return start_wp
+            if abs(float(location.x) - 10.0) < 1e-6:
+                return entry_wp
+            if abs(float(location.x) - 12.0) < 1e-6:
+                return exit_wp
+            return start_wp
+
+        target_junction = {
+            "junction_id": 1,
+            "location": MockLocation(10.0, 0.0),
+            "entry_waypoints": [entry_wp],
+            "exit_waypoints": [exit_wp],
+        }
+        gen._junctions = [target_junction]
+
+        seg_to_entry = [
+            (MockTransform(MockLocation(1.0, 0.0)), "LaneFollow"),
+            (MockTransform(MockLocation(10.0, 0.0)), "LaneFollow"),
+        ]
+        with patch.object(gen.map, "get_waypoint", side_effect=_map_get_waypoint):
+            with patch.object(
+                gen,
+                "_find_target_junction",
+                side_effect=[target_junction, None],
+            ):
+                with patch.object(
+                    gen, "_trace_route", side_effect=[seg_to_entry, []]
+                ) as trace_mock:
+                    with patch.object(gen, "_extend_route", return_value=[]) as extend_mock:
+                        gen._generate_balanced_route(np.random.default_rng(0))
+
+                        assert trace_mock.call_count == 2
+                        assert extend_mock.call_count == 1
+                        assert extend_mock.call_args.args[0] is entry_wp

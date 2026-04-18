@@ -223,13 +223,28 @@ class BalancedRouteGenerator:
                 if road_option in ("Left", "Right", "Straight"):
                     turn_counts[road_option] += 1
 
-            route_segments.extend(segment)
-            total_waypoints += len(segment)
+            total_waypoints += self._append_route_segment(route_segments, segment)
 
-            # Move current position past the junction
+            segment_tail_wp = self._waypoint_from_transform(segment[-1][0])
+            if segment_tail_wp is not None:
+                current_wp = segment_tail_wp
+
+            # Move current position past the junction using a traced
+            # connector path, not a random coordinate jump.
             exit_wps = target_junction["exit_waypoints"]
             if exit_wps:
-                current_wp = exit_wps[int(rng.integers(len(exit_wps)))]
+                exit_wp = exit_wps[int(rng.integers(len(exit_wps)))]
+                junction_segment = self._trace_route(current_wp, exit_wp)
+                if junction_segment:
+                    for _, road_option in junction_segment:
+                        if road_option in ("Left", "Right", "Straight"):
+                            turn_counts[road_option] += 1
+
+                    total_waypoints += self._append_route_segment(route_segments, junction_segment)
+
+                    junction_tail_wp = self._waypoint_from_transform(junction_segment[-1][0])
+                    if junction_tail_wp is not None:
+                        current_wp = junction_tail_wp
 
         # If we didn't get enough waypoints, extend with random driving
         if total_waypoints < self.config.min_waypoints:
@@ -300,6 +315,43 @@ class BalancedRouteGenerator:
         except Exception as e:
             logger.error("Route tracing failed: %s", e)
             return []
+
+    def _append_route_segment(
+        self,
+        route_segments: list[tuple[Any, str]],
+        segment: list[tuple[Any, str]],
+    ) -> int:
+        """Append a traced segment while skipping duplicated seam points."""
+        if not segment:
+            return 0
+
+        start_idx = 0
+        if route_segments:
+            last_loc = route_segments[-1][0].location
+            tol = max(0.05, float(self.config.sampling_resolution) * 0.05)
+            while start_idx < len(segment):
+                cur_loc = segment[start_idx][0].location
+                if last_loc.distance(cur_loc) <= tol:
+                    start_idx += 1
+                    continue
+                break
+
+        if start_idx >= len(segment):
+            return 0
+
+        route_segments.extend(segment[start_idx:])
+        return len(segment) - start_idx
+
+    def _waypoint_from_transform(self, transform: Any) -> Any | None:
+        """Project a transform back to the nearest driving waypoint."""
+        try:
+            return self.map.get_waypoint(
+                transform.location,
+                project_to_road=True,
+                lane_type=carla.LaneType.Driving,
+            )
+        except Exception:
+            return None
 
     def _extend_route(
         self,
