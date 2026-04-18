@@ -434,6 +434,26 @@ class TestRouteTransitionLinkReport:
 
 
 class TestRouteFailFast:
+    def test_default_config_keeps_fail_fast_and_sanitizer_thresholds(self) -> None:
+        cfg = EpisodeConfig()
+
+        assert cfg.route_fail_fast_enabled is True
+        assert cfg.route_fail_fast_watchdog_streak_frames > 0
+        assert cfg.route_sanitizer_warn_gap_m > 0.0
+        assert cfg.route_sanitizer_severe_gap_m >= cfg.route_sanitizer_warn_gap_m
+
+    def test_default_config_aborts_on_severe_watchdog_streak_five(self) -> None:
+        cfg = EpisodeConfig()
+
+        abort, reason = ExpertDataCollector._route_fail_fast_decision(
+            config=cfg,
+            route_sanitizer_report={"severe_transition_count": 1},
+            route_watchdog_streak=5,
+        )
+
+        assert abort is True
+        assert reason == "severe_sanitizer_watchdog_streak_5_of_5"
+
     def test_aborts_on_watchdog_streak_threshold(self) -> None:
         cfg = EpisodeConfig(route_fail_fast_enabled=True, route_fail_fast_watchdog_streak_frames=8)
 
