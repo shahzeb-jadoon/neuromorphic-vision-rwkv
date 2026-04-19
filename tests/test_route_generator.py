@@ -638,3 +638,79 @@ class TestApproachConditionedValidation:
 
         assert route == []
         assert validate_mock.call_count == 2
+
+
+class TestGenerateRouteFromLocation:
+    def test_returns_empty_when_start_waypoint_missing(self) -> None:
+        with patch.object(BalancedRouteGenerator, "__init__", lambda self, *a, **kw: None):
+            gen = BalancedRouteGenerator.__new__(BalancedRouteGenerator)
+
+        gen.config = RouteConfig(strategy="balanced")
+        gen.map = MagicMock()
+        gen.map.get_waypoint.return_value = None
+
+        route = gen.generate_route_from_location(MockLocation(0.0, 0.0), np.random.default_rng(0))
+
+        assert route == []
+
+    def test_balanced_strategy_dispatches_to_start_helper(self) -> None:
+        with patch.object(BalancedRouteGenerator, "__init__", lambda self, *a, **kw: None):
+            gen = BalancedRouteGenerator.__new__(BalancedRouteGenerator)
+
+        gen.config = RouteConfig(
+            strategy="balanced",
+            min_waypoints=100,
+            max_waypoints=200,
+            validate_junction_approach_exit=False,
+        )
+        start_wp = MagicMock()
+        gen.map = MagicMock()
+        gen.map.get_waypoint.return_value = start_wp
+
+        generated = [(MockTransform(MockLocation(1.0, 0.0)), "Left")]
+        with patch.object(
+            gen,
+            "_generate_balanced_route_from_start",
+            return_value=generated,
+        ) as balanced_mock:
+            with patch.object(gen, "_record_campaign_turn_counts") as record_mock:
+                route = gen.generate_route_from_location(
+                    MockLocation(0.0, 0.0),
+                    np.random.default_rng(0),
+                )
+
+        assert route == generated
+        balanced_mock.assert_called_once()
+        record_mock.assert_called_once_with(generated)
+
+    def test_random_strategy_dispatches_to_start_helper_with_override_bounds(self) -> None:
+        with patch.object(BalancedRouteGenerator, "__init__", lambda self, *a, **kw: None):
+            gen = BalancedRouteGenerator.__new__(BalancedRouteGenerator)
+
+        gen.config = RouteConfig(
+            strategy="balanced",
+            min_waypoints=100,
+            max_waypoints=200,
+            validate_junction_approach_exit=False,
+        )
+        start_wp = MagicMock()
+        gen.map = MagicMock()
+        gen.map.get_waypoint.return_value = start_wp
+
+        generated = [(MockTransform(MockLocation(1.0, 0.0)), "LaneFollow")]
+        with patch.object(
+            gen,
+            "_generate_random_route_from_start",
+            return_value=generated,
+        ) as random_mock:
+            route = gen.generate_route_from_location(
+                MockLocation(0.0, 0.0),
+                np.random.default_rng(0),
+                min_waypoints=150,
+                max_waypoints=180,
+                strategy="random",
+            )
+
+        assert route == generated
+        assert random_mock.call_args.args[2] == 150
+        assert random_mock.call_args.args[3] == 180

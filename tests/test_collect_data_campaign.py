@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from scripts.collect_data import build_campaign
+from scripts.collect_data import build_campaign, parse_route_continuation_config
 from src.data.expert_collector import CollectionManifest
 
 
@@ -69,3 +69,31 @@ def test_build_campaign_keeps_steer_consistency_gate_enabled_by_default(tmp_path
     assert len(remaining) == 1
     ep_cfg, _weight = remaining[0]
     assert ep_cfg.expert_config.planner_policy_steer_consistency_gate_enabled is True
+
+
+def test_parse_route_continuation_defaults_to_off() -> None:
+    parsed = parse_route_continuation_config({})
+
+    assert parsed.enabled is False
+    assert parsed.mode == "off"
+    assert parsed.max_chains_per_episode == 0
+
+
+def test_parse_route_continuation_clamps_lengths() -> None:
+    parsed = parse_route_continuation_config(
+        {
+            "continuation": {
+                "enabled": True,
+                "mode": "atlas_chain",
+                "min_route_length": 300,
+                "max_route_length": 120,
+                "max_chains_per_episode": 5,
+            }
+        }
+    )
+
+    assert parsed.enabled is True
+    assert parsed.mode == "atlas_chain"
+    assert parsed.max_chains_per_episode == 5
+    assert parsed.min_route_length == 300
+    assert parsed.max_route_length == 300

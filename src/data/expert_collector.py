@@ -37,7 +37,7 @@ import traceback
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import h5py
 import numpy as np
@@ -1757,6 +1757,8 @@ class ExpertDataCollector:
         self,
         config: EpisodeConfig,
         route_waypoints: list | None = None,
+        route_continuation_provider: Callable[[Any], list[tuple[Any, str]] | None] | None = None,
+        route_continuation_max_chains: int = 0,
     ) -> EpisodeResult:
         """Collect a single episode of expert driving data.
 
@@ -1769,6 +1771,12 @@ class ExpertDataCollector:
             route_waypoints: Pre-computed route as
                 ``[(carla.Transform, RoadOption_str), ...]``.
                 If ``None``, a random route is generated.
+            route_continuation_provider: Optional callback invoked when
+                ``expert.done()`` becomes true. It receives the current ego
+                location and may return a new route in the same
+                ``[(carla.Transform, RoadOption_str), ...]`` format.
+            route_continuation_max_chains: Maximum number of continuation
+                routes allowed in this episode.
 
         Returns:
             EpisodeResult with status and metadata.
@@ -1796,6 +1804,7 @@ class ExpertDataCollector:
         route_sanitizer_report: dict[str, Any] | None = None
         route_watchdog_streak = 0
         fail_fast_reason: str | None = None
+        route_chains_applied = 0
 
         try:
             assert self.world is not None
@@ -2015,18 +2024,28 @@ class ExpertDataCollector:
             expert = PrivilegedExpert(vehicle, self.world, route_planner, config.expert_config)
             logger.info("Expert route planner backend: %s", planner_backend)
 
+            def _set_expert_route(route_plan: list[tuple[Any, str]]) -> int:
+                route_local: list[tuple[Any, RoadOption]] = []
+                for transform, road_opt_name in route_plan:
+                    wp = carla_map.get_waypoint(transform.location)
+                    if wp is None:
+                        continue
+                    opt = self._parse_road_option(str(road_opt_name))
+                    route_local.append((wp, opt))
+
+                if not route_local:
+                    return 0
+
+                expert.set_route(route_local)
+                return len(route_local)
+
             # Build route
             if route_waypoints:
                 # route_waypoints = [(transform, road_option_str), ...]
-                route = []
-                for transform, road_opt_name in route_waypoints:
-                    wp = carla_map.get_waypoint(transform.location)
-                    opt = self._parse_road_option(str(road_opt_name))
-                    route.append((wp, opt))
-                expert.set_route(route)
+                route_len = _set_expert_route(route_waypoints)
                 logger.info(
                     "Set custom route with %d waypoints for expert",
-                    len(route),
+                    route_len,
                 )
             else:
                 # Random destination
@@ -2146,6 +2165,33 @@ class ExpertDataCollector:
 
                 # Check if expert finished route
                 if expert.done():
+                    continued = False
+                    if route_continuation_provider is not None and route_chains_applied < max(
+                        0, int(route_continuation_max_chains)
+                    ):
+                        try:
+                            current_loc = vehicle.get_transform().location
+                            continuation_route = route_continuation_provider(current_loc)
+                        except Exception as e:
+                            logger.warning("Route continuation provider failed: %s", e)
+                            continuation_route = None
+
+                        if continuation_route:
+                            route_len = _set_expert_route(continuation_route)
+                            if route_len > 0:
+                                route_chains_applied += 1
+                                route_watchdog_streak = 0
+                                logger.info(
+                                    "Applied route continuation #%d at frame %d (%d waypoints)",
+                                    route_chains_applied,
+                                    frame_idx,
+                                    route_len,
+                                )
+                                continued = True
+
+                    if continued:
+                        continue
+
                     logger.info("Expert completed route at frame %d", frame_idx)
                     break
 

@@ -231,6 +231,160 @@ class BalancedRouteGenerator:
 
         return []
 
+    def generate_route_from_location(
+        self,
+        start_location: Any,
+        rng: np.random.Generator | None = None,
+        *,
+        min_waypoints: int | None = None,
+        max_waypoints: int | None = None,
+        strategy: str | None = None,
+    ) -> list[tuple[Any, str]]:
+        """Generate a route starting from the ego's current world location.
+
+        This is used by mid-episode continuation modes (micro-replan / atlas
+        chaining) so the route remains physically contiguous with the current
+        drive instead of switching to synthetic tail-extension waypoints.
+        """
+        if rng is None:
+            rng = np.random.default_rng()
+
+        chosen_strategy = (strategy or self.config.strategy).strip().lower()
+        min_wp, max_wp = self._resolve_waypoint_bounds(min_waypoints, max_waypoints)
+
+        try:
+            start_wp = self.map.get_waypoint(
+                start_location,
+                project_to_road=True,
+                lane_type=carla.LaneType.Driving,
+            )
+        except Exception:
+            start_wp = None
+
+        if start_wp is None:
+            return []
+
+        max_attempts = max(1, int(self.config.validation_max_regen_attempts))
+        for attempt_idx in range(max_attempts):
+            if chosen_strategy == "random":
+                route = self._generate_random_route_from_start(start_wp, rng, min_wp, max_wp)
+            elif chosen_strategy == "balanced":
+                route = self._generate_balanced_route_from_start(start_wp, rng, min_wp, max_wp)
+            else:
+                raise ValueError(f"Unknown strategy: {chosen_strategy}")
+
+            if not route:
+                continue
+
+            if not bool(self.config.validate_junction_approach_exit):
+                self._record_campaign_turn_counts(route)
+                return route
+
+            report = self._validate_approach_conditioned_route(route)
+            if int(report["invalid_transition_count"]) == 0:
+                self._record_campaign_turn_counts(route)
+                return route
+
+            logger.warning(
+                "Route validator rejected continuation route (%d invalid transition(s)) on "
+                "attempt %d/%d",
+                int(report["invalid_transition_count"]),
+                attempt_idx + 1,
+                max_attempts,
+            )
+            if report["issues"]:
+                logger.warning("Route validator sample issue: %s", report["issues"][0])
+
+        return []
+
+    def _resolve_waypoint_bounds(
+        self,
+        min_waypoints: int | None,
+        max_waypoints: int | None,
+    ) -> tuple[int, int]:
+        min_wp = (
+            max(1, int(min_waypoints))
+            if min_waypoints is not None
+            else max(1, int(self.config.min_waypoints))
+        )
+        max_wp = (
+            max(1, int(max_waypoints))
+            if max_waypoints is not None
+            else max(1, int(self.config.max_waypoints))
+        )
+        if max_wp < min_wp:
+            max_wp = min_wp
+        return min_wp, max_wp
+
+    def _fit_route_length(
+        self,
+        route: list[tuple[Any, str]],
+        start_wp: Any,
+        min_waypoints: int,
+        max_waypoints: int,
+    ) -> list[tuple[Any, str]]:
+        """Trim/extend a route into the requested waypoint budget."""
+        if max_waypoints < 1:
+            return []
+
+        fitted = list(route[:max_waypoints])
+        if len(fitted) >= min_waypoints:
+            return fitted
+
+        extra_budget = max_waypoints - len(fitted)
+        if extra_budget <= 0:
+            return fitted
+
+        anchor_wp = start_wp
+        if fitted:
+            tail_wp = self._waypoint_from_transform(fitted[-1][0])
+            if tail_wp is not None:
+                anchor_wp = tail_wp
+
+        needed = min(min_waypoints - len(fitted), extra_budget)
+        if anchor_wp is not None and needed > 0:
+            extra = self._extend_route(anchor_wp, needed)
+            self._append_route_segment(fitted, extra)
+        return fitted[:max_waypoints]
+
+    def _generate_random_route_from_start(
+        self,
+        start_wp: Any,
+        rng: np.random.Generator,
+        min_waypoints: int,
+        max_waypoints: int,
+    ) -> list[tuple[Any, str]]:
+        """Generate a random route from an explicit start waypoint."""
+        if not self.spawn_points:
+            return self._fit_route_length([], start_wp, min_waypoints, max_waypoints)
+
+        best: list[tuple[Any, str]] = []
+        for idx in rng.permutation(len(self.spawn_points)):
+            end_tf = self.spawn_points[int(idx)]
+            end_wp = self._waypoint_from_transform(end_tf)
+            if end_wp is None:
+                continue
+
+            try:
+                if start_wp.transform.location.distance(end_wp.transform.location) < 30.0:
+                    continue
+            except Exception:
+                pass
+
+            segment = self._trace_route(start_wp, end_wp)
+            if not segment:
+                continue
+
+            fitted = self._fit_route_length(segment, start_wp, min_waypoints, max_waypoints)
+            if len(fitted) > len(best):
+                best = fitted
+            if len(fitted) >= min_waypoints:
+                return fitted
+
+        if best:
+            return best
+        return self._fit_route_length([], start_wp, min_waypoints, max_waypoints)
+
     def _validate_approach_conditioned_route(
         self,
         route: list[tuple[Any, str]],
@@ -338,6 +492,31 @@ class BalancedRouteGenerator:
         # Start from random spawn point
         start_idx = rng.integers(len(self.spawn_points))
         current_wp = self.map.get_waypoint(self.spawn_points[int(start_idx)].location)
+        return self._generate_balanced_route_from_start(
+            current_wp,
+            rng,
+            int(self.config.min_waypoints),
+            int(self.config.max_waypoints),
+        )
+
+    def _generate_balanced_route_from_start(
+        self,
+        current_wp: Any,
+        rng: np.random.Generator,
+        min_waypoints: int,
+        max_waypoints: int,
+    ) -> list[tuple[Any, str]]:
+        """Balanced route generation from an explicit starting waypoint."""
+        if current_wp is None:
+            return []
+        if not self._junctions:
+            logger.warning("No junctions found, falling back to random route")
+            return self._generate_random_route_from_start(
+                current_wp,
+                rng,
+                min_waypoints,
+                max_waypoints,
+            )
 
         route_segments: list[tuple[Any, str]] = []
         turn_counts: dict[str, int] = {
@@ -351,7 +530,7 @@ class BalancedRouteGenerator:
         max_segments = 20  # Safety limit
 
         for _ in range(max_segments):
-            remaining_budget = self.config.max_waypoints - total_waypoints
+            remaining_budget = max_waypoints - total_waypoints
             if remaining_budget <= 0:
                 break
 
@@ -391,7 +570,7 @@ class BalancedRouteGenerator:
                 if segment_tail_wp is not None:
                     current_wp = segment_tail_wp
 
-            remaining_budget = self.config.max_waypoints - total_waypoints
+            remaining_budget = max_waypoints - total_waypoints
             if remaining_budget <= 0:
                 break
 
@@ -419,14 +598,14 @@ class BalancedRouteGenerator:
                         if junction_tail_wp is not None:
                             current_wp = junction_tail_wp
 
-                    if total_waypoints >= self.config.max_waypoints:
+                    if total_waypoints >= max_waypoints:
                         break
 
         # If we didn't get enough waypoints, extend with random driving
-        if total_waypoints < self.config.min_waypoints:
-            remaining_budget = self.config.max_waypoints - total_waypoints
+        if total_waypoints < min_waypoints:
+            remaining_budget = max_waypoints - total_waypoints
             if remaining_budget > 0:
-                extra_needed = min(self.config.min_waypoints - total_waypoints, remaining_budget)
+                extra_needed = min(min_waypoints - total_waypoints, remaining_budget)
                 extra = self._extend_route(current_wp, extra_needed)
                 total_waypoints += self._append_route_segment(route_segments, extra)
 

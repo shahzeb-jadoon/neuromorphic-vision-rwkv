@@ -36,12 +36,14 @@ expert:
   vehicle_hazard_distance: 25.0
   pedestrian_hazard_distance: 15.0
   pedestrian_emergency_distance: 5.0
+  vehicle_vertical_conflict_max_m: 2.0
   vehicle_allow_lateral_fallback: false
   vehicle_oncoming_conflict_gate_enabled: true
   oncoming_lead_lateral_max_m: 1.2
   oncoming_lead_longitudinal_max_m: 12.0
   oncoming_lead_ttc_max_s: 1.5
   oncoming_lead_min_closing_speed_kmh: 5.0
+  route_tail_extension_enabled: true
   turn_speed_factor: 0.45
   steering_noise_sigma: 0.05
   # Waypoint planner policy scaffolding (Commit A)
@@ -117,6 +119,15 @@ routes:
     max_adjust: 0.05           # Per-turn target correction cap (absolute fraction)
     smoothing_alpha: 0.35      # EMA factor for deficit smoothing (0..1)
     min_turn_samples: 20       # Wait for this many observed turn labels before correcting
+  continuation:
+    enabled: true              # R2/R3: chain routes after true exhaustion (expert.done())
+    mode: atlas_chain          # off | micro_replan | atlas_chain
+    max_chains_per_episode: 8  # hard cap for bounded runtime + diagnostics clarity
+    min_route_length: 120      # continuation route floor (waypoints)
+    max_route_length: 260      # continuation route cap (waypoints)
+    atlas_active_horizon: 4    # lazy-loaded destination anchors kept ready
+    atlas_bank_size: 24        # strict memory cap for queued atlas anchors
+    atlas_min_destination_distance_m: 60.0
   min_route_length: 100        # Minimum waypoints
   max_route_length: 500        # Maximum waypoints
 

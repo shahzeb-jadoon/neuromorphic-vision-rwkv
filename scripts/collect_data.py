@@ -12,6 +12,8 @@ Usage:
 from __future__ import annotations
 
 import argparse
+from collections import deque
+from dataclasses import dataclass
 import hashlib
 import itertools
 import logging
@@ -44,6 +46,152 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
+@dataclass
+class RouteContinuationConfig:
+    """Continuation policy once a route is truly exhausted (expert.done())."""
+
+    enabled: bool = False
+    mode: str = "off"  # off | micro_replan | atlas_chain
+    max_chains_per_episode: int = 0
+    min_route_length: int = 120
+    max_route_length: int = 240
+    atlas_active_horizon: int = 4
+    atlas_bank_size: int = 32
+    atlas_min_destination_distance_m: float = 60.0
+
+
+class _LazyAtlasContinuationPlanner:
+    """Bounded-memory, lazy route-atlas continuation planner.
+
+    Maintains a small queue of destination anchors and only materializes
+    routes when continuation is requested. This keeps memory usage bounded
+    while enabling long-lived chained routing.
+    """
+
+    def __init__(
+        self,
+        route_gen: BalancedRouteGenerator,
+        rng: np.random.Generator,
+        *,
+        min_waypoints: int,
+        max_waypoints: int,
+        active_horizon: int,
+        bank_size: int,
+        min_destination_distance_m: float,
+    ) -> None:
+        self.route_gen = route_gen
+        self.rng = rng
+        self.min_waypoints = max(1, int(min_waypoints))
+        self.max_waypoints = max(self.min_waypoints, int(max_waypoints))
+        self.active_horizon = max(1, int(active_horizon))
+        self.bank_size = max(self.active_horizon, int(bank_size))
+        self.min_destination_distance_m = max(0.0, float(min_destination_distance_m))
+        self._dest_queue: deque[Any] = deque()
+        self._spawn_cycle = list(self.route_gen.spawn_points)
+        if self._spawn_cycle:
+            order = np.arange(len(self._spawn_cycle))
+            self.rng.shuffle(order)
+            self._spawn_cycle = [self._spawn_cycle[int(i)] for i in order]
+        self._spawn_idx = 0
+
+    def _next_destination_anchor(self, current_location: Any) -> Any | None:
+        if not self._spawn_cycle:
+            return None
+
+        attempts = max(1, len(self._spawn_cycle))
+        for _ in range(attempts):
+            anchor = self._spawn_cycle[self._spawn_idx]
+            self._spawn_idx = (self._spawn_idx + 1) % len(self._spawn_cycle)
+
+            try:
+                if current_location.distance(anchor.location) < self.min_destination_distance_m:
+                    continue
+            except Exception:
+                pass
+            return anchor
+        return None
+
+    def _refill(self, current_location: Any) -> None:
+        target_size = min(self.active_horizon, self.bank_size)
+        while len(self._dest_queue) < target_size:
+            anchor = self._next_destination_anchor(current_location)
+            if anchor is None:
+                break
+            if len(self._dest_queue) < self.bank_size:
+                self._dest_queue.append(anchor)
+
+    def next_route(self, current_location: Any) -> list[tuple[Any, str]]:
+        self._refill(current_location)
+
+        start_wp = self.route_gen.map.get_waypoint(current_location)
+        if start_wp is None:
+            return []
+
+        while self._dest_queue:
+            anchor = self._dest_queue.popleft()
+            end_wp = self.route_gen._waypoint_from_transform(anchor)
+            if end_wp is None:
+                continue
+
+            segment = self.route_gen._trace_route(start_wp, end_wp)
+            fitted = self.route_gen._fit_route_length(
+                segment,
+                start_wp,
+                self.min_waypoints,
+                self.max_waypoints,
+            )
+            if fitted:
+                return fitted
+
+        # Fallback keeps continuation alive even if all current anchors fail.
+        return self.route_gen.generate_route_from_location(
+            current_location,
+            self.rng,
+            min_waypoints=self.min_waypoints,
+            max_waypoints=self.max_waypoints,
+            strategy="balanced",
+        )
+
+
+def parse_route_continuation_config(routes_cfg: dict) -> RouteContinuationConfig:
+    """Parse continuation controls from ``routes.continuation`` YAML block."""
+    cont_cfg = routes_cfg.get("continuation", {})
+
+    enabled = bool(cont_cfg.get("enabled", False))
+    mode = str(cont_cfg.get("mode", "off")).strip().lower()
+    if mode not in {"off", "micro_replan", "atlas_chain"}:
+        logger.warning("Unknown routes.continuation.mode=%s; falling back to off", mode)
+        mode = "off"
+    if not enabled:
+        mode = "off"
+    if mode == "off":
+        enabled = False
+
+    min_route_length = int(cont_cfg.get("min_route_length", 120))
+    max_route_length = int(cont_cfg.get("max_route_length", 240))
+    if max_route_length < min_route_length:
+        logger.warning(
+            "routes.continuation.max_route_length (%d) < min_route_length (%d); clamping",
+            max_route_length,
+            min_route_length,
+        )
+        max_route_length = min_route_length
+
+    return RouteContinuationConfig(
+        enabled=enabled,
+        mode=mode,
+        max_chains_per_episode=max(0, int(cont_cfg.get("max_chains_per_episode", 0))),
+        min_route_length=max(1, min_route_length),
+        max_route_length=max(1, max_route_length),
+        atlas_active_horizon=max(1, int(cont_cfg.get("atlas_active_horizon", 4))),
+        atlas_bank_size=max(1, int(cont_cfg.get("atlas_bank_size", 32))),
+        atlas_min_destination_distance_m=max(
+            0.0,
+            float(cont_cfg.get("atlas_min_destination_distance_m", 60.0)),
+        ),
+    )
+
+
 def load_config(config_path: str) -> dict:
     """Load YAML collection config."""
     with open(config_path) as f:
@@ -71,7 +219,9 @@ def _episode_config_hash(config: EpisodeConfig) -> str:
         f"_stpid{ec.steer_kp},{ec.steer_ki},{ec.steer_kd}"
         f"_tlbd{ec.traffic_light_brake_distance}"
         f"_vhd{ec.vehicle_hazard_distance}"
+        f"_vvert{ec.vehicle_vertical_conflict_max_m}"
         f"_phd{ec.pedestrian_hazard_distance}"
+        f"_tailx{int(bool(ec.route_tail_extension_enabled))}"
         f"_tsf{ec.turn_speed_factor}"
         f"_sns{ec.steering_noise_sigma}"
     )
@@ -147,6 +297,19 @@ def build_campaign(
         expert_kw["route_planner_backend"] = (
             str(expert_cfg_dict["route_planner_backend"]).strip().lower()
         )
+    # V2 shared vertical gate: support both new key and legacy aliases.
+    if "vehicle_vertical_conflict_max_m" in expert_cfg_dict:
+        expert_kw["vehicle_vertical_conflict_max_m"] = float(
+            expert_cfg_dict["vehicle_vertical_conflict_max_m"]
+        )
+    elif "vehicle_adjacent_sat_vertical_max_m" in expert_cfg_dict:
+        expert_kw["vehicle_vertical_conflict_max_m"] = float(
+            expert_cfg_dict["vehicle_adjacent_sat_vertical_max_m"]
+        )
+    elif "corridor_max_vertical_separation" in expert_cfg_dict:
+        expert_kw["vehicle_vertical_conflict_max_m"] = float(
+            expert_cfg_dict["corridor_max_vertical_separation"]
+        )
 
     float_policy_fields = [
         "gap_fill_max_factor",
@@ -177,6 +340,7 @@ def build_campaign(
         "lane_graph_late_lane_change_penalty",
         "lane_graph_turn_threshold_deg",
         "arc_watchdog_progress_epsilon_m",
+        "route_tail_extension_step_m",
     ]
     for policy_key in float_policy_fields:
         if policy_key in expert_cfg_dict:
@@ -195,6 +359,7 @@ def build_campaign(
         "gap_fill_bezier_enabled",
         "planner_policy_steer_consistency_gate_enabled",
         "arc_watchdog_enabled",
+        "route_tail_extension_enabled",
     ]
     for policy_key in bool_policy_fields:
         if policy_key in expert_cfg_dict:
@@ -766,6 +931,19 @@ def main() -> None:
         campaign_turn_balance_min_turn_samples=campaign_turn_balance_min_turn_samples,
     )
 
+    continuation_cfg = parse_route_continuation_config(routes_cfg)
+    if continuation_cfg.enabled:
+        logger.info(
+            "Route continuation enabled: mode=%s chains=%d len=[%d,%d] "
+            "atlas_horizon=%d atlas_bank=%d",
+            continuation_cfg.mode,
+            continuation_cfg.max_chains_per_episode,
+            continuation_cfg.min_route_length,
+            continuation_cfg.max_route_length,
+            continuation_cfg.atlas_active_horizon,
+            continuation_cfg.atlas_bank_size,
+        )
+
     # Run campaign
     # F2b: The map was already loaded by the orchestrator's preloader
     # subprocess.  The worker just calls get_world() — NO load_world()
@@ -773,6 +951,7 @@ def main() -> None:
     episode_num = 0
     current_town: str | None = None
     route_gen: BalancedRouteGenerator | None = None
+    atlas_continuation_planner: _LazyAtlasContinuationPlanner | None = None
 
     for config, n_remaining in campaign:
         # Verify correct map (preloaded by orchestrator) — no load_world()!
@@ -829,6 +1008,22 @@ def main() -> None:
                 logger.error("Failed to init route generator for %s: %s", config.town, e)
                 route_gen = None
 
+            atlas_continuation_planner = None
+            if (
+                continuation_cfg.enabled
+                and continuation_cfg.mode == "atlas_chain"
+                and route_gen is not None
+            ):
+                atlas_continuation_planner = _LazyAtlasContinuationPlanner(
+                    route_gen,
+                    rng,
+                    min_waypoints=continuation_cfg.min_route_length,
+                    max_waypoints=continuation_cfg.max_route_length,
+                    active_horizon=continuation_cfg.atlas_active_horizon,
+                    bank_size=continuation_cfg.atlas_bank_size,
+                    min_destination_distance_m=continuation_cfg.atlas_min_destination_distance_m,
+                )
+
         for ep_idx in range(n_remaining):
             episode_num += 1
             logger.info(
@@ -856,8 +1051,66 @@ def main() -> None:
             if args.memory_log:
                 log_memory_snapshot(f"PRE episode {episode_num} ({config.town}/{config.weather})")
 
+            continuation_provider = None
+            continuation_max_chains = 0
+            if continuation_cfg.enabled and route_gen is not None:
+                continuation_max_chains = continuation_cfg.max_chains_per_episode
+                if config.expert_config.route_tail_extension_enabled:
+                    # Continuation chaining should trigger only on true exhaustion
+                    # (expert.done()) instead of synthetic tail extension.
+                    config.expert_config.route_tail_extension_enabled = False
+
+                if continuation_cfg.mode == "micro_replan":
+
+                    def _micro_replan_provider(current_location: Any) -> list[tuple[Any, str]]:
+                        return route_gen.generate_route_from_location(
+                            current_location,
+                            rng,
+                            min_waypoints=continuation_cfg.min_route_length,
+                            max_waypoints=continuation_cfg.max_route_length,
+                            strategy=route_strategy,
+                        )
+
+                    continuation_provider = _micro_replan_provider
+
+                elif continuation_cfg.mode == "atlas_chain":
+                    planner = atlas_continuation_planner
+                    if planner is None:
+                        planner = _LazyAtlasContinuationPlanner(
+                            route_gen,
+                            rng,
+                            min_waypoints=continuation_cfg.min_route_length,
+                            max_waypoints=continuation_cfg.max_route_length,
+                            active_horizon=continuation_cfg.atlas_active_horizon,
+                            bank_size=continuation_cfg.atlas_bank_size,
+                            min_destination_distance_m=(
+                                continuation_cfg.atlas_min_destination_distance_m
+                            ),
+                        )
+                        atlas_continuation_planner = planner
+                    assert planner is not None
+                    planner_nonnull: _LazyAtlasContinuationPlanner = planner
+
+                    def _atlas_chain_provider(
+                        current_location: Any,
+                        _planner: _LazyAtlasContinuationPlanner = planner_nonnull,
+                    ) -> list[tuple[Any, str]]:
+                        return _planner.next_route(current_location)
+
+                    continuation_provider = _atlas_chain_provider
+            elif continuation_cfg.enabled:
+                logger.warning(
+                    "Route continuation is enabled but route generator is unavailable; "
+                    "continuation disabled for this episode"
+                )
+
             # Collect
-            result = collector.collect_episode(config, route_waypoints=route)
+            result = collector.collect_episode(
+                config,
+                route_waypoints=route,
+                route_continuation_provider=continuation_provider,
+                route_continuation_max_chains=continuation_max_chains,
+            )
             result.config_hash = _episode_config_hash(config)
             logger.info(
                 "Result: status=%s, frames=%d, duration=%.1fs",
