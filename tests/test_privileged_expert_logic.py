@@ -137,6 +137,8 @@ def test_expert_config_defaults_use_conservative_arc_settings() -> None:
     assert cfg.gap_fill_bezier_max_pair_index == 1
     assert cfg.planner_policy_steer_consistency_gate_enabled is True
     assert cfg.arc_watchdog_enabled is True
+    assert cfg.vehicle_vertical_conflict_max_m == 2.0
+    assert cfg.route_tail_extension_enabled is True
 
 
 def test_plan_speed_tl_mode_not_masked_by_lower_target(monkeypatch: MonkeyPatch) -> None:
@@ -646,6 +648,7 @@ def test_lead_vehicle_info_rejects_same_direction_adjacent_sat_overlap() -> None
     expert._cached_half_lane = 1.7
     expert.config.vehicle_adjacent_sat_gate_enabled = True
     expert.config.vehicle_adjacent_sat_lateral_margin_m = 0.35
+    expert.config.vehicle_vertical_conflict_max_m = 1.0
     expert.config.vehicle_adjacent_sat_vertical_max_m = 1.0
 
     nearby = [
@@ -673,6 +676,7 @@ def test_lead_vehicle_info_rejects_same_direction_sat_with_large_vertical_separa
     expert._cached_half_lane = 1.7
     expert.config.vehicle_adjacent_sat_gate_enabled = True
     expert.config.vehicle_adjacent_sat_lateral_margin_m = 0.35
+    expert.config.vehicle_vertical_conflict_max_m = 1.0
     expert.config.vehicle_adjacent_sat_vertical_max_m = 1.0
 
     nearby = [
@@ -700,6 +704,7 @@ def test_lead_vehicle_info_accepts_same_direction_sat_conflict_in_corridor() -> 
     expert._cached_half_lane = 1.7
     expert.config.vehicle_adjacent_sat_gate_enabled = True
     expert.config.vehicle_adjacent_sat_lateral_margin_m = 0.35
+    expert.config.vehicle_vertical_conflict_max_m = 1.0
     expert.config.vehicle_adjacent_sat_vertical_max_m = 1.0
 
     nearby = [
@@ -727,6 +732,7 @@ def test_lead_vehicle_info_turn_emergency_override_accepts_close_sat_blocker() -
     expert._cached_half_lane = 1.7
     expert.config.vehicle_adjacent_sat_gate_enabled = True
     expert.config.vehicle_adjacent_sat_lateral_margin_m = 0.35
+    expert.config.vehicle_vertical_conflict_max_m = 1.0
     expert.config.vehicle_adjacent_sat_vertical_max_m = 1.0
 
     nearby = [
@@ -758,6 +764,7 @@ def test_lead_vehicle_info_turn_emergency_override_requires_turn_context() -> No
     expert._cached_half_lane = 1.7
     expert.config.vehicle_adjacent_sat_gate_enabled = True
     expert.config.vehicle_adjacent_sat_lateral_margin_m = 0.35
+    expert.config.vehicle_vertical_conflict_max_m = 1.0
     expert.config.vehicle_adjacent_sat_vertical_max_m = 1.0
 
     nearby = [
@@ -830,6 +837,68 @@ def test_emergency_route_corridor_conflict_accepts_close_turn_blocker() -> None:
     )
 
 
+def test_shared_vertical_gate_accepts_same_direction_sat_conflict() -> None:
+    expert = _build_expert()
+    expert._cached_half_lane = 1.7
+    expert.config.vehicle_adjacent_sat_gate_enabled = True
+    # Keep legacy alias low to ensure shared gate is authoritative.
+    expert.config.vehicle_adjacent_sat_vertical_max_m = 1.0
+    expert.config.vehicle_vertical_conflict_max_m = 2.0
+
+    nearby = [
+        {
+            "is_ahead": True,
+            "same_direction": True,
+            "obb_in_lane": True,
+            "distance": 3.1,
+            "longitudinal": 4.2,
+            "lateral": 0.2,
+            "vertical_sep": 1.4,
+            "speed_kmh": 5.0,
+        }
+    ]
+
+    lead_distance, lead_speed, lead_lateral = expert._lead_vehicle_info(nearby, ego_speed_kmh=10.0)
+
+    assert lead_distance == 3.1
+    assert lead_speed == 5.0
+    assert lead_lateral == 0.2
+
+
+def test_shared_vertical_gate_applies_to_turn_emergency_override() -> None:
+    expert = _build_expert()
+    # Same-direction gate should fail on lateral but override should recover
+    # under shared vertical gate.
+    expert._cached_half_lane = 1.7
+    expert.config.vehicle_adjacent_sat_gate_enabled = True
+    expert.config.vehicle_adjacent_sat_lateral_margin_m = 0.35
+    expert.config.vehicle_adjacent_sat_vertical_max_m = 1.0
+    expert.config.vehicle_vertical_conflict_max_m = 2.0
+
+    nearby = [
+        {
+            "is_ahead": True,
+            "same_direction": True,
+            "obb_in_lane": True,
+            "distance": 3.0,
+            "longitudinal": 4.5,
+            "lateral": 2.4,
+            "vertical_sep": 1.4,
+            "speed_kmh": 0.0,
+        }
+    ]
+
+    lead_distance, lead_speed, lead_lateral = expert._lead_vehicle_info(
+        nearby,
+        ego_speed_kmh=20.0,
+        nav_command=RoadOption.RIGHT,
+    )
+
+    assert lead_distance == 3.0
+    assert lead_speed == 0.0
+    assert lead_lateral == 2.4
+
+
 def test_closest_pedestrian_distance_uses_hybrid_floor() -> None:
     expert = _build_expert()
     setattr(expert, "_dynamic_half_lane", lambda _t: 1.75)
@@ -845,7 +914,7 @@ def test_closest_pedestrian_distance_uses_hybrid_floor() -> None:
     assert dist == 12.0
 
 
-def test_dynamic_half_lane_uses_97pct_lane_half_when_wider_than_ego() -> None:
+def test_dynamic_half_lane_uses_95pct_lane_half_when_wider_than_ego() -> None:
     expert = _build_expert()
     wp = _Waypoint(0.0, 0.0, road_id=1, lane_id=1)
     wp.lane_width = 3.5
@@ -856,7 +925,7 @@ def test_dynamic_half_lane_uses_97pct_lane_half_when_wider_than_ego() -> None:
 
     half = expert._dynamic_half_lane(_Transform(_Loc(0.0, 0.0)))
 
-    assert round(half, 4) == round(0.97 * (3.5 / 2.0), 4)
+    assert round(half, 4) == round(0.95 * (3.5 / 2.0), 4)
 
 
 def test_dynamic_half_lane_never_goes_below_ego_half_width() -> None:
@@ -1385,6 +1454,26 @@ def test_route_end_extension_skips_illegal_next_branch() -> None:
     assert len(expert._wp_buffer) == 2
     assert expert._wp_buffer[1][0] is good_next
     assert expert._legality_wrong_way_filtered >= 1
+
+
+def test_route_end_extension_prefers_lane_continuity_among_legal_candidates() -> None:
+    expert = _build_expert()
+    expert._route_index = 1
+    expert._route_length = 1
+
+    last_wp = _Waypoint(0.0, 0.0, road_id=1, lane_id=1, yaw=0.0)
+    legal_road_change = _Waypoint(2.0, 0.0, road_id=2, lane_id=1, yaw=0.0)
+    legal_same_lane = _Waypoint(2.0, 0.2, road_id=1, lane_id=1, yaw=0.0)
+    last_wp._nexts = [legal_road_change, legal_same_lane]
+    legal_road_change._nexts = []
+    legal_same_lane._nexts = []
+
+    expert._wp_buffer = deque([(last_wp, RoadOption.LANEFOLLOW)], maxlen=5)
+
+    expert._fill_buffer(None)
+
+    assert len(expert._wp_buffer) == 2
+    assert expert._wp_buffer[1][0] is legal_same_lane
 
 
 def test_lane_change_freeze_blocks_non_mandatory_change() -> None:

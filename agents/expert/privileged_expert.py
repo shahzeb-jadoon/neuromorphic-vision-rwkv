@@ -131,9 +131,14 @@ class ExpertConfig:
     vehicle_emergency_time: float = 1.2  # seconds — scale emergency with speed
     vehicle_comfort_decel: float = 3.0  # m/s² — comfortable braking for following
     vehicle_allow_lateral_fallback: bool = False  # if False, only SAT (obb_in_lane) can select lead
+    vehicle_vertical_conflict_max_m: float = (
+        2.0  # metres — authoritative shared vertical gate for SAT detection + lead gating
+    )
     vehicle_adjacent_sat_gate_enabled: bool = True
     vehicle_adjacent_sat_lateral_margin_m: float = 0.35
-    vehicle_adjacent_sat_vertical_max_m: float = 1.0
+    # Deprecated alias retained for backward compatibility in configs/tests.
+    # Runtime logic uses vehicle_vertical_conflict_max_m as the shared gate.
+    vehicle_adjacent_sat_vertical_max_m: float = 2.0
     vehicle_oncoming_conflict_gate_enabled: bool = True
     oncoming_lead_lateral_max_m: float = 1.2
     oncoming_lead_lateral_hysteresis_m: float = 1.3
@@ -149,7 +154,9 @@ class ExpertConfig:
     )
     corridor_margin_max: float = 0.0  # metres — max SAT corridor bleed into adjacent lane
     corridor_margin_min: float = 0.0  # metres — min SAT corridor bleed into adjacent lane
-    corridor_max_vertical_separation: float = 2.5  # metres — reject SAT hits on stacked roads
+    # Deprecated alias retained for backward compatibility in configs/tests.
+    # Runtime logic uses vehicle_vertical_conflict_max_m as the shared gate.
+    corridor_max_vertical_separation: float = 2.0
     pedestrian_lane_half_width: float = 3.0  # metres — wider lateral band for pedestrians
 
     # --- Stop signs ---
@@ -232,6 +239,8 @@ class ExpertConfig:
     route_densify_max_factor: float = 3.0
     route_densify_diverge_factor: float = 2.0
     route_densify_projection_fallback: bool = True
+    route_tail_extension_enabled: bool = True
+    route_tail_extension_step_m: float = 2.0
 
     # --- Route planner backend ---
     # Backend selector used by the data collector when instantiating
@@ -1316,6 +1325,27 @@ class PrivilegedExpert:
     # Internal — route buffer
     # ------------------------------------------------------------------
 
+    def _vehicle_vertical_conflict_max_m(self) -> float:
+        """Return the authoritative shared vertical separation gate.
+
+        This unifies SAT corridor overlap acceptance and lead-selection
+        conflict gating so no dead-zone can occur between detection and
+        planning stages.
+        """
+        cfg = self.config
+        shared = float(getattr(cfg, "vehicle_vertical_conflict_max_m", 0.0))
+        if shared > 0.0:
+            return shared
+
+        legacy_limits = [
+            float(getattr(cfg, "vehicle_adjacent_sat_vertical_max_m", 0.0)),
+            float(getattr(cfg, "corridor_max_vertical_separation", 0.0)),
+        ]
+        legacy_limits = [v for v in legacy_limits if v > 0.0]
+        if legacy_limits:
+            return max(legacy_limits)
+        return 2.0
+
     def _fill_buffer(self, transform: "carla.Transform" | None = None) -> None:
         """Refill the waypoint look-ahead buffer from the route.
 
@@ -1344,15 +1374,19 @@ class PrivilegedExpert:
         # If the planned route is consumed and the buffer is running
         # low, synthesise continuation waypoints from the map so that
         # the SAT corridor stays healthy until the episode ends.
+        cfg = self.config
         half_cap = (self._wp_buffer.maxlen or 40) // 2
         if (
+            cfg.route_tail_extension_enabled
+            and
             self._route_index >= self._route_length
             and len(self._wp_buffer) < half_cap
             and self._wp_buffer
         ):
             last_wp, _ = self._wp_buffer[-1]
             try:
-                nexts = last_wp.next(2.0)  # 2 m step
+                step_m = max(0.25, float(cfg.route_tail_extension_step_m))
+                nexts = last_wp.next(step_m)
                 while nexts and len(self._wp_buffer) < buffer_maxlen:
                     legal_nexts = [
                         cand
@@ -1366,10 +1400,44 @@ class PrivilegedExpert:
                     ]
                     if not legal_nexts:
                         break
-                    nxt = legal_nexts[0]  # follow the first legal keep-lane option
+
+                    cur_loc = last_wp.transform.location
+                    cur_yaw = float(last_wp.transform.rotation.yaw)
+                    yaw_rad = math.radians(cur_yaw)
+                    fwd = (math.cos(yaw_rad), math.sin(yaw_rad))
+                    right = (-fwd[1], fwd[0])
+                    cur_road_id = int(getattr(last_wp, "road_id", -1))
+                    cur_lane_id = int(getattr(last_wp, "lane_id", 0))
+
+                    def _route_end_branch_score(candidate: Any) -> tuple[float, ...]:
+                        loc = candidate.transform.location
+                        yaw = float(candidate.transform.rotation.yaw)
+                        yaw_diff = abs((yaw - cur_yaw + 180.0) % 360.0 - 180.0)
+
+                        dx = float(loc.x - cur_loc.x)
+                        dy = float(loc.y - cur_loc.y)
+                        forward_proj = fwd[0] * dx + fwd[1] * dy
+                        lateral_off = abs(right[0] * dx + right[1] * dy)
+
+                        cand_road_id = int(getattr(candidate, "road_id", cur_road_id))
+                        cand_lane_id = int(getattr(candidate, "lane_id", cur_lane_id))
+
+                        road_change = 0 if cand_road_id == cur_road_id else 1
+                        lane_order_delta = abs(abs(cand_lane_id) - abs(cur_lane_id))
+                        behind = 0 if forward_proj > 0.0 else 1
+                        return (
+                            behind,
+                            road_change,
+                            lane_order_delta,
+                            yaw_diff,
+                            lateral_off,
+                            float(loc.distance(cur_loc)),
+                        )
+
+                    nxt = min(legal_nexts, key=_route_end_branch_score)
                     self._wp_buffer.append((nxt, RoadOption.LANEFOLLOW))
                     last_wp = nxt
-                    nexts = nxt.next(2.0)
+                    nexts = nxt.next(step_m)
             except (AttributeError, RuntimeError):
                 pass  # graceful degradation if map query fails
 
@@ -3979,6 +4047,7 @@ class PrivilegedExpert:
         self._n_corridor_segments = len(corridor_segs)  # diagnostic
 
         nearby: list[dict[str, Any]] = []
+        vertical_gate = self._vehicle_vertical_conflict_max_m()
         for v in self.world.get_actors().filter("*vehicle*"):
             if v.id == self.vehicle.id:
                 continue
@@ -4024,7 +4093,7 @@ class PrivilegedExpert:
             # Reject SAT overlaps with large vertical separation
             # (e.g. overpass/underpass lanes that overlap in XY).
             vertical_sep = abs(v_bb_center.z - ego_bb_center.z)
-            if obb_in_lane and vertical_sep > self.config.corridor_max_vertical_separation:
+            if obb_in_lane and vertical_sep > vertical_gate:
                 obb_in_lane = False
 
             # Diagnostic: warn if SAT misses a vehicle that the
@@ -4325,7 +4394,7 @@ class PrivilegedExpert:
 
         cfg = self.config
         vertical_sep = abs(float(vehicle_info.get("vertical_sep", 0.0)))
-        if vertical_sep > float(cfg.vehicle_adjacent_sat_vertical_max_m):
+        if vertical_sep > self._vehicle_vertical_conflict_max_m():
             return False
 
         other_speed_kmh = max(0.0, float(vehicle_info.get("speed_kmh", 0.0)))
@@ -4356,7 +4425,7 @@ class PrivilegedExpert:
         max_lateral = self._cached_half_lane + float(cfg.vehicle_adjacent_sat_lateral_margin_m)
         if lateral > max_lateral:
             return False
-        if vertical_sep > float(cfg.vehicle_adjacent_sat_vertical_max_m):
+        if vertical_sep > self._vehicle_vertical_conflict_max_m():
             return False
         return True
 
