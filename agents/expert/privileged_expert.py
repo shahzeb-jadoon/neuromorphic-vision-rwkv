@@ -4400,7 +4400,7 @@ class PrivilegedExpert:
 
         Corridor policy uses the maximum of:
         - ego half-width (vehicle body extent), and
-        - 97% of lane half-width (0.97 * lane_width / 2).
+        - 95% of lane half-width (0.95 * lane_width / 2).
 
         This reduces adjacent-lane SAT bleed while preserving a minimum
         corridor that always covers the ego footprint.
@@ -4412,8 +4412,8 @@ class PrivilegedExpert:
             self._cached_half_lane = max(ego_half, float(cfg.lane_half_width))
             return float(self._cached_half_lane)
         lane_width = max(0.01, float(getattr(ego_wp, "lane_width", cfg.lane_half_width * 2.0)))
-        lane_half_97 = 0.97 * (lane_width / 2.0)
-        half = float(max(ego_half, lane_half_97))
+        lane_half_95 = 0.95 * (lane_width / 2.0)
+        half = float(max(ego_half, lane_half_95))
         self._cached_half_lane = half
         return half
 

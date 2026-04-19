@@ -442,6 +442,11 @@ def _draw_live_frame(
                 [[float(tf.rotation.pitch), float(tf.rotation.yaw), float(tf.rotation.roll)]],
                 dtype=np.float32,
             ),
+            wp_buffer_head_index=np.array([0], dtype=np.int32),
+            wp_buffer_size=np.array([0], dtype=np.int32),
+            wp_buffer_head_dist=np.array([0.0], dtype=np.float32),
+            arc_active=np.array([0], dtype=np.int8),
+            steer_from_arc=np.array([0], dtype=np.int8),
         ),
     )
 

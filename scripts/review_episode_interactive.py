@@ -118,7 +118,12 @@ class EpisodeData:
     traffic_light_distance: np.ndarray
     stop_sign_distance: np.ndarray
     yield_sign_distance: np.ndarray
+    wp_buffer_size: np.ndarray
+    wp_buffer_head_dist: np.ndarray
     wp_buffer_head_index: np.ndarray
+    arc_active: np.ndarray
+    arc_size: np.ndarray
+    steer_from_arc: np.ndarray
     steer: np.ndarray
     nearby_vehicles_raw: np.ndarray
     nearby_pedestrians_raw: np.ndarray
@@ -427,6 +432,31 @@ def _load_episode(path: Path) -> EpisodeData:
         else:
             wp_buffer_head_index = np.full((n_frames,), -1, dtype=np.int32)
 
+        if "wp_buffer_size" in h:
+            wp_buffer_size = h["wp_buffer_size"][:n_frames].astype(np.int32)
+        else:
+            wp_buffer_size = np.zeros((n_frames,), dtype=np.int32)
+
+        if "wp_buffer_head_dist" in h:
+            wp_buffer_head_dist = h["wp_buffer_head_dist"][:n_frames].astype(np.float32)
+        else:
+            wp_buffer_head_dist = np.full((n_frames,), -1.0, dtype=np.float32)
+
+        if "arc_active" in h:
+            arc_active = h["arc_active"][:n_frames].astype(np.int8)
+        else:
+            arc_active = np.zeros((n_frames,), dtype=np.int8)
+
+        if "arc_size" in h:
+            arc_size = h["arc_size"][:n_frames].astype(np.int32)
+        else:
+            arc_size = np.zeros((n_frames,), dtype=np.int32)
+
+        if "steer_from_arc" in h:
+            steer_from_arc = h["steer_from_arc"][:n_frames].astype(np.int8)
+        else:
+            steer_from_arc = np.zeros((n_frames,), dtype=np.int8)
+
     return EpisodeData(
         path=path,
         town=town,
@@ -446,7 +476,12 @@ def _load_episode(path: Path) -> EpisodeData:
         traffic_light_distance=traffic_light_distance,
         stop_sign_distance=stop_sign_distance,
         yield_sign_distance=yield_sign_distance,
+        wp_buffer_size=wp_buffer_size,
+        wp_buffer_head_dist=wp_buffer_head_dist,
         wp_buffer_head_index=wp_buffer_head_index,
+        arc_active=arc_active,
+        arc_size=arc_size,
+        steer_from_arc=steer_from_arc,
         steer=steer,
         nearby_vehicles_raw=nearby_vehicles_raw,
         nearby_pedestrians_raw=nearby_pedestrians_raw,
@@ -723,6 +758,65 @@ def _resolve_route_head_index(ep: EpisodeData, route: RouteData, frame_idx: int)
 
     all_rel = route.points_xyz[:, :2].astype(np.float64) - ego_xy
     return int(np.argmin(np.linalg.norm(all_rel, axis=1)))
+
+
+def _derive_arc_point(ep: EpisodeData, frame_idx: int) -> tuple[int, int]:
+    """Infer active arc point index as p/N from arc size telemetry."""
+    run_start = frame_idx
+    while run_start > 0 and int(ep.arc_active[run_start - 1]) > 0:
+        run_start -= 1
+
+    run_sizes = ep.arc_size[run_start : frame_idx + 1]
+    arc_total = int(np.max(run_sizes)) if run_sizes.size > 0 else int(ep.arc_size[frame_idx])
+    arc_total = max(1, arc_total)
+    arc_now = max(0, int(ep.arc_size[frame_idx]))
+
+    point = arc_total - arc_now + 1
+    point = max(1, min(point, arc_total))
+    return point, arc_total
+
+
+def _buffer_hud_lines(ep: EpisodeData, route: RouteData, frame_idx: int) -> tuple[str, str, bool]:
+    route_n = int(route.points_xyz.shape[0])
+    route_head_idx = int(ep.wp_buffer_head_index[frame_idx])
+    wp_buf_size = max(0, int(ep.wp_buffer_size[frame_idx]))
+    head_dist_m = float(ep.wp_buffer_head_dist[frame_idx])
+
+    if route_head_idx >= 0:
+        pt_num = route_head_idx + 1
+        pt_label = f"{pt_num}/{route_n}" if route_n > 0 else f"{pt_num}"
+        route_head_text = f"{route_head_idx} (pt {pt_label})"
+    else:
+        route_head_text = "--"
+
+    if head_dist_m >= 0.0:
+        head_dist_text = f"{head_dist_m:.2f}m"
+    else:
+        head_dist_text = "--"
+
+    arc_active = int(ep.arc_active[frame_idx]) > 0
+    steer_src = "ARC" if int(ep.steer_from_arc[frame_idx]) > 0 else "WP"
+
+    if arc_active:
+        arc_point, arc_total = _derive_arc_point(ep, frame_idx)
+        active_point_text = f"arc_point={arc_point}/{arc_total}"
+        active_buffer = "ARC"
+    else:
+        if route_head_idx >= 0:
+            wp_pt_num = route_head_idx + 1
+            wp_point = f"{wp_pt_num}/{route_n}" if route_n > 0 else f"{wp_pt_num}"
+        else:
+            wp_point = "--"
+        active_point_text = f"route_point={wp_point}"
+        active_buffer = "WP"
+
+    line1 = f"buffer={active_buffer} {active_point_text} steer_src={steer_src}"
+    line2 = (
+        f"route_head_idx={route_head_text} "
+        f"route_head_dist={head_dist_text} "
+        f"wp_buf_size={wp_buf_size}"
+    )
+    return line1, line2, arc_active
 
 
 def _build_road_lane_cache(carla_map: Any, spacing_m: float = 2.0) -> RoadLaneCache:
@@ -1706,6 +1800,9 @@ def _draw_lane_direction_hud(
         match_text = "MATCH" if direction_match else "MISMATCH"
         match_color = EGO_COLOR if direction_match else SAT_COLOR
 
+    buffer_line1, buffer_line2, arc_active = _buffer_hud_lines(ep, route, frame_idx)
+    buffer_line1_color = ACTOR_COLOR if arc_active else WHITE_COLOR
+
     hud_lines: list[tuple[str, carla.Color]] = [
         (f"Junction ID  live={live_junction}  episode={ep_junction}", WHITE_COLOR),
         (f"Ego yaw={ego_yaw:.1f}°  heading={ego_heading}", WHITE_COLOR),
@@ -1719,6 +1816,8 @@ def _draw_lane_direction_hud(
             lane_match_color,
         ),
         (f"Ego vs traffic direction: {match_text}", match_color),
+        (buffer_line1, buffer_line1_color),
+        (buffer_line2, WHITE_COLOR),
     ]
     _draw_spectator_corner_hud(world, hud_lines, life_time)
 
@@ -2352,16 +2451,19 @@ def _draw_frame_simple(
     tl_d = float(ep.traffic_light_distance[frame_idx])
     ss_d = float(ep.stop_sign_distance[frame_idx])
     ys_d = float(ep.yield_sign_distance[frame_idx])
+    buffer_line1, buffer_line2, arc_active = _buffer_hud_lines(ep, route, frame_idx)
 
-    text_lines = [
-        f"frame {frame_idx}/{ep.n_frames - 1}",
-        f"speed={speed_kmh:.1f} km/h steer={float(ep.steer[frame_idx]):+.3f}",
-        f"nav={nav} mode={mode}",
-        f"route={float(ep.route_completion[frame_idx]) * 100.0:.1f}% wp_idx={ridx}",
-        f"TL={tl_name} ({tl_d:.1f}m)  SS={ss_d:.1f}m  YS={ys_d:.1f}m",
+    text_lines: list[tuple[str, carla.Color]] = [
+        (f"frame {frame_idx}/{ep.n_frames - 1}", WHITE_COLOR),
+        (f"speed={speed_kmh:.1f} km/h steer={float(ep.steer[frame_idx]):+.3f}", WHITE_COLOR),
+        (f"nav={nav} mode={mode}", WHITE_COLOR),
+        (f"route={float(ep.route_completion[frame_idx]) * 100.0:.1f}%", WHITE_COLOR),
+        (buffer_line1, ACTOR_COLOR if arc_active else WHITE_COLOR),
+        (buffer_line2, WHITE_COLOR),
+        (f"TL={tl_name} ({tl_d:.1f}m)  SS={ss_d:.1f}m  YS={ys_d:.1f}m", WHITE_COLOR),
     ]
 
-    for i, line in enumerate(text_lines):
+    for i, (line, line_color) in enumerate(text_lines):
         debug.draw_string(
             carla.Location(
                 x=float(pos[0]),
@@ -2370,7 +2472,7 @@ def _draw_frame_simple(
             ),
             line,
             draw_shadow=False,
-            color=carla.Color(255, 255, 255),
+            color=line_color,
             life_time=draw_life_time,
             persistent_lines=False,
         )
@@ -2380,7 +2482,9 @@ def _draw_frame_collector(
     world: carla.World,
     frame_idx: int,
     ep: EpisodeData,
+    route: RouteData,
     collector_ctx: CollectorDebugContext,
+    draw_life_time: float,
 ) -> None:
     collector_ctx.vehicle.set_pose(ep.position[frame_idx], ep.rotation[frame_idx])
     collector_ctx.expert.sync_route_state(int(ep.wp_buffer_head_index[frame_idx]))
@@ -2391,6 +2495,36 @@ def _draw_frame_collector(
         collector_ctx.vehicle,
         frame_idx,
         info,
+    )
+
+    pos = ep.position[frame_idx]
+    route_pct = float(ep.route_completion[frame_idx]) * 100.0
+    buffer_line1, buffer_line2, arc_active = _buffer_hud_lines(ep, route, frame_idx)
+    line_step = 0.24
+    base_z = float(pos[2]) + 3.9
+    world.debug.draw_string(
+        carla.Location(x=float(pos[0]), y=float(pos[1]), z=base_z),
+        f"route={route_pct:.1f}%",
+        draw_shadow=True,
+        color=WHITE_COLOR,
+        life_time=draw_life_time,
+        persistent_lines=False,
+    )
+    world.debug.draw_string(
+        carla.Location(x=float(pos[0]), y=float(pos[1]), z=base_z - line_step),
+        buffer_line1,
+        draw_shadow=True,
+        color=ACTOR_COLOR if arc_active else WHITE_COLOR,
+        life_time=draw_life_time,
+        persistent_lines=False,
+    )
+    world.debug.draw_string(
+        carla.Location(x=float(pos[0]), y=float(pos[1]), z=base_z - 2.0 * line_step),
+        buffer_line2,
+        draw_shadow=True,
+        color=WHITE_COLOR,
+        life_time=draw_life_time,
+        persistent_lines=False,
     )
 
 
@@ -2683,7 +2817,14 @@ def main() -> None:
                 frame_idx = max(start_frame, min(end_frame, frame_idx + delta))
 
             if draw_mode == "collector" and collector_ctx is not None:
-                _draw_frame_collector(world, frame_idx, ep, collector_ctx)
+                _draw_frame_collector(
+                    world,
+                    frame_idx,
+                    ep,
+                    route,
+                    collector_ctx,
+                    draw_life_time=float(args.draw_life_time),
+                )
             elif draw_mode == "sat":
                 _draw_frame_sat(
                     world,
