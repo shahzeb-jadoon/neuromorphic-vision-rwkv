@@ -121,6 +121,9 @@ class ExpertConfig:
     tl_half_junction_clearance_factor: float = (
         0.5  # require at least half-junction clearance on yellow commit
     )
+    tl_queue_follow_speed_kmh: float = (
+        8.0  # km/h — consider lead as queue vehicle under TL forcing
+    )
     turn_comfort_decel: float = 1.5  # m/s² — gentler braking for turn approach
     vehicle_hazard_distance: float = 25.0  # metres — start slowing (min)
     vehicle_emergency_distance: float = 5.0  # metres — emergency (min)
@@ -2663,22 +2666,29 @@ class PrivilegedExpert:
                     turning_block_active = True
 
         if lead_distance is not None:
+            lead_is_queue_vehicle = (
+                lead_speed is not None and lead_speed < cfg.tl_queue_follow_speed_kmh
+            )
+            queue_follow_active = (
+                tl_forces_stop
+                and lead_is_queue_vehicle
+                and lead_distance >= dyn_emergency
+                and lead_distance < dyn_hazard
+            )
+
             if turning_block_active and not tl_forces_stop:
                 mode = DrivingMode.EMERGENCY_STOP
                 target = 0.0
-            elif (
-                tl_forces_stop
-                and lead_speed is not None
-                and lead_speed < 0.5
-                and lead_distance >= dyn_emergency
-            ):
-                # A stopped lead vehicle ahead of a red/yellow light should
-                # not escalate to EMERGENCY_STOP when we're still outside
-                # the emergency range; the traffic light owns the stop.
-                pass
             elif lead_distance < dyn_emergency:
                 mode = DrivingMode.EMERGENCY_STOP
                 target = 0.0
+            elif queue_follow_active:
+                # Under red/yellow forcing, smoothly follow slow queue traffic
+                # before reaching emergency distance.
+                mode = DrivingMode.VEHICLE_FOLLOWING
+                d = max(lead_distance - dyn_emergency, 0.0)
+                v_ms = math.sqrt(2.0 * cfg.vehicle_comfort_decel * d)
+                target = min(target, v_ms * 3.6)
             elif tl_forces_stop:
                 # Red/yellow traffic lights outrank lead-vehicle following.
                 # Keep the traffic-light stop target already computed above.

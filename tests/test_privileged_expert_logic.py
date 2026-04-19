@@ -164,7 +164,9 @@ def test_plan_speed_tl_mode_not_masked_by_lower_target(monkeypatch: MonkeyPatch)
     assert target == 10.0
 
 
-def test_plan_speed_stopped_lead_yields_to_red_tl(monkeypatch: MonkeyPatch) -> None:
+def test_plan_speed_stopped_lead_uses_queue_following_under_red_tl(
+    monkeypatch: MonkeyPatch,
+) -> None:
     expert = _build_expert()
     expert._prev_target = 20.0
     fake_tl = SimpleNamespace(Green=1, Yellow=2, Red=3)
@@ -181,6 +183,32 @@ def test_plan_speed_stopped_lead_yields_to_red_tl(monkeypatch: MonkeyPatch) -> N
         ss_committed=False,
         lead_distance=8.0,
         lead_speed=0.0,
+        lead_lateral=0.0,
+        ped_dist=None,
+        base_target=20.0,
+    )
+
+    assert mode == DrivingMode.VEHICLE_FOLLOWING
+    assert 0.0 < target < 20.0
+
+
+def test_plan_speed_fast_lead_keeps_traffic_light_authority(monkeypatch: MonkeyPatch) -> None:
+    expert = _build_expert()
+    expert._prev_target = 20.0
+    fake_tl = SimpleNamespace(Green=1, Yellow=2, Red=3)
+    monkeypatch.setattr(
+        "agents.expert.privileged_expert.carla", SimpleNamespace(TrafficLightState=fake_tl)
+    )
+
+    target, mode = expert._plan_speed(
+        speed_kmh=20.0,
+        nav_command=RoadOption.LANEFOLLOW,
+        tl_state=fake_tl.Red,
+        tl_distance=18.0,
+        ss_distance=None,
+        ss_committed=False,
+        lead_distance=8.0,
+        lead_speed=18.0,
         lead_lateral=0.0,
         ped_dist=None,
         base_target=20.0,
