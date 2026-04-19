@@ -35,8 +35,8 @@ from agents.navigation.local_planner import RoadOption
 logger = logging.getLogger(__name__)
 
 
-GRAPH_CACHE_VERSION = 3
-GRAPH_CACHE_LOGIC_TAG = "lane-graph-v3-branch-preserving"
+GRAPH_CACHE_VERSION = 4
+GRAPH_CACHE_LOGIC_TAG = "lane-graph-v4-junction-classification"
 
 
 class EdgeKind(Enum):
@@ -387,11 +387,7 @@ class LaneGraphPlanner:
                 road_id=int(wp_start.road_id),
                 section_id=int(wp_start.section_id),
                 lane_id=int(wp_start.lane_id),
-                is_junction=bool(
-                    wp_start.is_junction
-                    or wp_end.is_junction
-                    or any(bool(getattr(wp, "is_junction", False)) for wp in sampled_wps)
-                ),
+                is_junction=self._segment_is_junction(wp_start, wp_end, sampled_wps),
                 entry_xyz=(
                     float(wp_start.transform.location.x),
                     float(wp_start.transform.location.y),
@@ -979,12 +975,39 @@ class LaneGraphPlanner:
 
         return commands
 
+    @staticmethod
+    def _segment_is_junction(
+        wp_start: carla.Waypoint,
+        wp_end: carla.Waypoint,
+        sampled_wps: List[carla.Waypoint],
+    ) -> bool:
+        """Return a robust junction flag for one topology segment.
+
+        Overlabeling a segment as junction can propagate LEFT/RIGHT labels
+        across long non-junction stretches. We therefore require either:
+        - both topology endpoints are junction, or
+        - sampled waypoints are strongly junction-dominant.
+        """
+        start_junction = bool(getattr(wp_start, "is_junction", False))
+        end_junction = bool(getattr(wp_end, "is_junction", False))
+        if start_junction and end_junction:
+            return True
+
+        if not sampled_wps:
+            return False
+
+        junction_count = sum(1 for wp in sampled_wps if bool(getattr(wp, "is_junction", False)))
+        if junction_count < 2:
+            return False
+
+        junction_ratio = float(junction_count) / float(len(sampled_wps))
+        return junction_ratio >= 0.7
+
     def _classify_junction_turn(self, segment_path: List[str], idx: int) -> RoadOption:
         if idx <= 0:
             return RoadOption.STRAIGHT
 
         prev_seg = self._segments[segment_path[idx - 1]]
-        cur_seg = self._segments[segment_path[idx]]
         entry_vec = self._direction_vec_xyz(
             self._segment_midpoint_xyz(segment_path[idx - 1]),
             self._segment_midpoint_xyz(segment_path[idx]),
@@ -993,11 +1016,13 @@ class LaneGraphPlanner:
             return RoadOption.STRAIGHT
 
         exit_vec = None
+        exit_seg: SegmentNode | None = None
         # Prefer first edge that exits a junction sequence.
         for j in range(idx + 1, len(segment_path)):
             last_seg = self._segments[segment_path[j - 1]]
             next_seg = self._segments[segment_path[j]]
             if last_seg.is_junction and not next_seg.is_junction:
+                exit_seg = next_seg
                 exit_vec = self._direction_vec_xyz(
                     self._segment_midpoint_xyz(segment_path[j - 1]),
                     self._segment_midpoint_xyz(segment_path[j]),
@@ -1012,6 +1037,13 @@ class LaneGraphPlanner:
 
         if exit_vec is None:
             return RoadOption.STRAIGHT
+
+        if exit_seg is not None:
+            same_road = prev_seg.road_id == exit_seg.road_id
+            same_section = prev_seg.section_id == exit_seg.section_id
+            same_lane = prev_seg.lane_id == exit_seg.lane_id
+            if same_road and same_section and same_lane:
+                return RoadOption.STRAIGHT
 
         signed = self._signed_angle_deg(entry_vec, exit_vec)
         if abs(signed) < self._turn_threshold_deg:
