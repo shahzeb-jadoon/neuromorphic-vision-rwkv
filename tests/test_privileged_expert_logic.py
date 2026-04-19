@@ -667,6 +667,40 @@ def test_dynamic_half_lane_never_goes_below_ego_half_width() -> None:
     assert half == 1.1
 
 
+def test_detect_pedestrians_includes_world_and_vertical_fields(monkeypatch: MonkeyPatch) -> None:
+    expert = _build_expert()
+    monkeypatch.setattr(
+        "agents.expert.privileged_expert.carla",
+        SimpleNamespace(Vector3D=lambda x, y, z: SimpleNamespace(x=x, y=y, z=z)),
+    )
+
+    walker_loc = _Loc(6.0, 1.0, 1.2)
+    walker = SimpleNamespace(
+        get_transform=lambda: _Transform(walker_loc),
+        get_velocity=lambda: SimpleNamespace(x=1.0, y=0.0, z=0.2),
+    )
+
+    class _Actors:
+        @staticmethod
+        def filter(_pattern: str) -> list[object]:
+            return [walker]
+
+    expert.world = SimpleNamespace(get_actors=lambda: _Actors())
+
+    nearby = expert._detect_pedestrians(_Transform(_Loc(0.0, 0.0, 0.0)))
+
+    assert len(nearby) == 1
+    ped = nearby[0]
+    assert ped["world_x"] == 6.0
+    assert ped["world_y"] == 1.0
+    assert ped["world_z"] == 1.2
+    assert ped["vertical_sep"] == 1.2
+    assert ped["predicted_world_x"] == 7.0
+    assert ped["predicted_world_y"] == 1.0
+    assert ped["predicted_world_z"] == 1.4
+    assert ped["predicted_vertical_sep"] == 1.4
+
+
 def test_fill_junction_gaps_prefers_bezier_for_junction_gap() -> None:
     expert = _build_expert()
 

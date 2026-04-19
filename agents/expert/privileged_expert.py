@@ -4147,11 +4147,15 @@ class PrivilegedExpert:
         Each entry includes:
         - ``lateral``: offset so ``_closest_pedestrian_distance`` can
           ignore pavement walkers.
+                - ``world_x/world_y/world_z`` and ``vertical_sep`` for
+                    post-hoc z-plane hazard analysis.
         - ``predicted_lateral``: lateral offset of the pedestrian's
           predicted position (velocity-extrapolated 1.0 s ahead).
           Enables early braking for pedestrians about to step into
           the lane.
-        - ``predicted_distance``: distance to the predicted position.
+                - ``predicted_distance``: distance to the predicted position.
+                - ``predicted_world_x/predicted_world_y/predicted_world_z`` and
+                    ``predicted_vertical_sep`` for trajectory diagnostics.
         """
         ego_loc = transform.location
         fwd = transform.get_forward_vector()
@@ -4178,19 +4182,30 @@ class PrivilegedExpert:
             pred_y = w_loc.y + w_vel.y * predict_horizon
             pred_dx = pred_x - ego_loc.x
             pred_dy = pred_y - ego_loc.y
+            pred_z = w_loc.z + w_vel.z * predict_horizon
             pred_longitudinal = fwd.x * pred_dx + fwd.y * pred_dy
             pred_lateral = right.x * pred_dx + right.y * pred_dy
             pred_dist = math.sqrt(pred_dx**2 + pred_dy**2)
+            vertical_sep = abs(w_loc.z - ego_loc.z)
+            predicted_vertical_sep = abs(pred_z - ego_loc.z)
 
             nearby.append(
                 {
                     "distance": round(dist, 2),
                     "longitudinal": round(longitudinal, 2),
                     "lateral": round(lateral, 2),
+                    "world_x": round(w_loc.x, 2),
+                    "world_y": round(w_loc.y, 2),
+                    "world_z": round(w_loc.z, 2),
+                    "vertical_sep": round(vertical_sep, 2),
                     "is_ahead": longitudinal > 0,
                     "predicted_distance": round(pred_dist, 2),
                     "predicted_lateral": round(pred_lateral, 2),
                     "predicted_ahead": pred_longitudinal > 0,
+                    "predicted_world_x": round(pred_x, 2),
+                    "predicted_world_y": round(pred_y, 2),
+                    "predicted_world_z": round(pred_z, 2),
+                    "predicted_vertical_sep": round(predicted_vertical_sep, 2),
                 }
             )
 
