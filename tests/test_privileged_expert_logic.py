@@ -576,6 +576,71 @@ def test_lead_vehicle_info_accepts_oncoming_immediate_conflict() -> None:
     assert lead_lateral == 0.3
 
 
+def test_oncoming_gate_hysteresis_prevents_single_frame_flicker() -> None:
+    expert = _build_expert()
+    expert.config.vehicle_oncoming_conflict_gate_enabled = True
+    expert.config.oncoming_lead_lateral_max_m = 1.2
+    expert.config.oncoming_lead_lateral_hysteresis_m = 1.3
+    expert.config.oncoming_lead_hysteresis_hold_frames = 2
+    expert.config.oncoming_lead_longitudinal_max_m = 12.0
+    expert.config.oncoming_lead_ttc_max_s = 1.5
+
+    def _near(lateral: float) -> list[dict[str, object]]:
+        return [
+            {
+                "is_ahead": True,
+                "same_direction": False,
+                "obb_in_lane": True,
+                "distance": 3.0,
+                "longitudinal": 3.0,
+                "lateral": lateral,
+                "speed_kmh": 10.0,
+            }
+        ]
+
+    lead_distance, _, _ = expert._lead_vehicle_info(_near(1.1), ego_speed_kmh=30.0)
+    assert lead_distance == 3.0
+
+    # One noisy frame above hard cutoff should still pass via hysteresis.
+    lead_distance, _, _ = expert._lead_vehicle_info(_near(1.25), ego_speed_kmh=30.0)
+    assert lead_distance == 3.0
+
+    # Persistence is short-lived; sustained out-of-band lateral should close.
+    lead_distance, lead_speed, lead_lateral = expert._lead_vehicle_info(
+        _near(1.25),
+        ego_speed_kmh=30.0,
+    )
+    assert lead_distance is None
+    assert lead_speed is None
+    assert lead_lateral is None
+
+
+def test_oncoming_gate_hysteresis_requires_recent_conflict() -> None:
+    expert = _build_expert()
+    expert.config.vehicle_oncoming_conflict_gate_enabled = True
+    expert.config.oncoming_lead_lateral_max_m = 1.2
+    expert.config.oncoming_lead_lateral_hysteresis_m = 1.3
+    expert.config.oncoming_lead_hysteresis_hold_frames = 2
+
+    nearby = [
+        {
+            "is_ahead": True,
+            "same_direction": False,
+            "obb_in_lane": True,
+            "distance": 3.0,
+            "longitudinal": 3.0,
+            "lateral": 1.25,
+            "speed_kmh": 10.0,
+        }
+    ]
+
+    lead_distance, lead_speed, lead_lateral = expert._lead_vehicle_info(nearby, ego_speed_kmh=30.0)
+
+    assert lead_distance is None
+    assert lead_speed is None
+    assert lead_lateral is None
+
+
 def test_lead_vehicle_info_rejects_same_direction_adjacent_sat_overlap() -> None:
     expert = _build_expert()
     expert._cached_half_lane = 1.7

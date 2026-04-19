@@ -136,6 +136,8 @@ class ExpertConfig:
     vehicle_adjacent_sat_vertical_max_m: float = 1.0
     vehicle_oncoming_conflict_gate_enabled: bool = True
     oncoming_lead_lateral_max_m: float = 1.2
+    oncoming_lead_lateral_hysteresis_m: float = 1.3
+    oncoming_lead_hysteresis_hold_frames: int = 2
     oncoming_lead_longitudinal_max_m: float = 12.0
     oncoming_lead_ttc_max_s: float = 1.5
     oncoming_lead_min_closing_speed_kmh: float = 5.0
@@ -506,6 +508,7 @@ class PrivilegedExpert:
         self._corridor: np.ndarray | None = None
         self._corridor_3d_segments: list[np.ndarray] = []
         self._cached_half_lane: float = self.config.lane_half_width
+        self._oncoming_gate_hold_frames: int = 0
 
         # Number of corridor segments built (for diagnostics)
         self._n_corridor_segments: int = 0
@@ -985,6 +988,7 @@ class PrivilegedExpert:
         self._policy_last_roundabout_lane_change_distance = -1e9
         self._policy_block_streak = 0
         self._steer_from_arc = 0
+        self._oncoming_gate_hold_frames = 0
 
         route_waypoints = self._densify_route_transitions(route_waypoints)
         route_waypoints = self._enforce_route_legality(route_waypoints)
@@ -4240,6 +4244,11 @@ class PrivilegedExpert:
         longitudinal, and TTC constraints) so adjacent-lane overlap
         artefacts do not trigger false emergency stops.
         """
+        self._oncoming_gate_hold_frames = max(
+            0,
+            int(getattr(self, "_oncoming_gate_hold_frames", 0)) - 1,
+        )
+
         for v in nearby:
             if not v["is_ahead"]:
                 continue
@@ -4343,8 +4352,19 @@ class PrivilegedExpert:
         lateral = abs(float(vehicle_info.get("lateral", 999.0)))
         longitudinal = max(0.0, float(vehicle_info.get("longitudinal", 999.0)))
         distance = max(0.0, float(vehicle_info.get("distance", 999.0)))
-        if lateral > float(cfg.oncoming_lead_lateral_max_m):
+        lateral_max = float(cfg.oncoming_lead_lateral_max_m)
+        lateral_hyst = max(lateral_max, float(cfg.oncoming_lead_lateral_hysteresis_m))
+        hold_frames = max(0, int(getattr(self, "_oncoming_gate_hold_frames", 0)))
+
+        if lateral <= lateral_max:
+            self._oncoming_gate_hold_frames = max(
+                0,
+                int(cfg.oncoming_lead_hysteresis_hold_frames),
+            )
+        elif not (hold_frames > 0 and lateral <= lateral_hyst):
+            self._oncoming_gate_hold_frames = 0
             return False
+
         if longitudinal > float(cfg.oncoming_lead_longitudinal_max_m):
             return False
 
