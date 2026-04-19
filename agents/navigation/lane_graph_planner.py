@@ -958,8 +958,10 @@ class LaneGraphPlanner:
             cur_seg = self._segments[cur_id]
 
             if active_junction_cmd is not None:
-                commands[idx] = active_junction_cmd
-                if not cur_seg.is_junction:
+                if cur_seg.is_junction:
+                    commands[idx] = active_junction_cmd
+                else:
+                    commands[idx] = RoadOption.LANEFOLLOW
                     active_junction_cmd = None
                 continue
 
@@ -974,9 +976,6 @@ class LaneGraphPlanner:
                 continue
 
             commands[idx] = RoadOption.LANEFOLLOW
-
-        if len(commands) > 1 and commands[0] == RoadOption.LANEFOLLOW:
-            commands[0] = commands[1]
 
         return commands
 
