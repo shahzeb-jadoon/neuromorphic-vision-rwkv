@@ -361,6 +361,105 @@ class TestBalancedRouteStitching:
                         assert extend_mock.call_args.args[0] is entry_wp
 
 
+class TestBalancedRouteBudgetAndTargets:
+    @staticmethod
+    def _make_transform(x: float, y: float) -> MockTransform:
+        return MockTransform(MockLocation(x, y))
+
+    @staticmethod
+    def _make_waypoint(x: float, y: float) -> MagicMock:
+        wp = MagicMock()
+        wp.transform = MockTransform(MockLocation(x, y))
+        return wp
+
+    def test_balanced_route_clamps_to_max_waypoints(self) -> None:
+        with patch.object(BalancedRouteGenerator, "__init__", lambda self, *a, **kw: None):
+            gen = BalancedRouteGenerator.__new__(BalancedRouteGenerator)
+
+        gen.config = RouteConfig(min_waypoints=0, max_waypoints=5, sampling_resolution=2.0)
+
+        spawn_loc = MockLocation(0.0, 0.0)
+        spawn = MagicMock()
+        spawn.location = spawn_loc
+        gen.spawn_points = [spawn]
+
+        start_wp = self._make_waypoint(0.0, 0.0)
+        entry_wp = self._make_waypoint(10.0, 0.0)
+        exit_wp = self._make_waypoint(12.0, 0.0)
+
+        gen.map = MagicMock()
+
+        def _map_get_waypoint(location: MockLocation, *args: object, **kwargs: object) -> MagicMock:
+            if location is spawn_loc:
+                return start_wp
+            if abs(float(location.x) - 10.0) < 1e-6:
+                return entry_wp
+            if abs(float(location.x) - 12.0) < 1e-6:
+                return exit_wp
+            return start_wp
+
+        target_junction = {
+            "junction_id": 1,
+            "location": MockLocation(10.0, 0.0),
+            "entry_waypoints": [entry_wp],
+            "exit_waypoints": [exit_wp],
+        }
+        gen._junctions = [target_junction]
+
+        long_segment = [(self._make_transform(float(i), 0.0), "LaneFollow") for i in range(12)]
+
+        with patch.object(gen.map, "get_waypoint", side_effect=_map_get_waypoint):
+            with patch.object(gen, "_find_target_junction", side_effect=[target_junction, None]):
+                with patch.object(gen, "_trace_route", return_value=long_segment):
+                    with patch.object(gen, "_select_junction_exit_segment") as select_exit_mock:
+                        route = gen._generate_balanced_route(np.random.default_rng(0))
+
+        assert len(route) == 5
+        assert [float(tf.location.x) for tf, _ in route] == [0.0, 1.0, 2.0, 3.0, 4.0]
+        # Once the segment budget is exhausted, no junction exit segment is traced.
+        assert select_exit_mock.call_count == 0
+
+    def test_choose_desired_turn_honors_extreme_target_distribution(self) -> None:
+        with patch.object(BalancedRouteGenerator, "__init__", lambda self, *a, **kw: None):
+            gen = BalancedRouteGenerator.__new__(BalancedRouteGenerator)
+
+        gen.config = RouteConfig(target_left=0.0, target_right=1.0, target_straight=0.0)
+        turn_counts = {"LEFT": 50, "RIGHT": 0, "STRAIGHT": 30}
+
+        for _ in range(20):
+            desired = gen._choose_desired_turn(turn_counts, np.random.default_rng(_))
+            assert desired == "RIGHT"
+
+    def test_select_junction_exit_segment_prefers_desired_turn(self) -> None:
+        with patch.object(BalancedRouteGenerator, "__init__", lambda self, *a, **kw: None):
+            gen = BalancedRouteGenerator.__new__(BalancedRouteGenerator)
+
+        gen.config = RouteConfig(target_left=0.1, target_right=0.8, target_straight=0.1)
+        current_wp = self._make_waypoint(0.0, 0.0)
+        exit_left = self._make_waypoint(10.0, 0.0)
+        exit_right = self._make_waypoint(12.0, 0.0)
+        turn_counts = {"LEFT": 40, "RIGHT": 0, "STRAIGHT": 10}
+
+        left_segment = [(self._make_transform(1.0, 0.0), "Left")]
+        right_segment = [(self._make_transform(1.0, 1.0), "Right")]
+
+        def _trace_route(_start: object, end_wp: object) -> list[tuple[MockTransform, str]]:
+            if end_wp is exit_left:
+                return left_segment
+            return right_segment
+
+        with patch.object(gen, "_trace_route", side_effect=_trace_route):
+            with patch.object(gen, "_choose_desired_turn", return_value="RIGHT"):
+                selected = gen._select_junction_exit_segment(
+                    current_wp,
+                    [exit_left, exit_right],
+                    turn_counts,
+                    np.random.default_rng(0),
+                )
+
+        assert selected == right_segment
+
+
 class _TopoWaypoint:
     def __init__(self, road_id: int, lane_id: int, is_junction: bool, x: float) -> None:
         self.road_id = road_id

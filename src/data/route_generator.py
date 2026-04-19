@@ -324,13 +324,18 @@ class BalancedRouteGenerator:
         current_wp = self.map.get_waypoint(self.spawn_points[int(start_idx)].location)
 
         route_segments: list[tuple[Any, str]] = []
-        turn_counts: dict[str, int] = defaultdict(int)
+        turn_counts: dict[str, int] = {
+            "LEFT": 0,
+            "RIGHT": 0,
+            "STRAIGHT": 0,
+        }
         total_waypoints = 0
 
         max_segments = 20  # Safety limit
 
         for _ in range(max_segments):
-            if total_waypoints >= self.config.max_waypoints:
+            remaining_budget = self.config.max_waypoints - total_waypoints
+            if remaining_budget <= 0:
                 break
 
             # Find the nearest junction we haven't visited recently
@@ -355,40 +360,160 @@ class BalancedRouteGenerator:
             if not segment:
                 continue
 
+            if len(segment) > remaining_budget:
+                segment = segment[:remaining_budget]
+
             # Count turns in this segment
-            for _, road_option in segment:
-                if road_option in ("Left", "Right", "Straight"):
-                    turn_counts[road_option] += 1
+            self._update_turn_counts(turn_counts, segment)
 
-            total_waypoints += self._append_route_segment(route_segments, segment)
+            added = self._append_route_segment(route_segments, segment)
+            total_waypoints += added
 
-            segment_tail_wp = self._waypoint_from_transform(segment[-1][0])
-            if segment_tail_wp is not None:
-                current_wp = segment_tail_wp
+            if route_segments:
+                segment_tail_wp = self._waypoint_from_transform(route_segments[-1][0])
+                if segment_tail_wp is not None:
+                    current_wp = segment_tail_wp
+
+            remaining_budget = self.config.max_waypoints - total_waypoints
+            if remaining_budget <= 0:
+                break
 
             # Move current position past the junction using a traced
             # connector path, not a random coordinate jump.
             exit_wps = target_junction["exit_waypoints"]
             if exit_wps:
-                exit_wp = exit_wps[int(rng.integers(len(exit_wps)))]
-                junction_segment = self._trace_route(current_wp, exit_wp)
+                junction_segment = self._select_junction_exit_segment(
+                    current_wp,
+                    exit_wps,
+                    turn_counts,
+                    rng,
+                )
                 if junction_segment:
-                    for _, road_option in junction_segment:
-                        if road_option in ("Left", "Right", "Straight"):
-                            turn_counts[road_option] += 1
+                    if len(junction_segment) > remaining_budget:
+                        junction_segment = junction_segment[:remaining_budget]
 
-                    total_waypoints += self._append_route_segment(route_segments, junction_segment)
+                    self._update_turn_counts(turn_counts, junction_segment)
+                    added = self._append_route_segment(route_segments, junction_segment)
+                    total_waypoints += added
 
-                    junction_tail_wp = self._waypoint_from_transform(junction_segment[-1][0])
-                    if junction_tail_wp is not None:
-                        current_wp = junction_tail_wp
+                    if route_segments:
+                        junction_tail_wp = self._waypoint_from_transform(route_segments[-1][0])
+                        if junction_tail_wp is not None:
+                            current_wp = junction_tail_wp
+
+                    if total_waypoints >= self.config.max_waypoints:
+                        break
 
         # If we didn't get enough waypoints, extend with random driving
         if total_waypoints < self.config.min_waypoints:
-            extra = self._extend_route(current_wp, self.config.min_waypoints - total_waypoints)
-            route_segments.extend(extra)
+            remaining_budget = self.config.max_waypoints - total_waypoints
+            if remaining_budget > 0:
+                extra_needed = min(self.config.min_waypoints - total_waypoints, remaining_budget)
+                extra = self._extend_route(current_wp, extra_needed)
+                total_waypoints += self._append_route_segment(route_segments, extra)
 
         return route_segments
+
+    @staticmethod
+    def _canonical_option_name(option_name: str) -> str:
+        normalized = str(option_name).strip().replace("_", "").replace(" ", "").lower()
+        mapping = {
+            "left": "LEFT",
+            "right": "RIGHT",
+            "straight": "STRAIGHT",
+            "lanefollow": "LANEFOLLOW",
+            "changelaneleft": "CHANGELANELEFT",
+            "changelaneright": "CHANGELANERIGHT",
+            "void": "VOID",
+        }
+        return mapping.get(normalized, str(option_name).strip().upper())
+
+    def _update_turn_counts(
+        self,
+        turn_counts: dict[str, int],
+        segment: list[tuple[Any, str]],
+    ) -> None:
+        for _, road_option in segment:
+            canonical = self._canonical_option_name(road_option)
+            if canonical in ("LEFT", "RIGHT", "STRAIGHT"):
+                turn_counts[canonical] = int(turn_counts.get(canonical, 0)) + 1
+
+    def _choose_desired_turn(
+        self,
+        turn_counts: dict[str, int],
+        rng: np.random.Generator,
+    ) -> str:
+        target_fracs = {
+            "LEFT": max(0.0, float(self.config.target_left)),
+            "RIGHT": max(0.0, float(self.config.target_right)),
+            "STRAIGHT": max(0.0, float(self.config.target_straight)),
+        }
+        labels = list(target_fracs.keys())
+        total_target = sum(target_fracs.values())
+        if total_target <= 1e-9:
+            return "STRAIGHT"
+
+        observed_total = sum(int(turn_counts.get(lbl, 0)) for lbl in labels)
+        if observed_total <= 0:
+            weights = np.array([target_fracs[lbl] for lbl in labels], dtype=np.float64)
+        else:
+            deficits = []
+            for lbl in labels:
+                observed_frac = float(turn_counts.get(lbl, 0)) / float(observed_total)
+                deficit = max(target_fracs[lbl] - observed_frac, 0.0)
+                deficits.append(deficit)
+            deficit_sum = float(sum(deficits))
+            if deficit_sum > 1e-9:
+                weights = np.array(deficits, dtype=np.float64)
+            else:
+                weights = np.array([target_fracs[lbl] for lbl in labels], dtype=np.float64)
+
+        weights = weights / weights.sum()
+        chosen = int(rng.choice(len(labels), p=weights))
+        return labels[chosen]
+
+    def _select_junction_exit_segment(
+        self,
+        current_wp: Any,
+        exit_waypoints: list[Any],
+        turn_counts: dict[str, int],
+        rng: np.random.Generator,
+    ) -> list[tuple[Any, str]]:
+        if not exit_waypoints:
+            return []
+
+        desired_turn = self._choose_desired_turn(turn_counts, rng)
+        candidate_segments: list[tuple[int, int, int, list[tuple[Any, str]]]] = []
+
+        for candidate_idx in rng.permutation(len(exit_waypoints)):
+            exit_wp = exit_waypoints[int(candidate_idx)]
+            segment = self._trace_route(current_wp, exit_wp)
+            if not segment:
+                continue
+
+            desired_hits = 0
+            any_turn_hits = 0
+            for _, road_option in segment:
+                canonical = self._canonical_option_name(road_option)
+                if canonical in ("LEFT", "RIGHT", "STRAIGHT"):
+                    any_turn_hits += 1
+                    if canonical == desired_turn:
+                        desired_hits += 1
+
+            candidate_segments.append(
+                (
+                    desired_hits,
+                    any_turn_hits,
+                    -len(segment),
+                    segment,
+                )
+            )
+
+        if not candidate_segments:
+            return []
+
+        candidate_segments.sort(key=lambda item: (item[0], item[1], item[2]), reverse=True)
+        return candidate_segments[0][3]
 
     def _find_target_junction(
         self,

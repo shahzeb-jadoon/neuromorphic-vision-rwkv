@@ -514,11 +514,55 @@ def main() -> None:
     parser.add_argument(
         "--route-strategy",
         type=str,
-        default="balanced",
+        default=None,
         choices=["random", "balanced"],
+        help="Override route strategy (default: from YAML routes.strategy)",
     )
-    parser.add_argument("--target-left", type=float, default=0.15)
-    parser.add_argument("--target-right", type=float, default=0.15)
+    parser.add_argument(
+        "--target-left",
+        type=float,
+        default=None,
+        help=(
+            "Override target left-turn fraction "
+            "(default: from YAML routes.target_distribution.left)"
+        ),
+    )
+    parser.add_argument(
+        "--target-right",
+        type=float,
+        default=None,
+        help=(
+            "Override target right-turn fraction "
+            "(default: from YAML routes.target_distribution.right)"
+        ),
+    )
+    parser.add_argument(
+        "--target-straight",
+        type=float,
+        default=None,
+        help=(
+            "Override target straight-turn fraction "
+            "(default: from YAML routes.target_distribution.straight)"
+        ),
+    )
+    parser.add_argument(
+        "--min-route-length",
+        type=int,
+        default=None,
+        help=(
+            "Override minimum route length in waypoints "
+            "(default: from YAML routes.min_route_length)"
+        ),
+    )
+    parser.add_argument(
+        "--max-route-length",
+        type=int,
+        default=None,
+        help=(
+            "Override maximum route length in waypoints "
+            "(default: from YAML routes.max_route_length)"
+        ),
+    )
     parser.add_argument(
         "--max-frames",
         type=int,
@@ -657,10 +701,53 @@ def main() -> None:
         lane_graph_turn_threshold_deg = float(cfg0.lane_graph_turn_threshold_deg)
         lane_graph_max_search_expansions = int(cfg0.lane_graph_max_search_expansions)
 
+    routes_cfg = cfg.get("routes", {})
+    target_dist_cfg = routes_cfg.get("target_distribution", {})
+
+    route_strategy = args.route_strategy or str(routes_cfg.get("strategy", "balanced"))
+    target_left = (
+        float(args.target_left)
+        if args.target_left is not None
+        else float(target_dist_cfg.get("left", 0.15))
+    )
+    target_right = (
+        float(args.target_right)
+        if args.target_right is not None
+        else float(target_dist_cfg.get("right", 0.15))
+    )
+    target_straight = (
+        float(args.target_straight)
+        if args.target_straight is not None
+        else float(target_dist_cfg.get("straight", 0.10))
+    )
+    min_route_length = (
+        int(args.min_route_length)
+        if args.min_route_length is not None
+        else int(routes_cfg.get("min_route_length", 100))
+    )
+    max_route_length = (
+        int(args.max_route_length)
+        if args.max_route_length is not None
+        else int(routes_cfg.get("max_route_length", 500))
+    )
+
+    min_route_length = max(1, min_route_length)
+    max_route_length = max(1, max_route_length)
+    if max_route_length < min_route_length:
+        logger.warning(
+            "max_route_length (%d) < min_route_length (%d); clamping max to min",
+            max_route_length,
+            min_route_length,
+        )
+        max_route_length = min_route_length
+
     route_cfg = RouteConfig(
-        strategy=args.route_strategy,
-        target_left=args.target_left,
-        target_right=args.target_right,
+        strategy=route_strategy,
+        target_left=target_left,
+        target_right=target_right,
+        target_straight=target_straight,
+        min_waypoints=min_route_length,
+        max_waypoints=max_route_length,
         route_planner_backend=route_backend,
         lane_graph_sampling_resolution_m=lane_graph_sampling_resolution_m,
         lane_graph_lane_change_cost=lane_graph_lane_change_cost,
