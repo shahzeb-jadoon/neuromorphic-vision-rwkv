@@ -1158,7 +1158,11 @@ class PrivilegedExpert:
         ys_distance, ys_has_conflict = self._check_yield_signs(transform, speed_kmh)
         nearby_vehicles = self._detect_vehicles(transform)
         nearby_pedestrians = self._detect_pedestrians(transform)
-        lead_distance, lead_speed, lead_lateral = self._lead_vehicle_info(nearby_vehicles, speed_kmh)
+        lead_distance, lead_speed, lead_lateral = self._lead_vehicle_info(
+            nearby_vehicles,
+            speed_kmh,
+            nav_command=nav_command,
+        )
         ped_dist = self._closest_pedestrian_distance(nearby_pedestrians, transform)
 
         # --- 4.  Target speed & driving mode ---
@@ -4223,6 +4227,7 @@ class PrivilegedExpert:
         self,
         nearby: List[Dict[str, Any]],
         ego_speed_kmh: float,
+        nav_command: RoadOption | None = None,
     ) -> Tuple[float | None, float | None, float | None]:
         """Return distance, speed, and lateral offset of closest vehicle ahead.
 
@@ -4241,7 +4246,12 @@ class PrivilegedExpert:
             obb_flag = v.get("obb_in_lane", False)
             if obb_flag and v.get("same_direction", True):
                 if not self._passes_same_direction_sat_conflict_gate(v):
-                    obb_flag = False
+                    if not self._should_override_same_direction_gate_for_turn_emergency(
+                        v,
+                        ego_speed_kmh,
+                        nav_command,
+                    ):
+                        obb_flag = False
             if not v.get("same_direction", True):
                 if not obb_flag:
                     continue
@@ -4260,6 +4270,49 @@ class PrivilegedExpert:
             if in_lane:
                 return v["distance"], v.get("speed_kmh"), v.get("lateral")
         return None, None, None
+
+    def _should_override_same_direction_gate_for_turn_emergency(
+        self,
+        vehicle_info: Dict[str, Any],
+        ego_speed_kmh: float,
+        nav_command: RoadOption | None,
+    ) -> bool:
+        """Allow emergency-close turn conflicts to bypass same-direction lateral gate.
+
+        Narrow scope only:
+        - turn command context (LEFT/RIGHT),
+        - SAT overlap already true (route-corridor evidence),
+        - emergency-close distance, and
+        - near-stationary blocker.
+        """
+        if nav_command not in (RoadOption.LEFT, RoadOption.RIGHT):
+            return False
+
+        if not bool(vehicle_info.get("obb_in_lane", False)):
+            return False
+        if not bool(vehicle_info.get("same_direction", True)):
+            return False
+
+        longitudinal = float(vehicle_info.get("longitudinal", -1.0))
+        if longitudinal <= 0.0:
+            return False
+
+        cfg = self.config
+        vertical_sep = abs(float(vehicle_info.get("vertical_sep", 0.0)))
+        if vertical_sep > float(cfg.vehicle_adjacent_sat_vertical_max_m):
+            return False
+
+        other_speed_kmh = max(0.0, float(vehicle_info.get("speed_kmh", 0.0)))
+        if other_speed_kmh > float(cfg.tl_queue_follow_speed_kmh):
+            return False
+
+        distance = max(0.0, float(vehicle_info.get("distance", 999.0)))
+        ego_speed_ms = max(0.0, float(ego_speed_kmh)) / 3.6
+        dyn_emergency = max(
+            float(cfg.vehicle_emergency_distance),
+            ego_speed_ms * float(cfg.vehicle_emergency_time),
+        )
+        return distance < dyn_emergency
 
     def _passes_same_direction_sat_conflict_gate(self, vehicle_info: Dict[str, Any]) -> bool:
         """Return True only for plausible same-direction SAT lead conflicts."""

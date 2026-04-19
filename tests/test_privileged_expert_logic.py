@@ -657,6 +657,68 @@ def test_lead_vehicle_info_accepts_same_direction_sat_conflict_in_corridor() -> 
     assert lead_lateral == 0.4
 
 
+def test_lead_vehicle_info_turn_emergency_override_accepts_close_sat_blocker() -> None:
+    expert = _build_expert()
+    expert._cached_half_lane = 1.7
+    expert.config.vehicle_adjacent_sat_gate_enabled = True
+    expert.config.vehicle_adjacent_sat_lateral_margin_m = 0.35
+    expert.config.vehicle_adjacent_sat_vertical_max_m = 1.0
+
+    nearby = [
+        {
+            "is_ahead": True,
+            "same_direction": True,
+            "obb_in_lane": True,
+            "distance": 3.0,
+            "longitudinal": 4.5,
+            "lateral": 2.4,  # outside same-direction gate (1.7 + 0.35)
+            "vertical_sep": 0.1,
+            "speed_kmh": 0.0,
+        }
+    ]
+
+    lead_distance, lead_speed, lead_lateral = expert._lead_vehicle_info(
+        nearby,
+        ego_speed_kmh=20.0,
+        nav_command=RoadOption.RIGHT,
+    )
+
+    assert lead_distance == 3.0
+    assert lead_speed == 0.0
+    assert lead_lateral == 2.4
+
+
+def test_lead_vehicle_info_turn_emergency_override_requires_turn_context() -> None:
+    expert = _build_expert()
+    expert._cached_half_lane = 1.7
+    expert.config.vehicle_adjacent_sat_gate_enabled = True
+    expert.config.vehicle_adjacent_sat_lateral_margin_m = 0.35
+    expert.config.vehicle_adjacent_sat_vertical_max_m = 1.0
+
+    nearby = [
+        {
+            "is_ahead": True,
+            "same_direction": True,
+            "obb_in_lane": True,
+            "distance": 3.0,
+            "longitudinal": 4.5,
+            "lateral": 2.4,
+            "vertical_sep": 0.1,
+            "speed_kmh": 0.0,
+        }
+    ]
+
+    lead_distance, lead_speed, lead_lateral = expert._lead_vehicle_info(
+        nearby,
+        ego_speed_kmh=20.0,
+        nav_command=RoadOption.LANEFOLLOW,
+    )
+
+    assert lead_distance is None
+    assert lead_speed is None
+    assert lead_lateral is None
+
+
 def test_closest_pedestrian_distance_uses_hybrid_floor() -> None:
     expert = _build_expert()
     setattr(expert, "_dynamic_half_lane", lambda _t: 1.75)
