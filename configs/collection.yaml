@@ -112,6 +112,11 @@ routes:
     left: 0.15
     right: 0.15
     straight: 0.10
+  campaign_turn_balance:
+    enabled: false             # Optional Commit 5: bounded campaign-level correction
+    max_adjust: 0.05           # Per-turn target correction cap (absolute fraction)
+    smoothing_alpha: 0.35      # EMA factor for deficit smoothing (0..1)
+    min_turn_samples: 20       # Wait for this many observed turn labels before correcting
   min_route_length: 100        # Minimum waypoints
   max_route_length: 500        # Maximum waypoints
 

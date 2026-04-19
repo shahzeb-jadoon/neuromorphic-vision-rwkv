@@ -460,6 +460,64 @@ class TestBalancedRouteBudgetAndTargets:
         assert selected == right_segment
 
 
+class TestCampaignTurnBalance:
+    def test_target_fracs_for_route_uses_base_targets_when_disabled(self) -> None:
+        with patch.object(BalancedRouteGenerator, "__init__", lambda self, *a, **kw: None):
+            gen = BalancedRouteGenerator.__new__(BalancedRouteGenerator)
+
+        gen.config = RouteConfig(
+            target_left=0.15,
+            target_right=0.15,
+            target_straight=0.10,
+            campaign_turn_balance_enabled=False,
+        )
+        gen._campaign_turn_counts = {"LEFT": 0, "RIGHT": 100, "STRAIGHT": 0}
+
+        targets = gen._target_fracs_for_route()
+
+        assert targets == {"LEFT": 0.15, "RIGHT": 0.15, "STRAIGHT": 0.10}
+
+    def test_target_fracs_for_route_applies_bounded_campaign_correction(self) -> None:
+        with patch.object(BalancedRouteGenerator, "__init__", lambda self, *a, **kw: None):
+            gen = BalancedRouteGenerator.__new__(BalancedRouteGenerator)
+
+        gen.config = RouteConfig(
+            target_left=0.15,
+            target_right=0.15,
+            target_straight=0.10,
+            campaign_turn_balance_enabled=True,
+            campaign_turn_balance_max_adjust=0.05,
+            campaign_turn_balance_smoothing_alpha=1.0,
+            campaign_turn_balance_min_turn_samples=1,
+        )
+        gen._campaign_turn_counts = {"LEFT": 0, "RIGHT": 100, "STRAIGHT": 0}
+        gen._campaign_turn_deficit_ema = {"LEFT": 0.0, "RIGHT": 0.0, "STRAIGHT": 0.0}
+
+        targets = gen._target_fracs_for_route()
+
+        assert targets["LEFT"] == pytest.approx(0.20)
+        assert targets["RIGHT"] == pytest.approx(0.10)
+        assert targets["STRAIGHT"] == pytest.approx(0.15)
+        assert targets["LEFT"] - 0.15 <= 0.05 + 1e-9
+        assert 0.15 - targets["RIGHT"] <= 0.05 + 1e-9
+
+    def test_record_campaign_turn_counts_tracks_only_turn_labels(self) -> None:
+        with patch.object(BalancedRouteGenerator, "__init__", lambda self, *a, **kw: None):
+            gen = BalancedRouteGenerator.__new__(BalancedRouteGenerator)
+
+        route = [
+            (MagicMock(), "Left"),
+            (MagicMock(), "LaneFollow"),
+            (MagicMock(), "Right"),
+            (MagicMock(), "Straight"),
+            (MagicMock(), "ChangeLaneLeft"),
+        ]
+
+        gen._record_campaign_turn_counts(route)
+
+        assert gen._campaign_turn_counts == {"LEFT": 1, "RIGHT": 1, "STRAIGHT": 1}
+
+
 class _TopoWaypoint:
     def __init__(self, road_id: int, lane_id: int, is_junction: bool, x: float) -> None:
         self.road_id = road_id

@@ -730,6 +730,11 @@ def main() -> None:
         if args.max_route_length is not None
         else int(routes_cfg.get("max_route_length", 500))
     )
+    campaign_turn_cfg = routes_cfg.get("campaign_turn_balance", {})
+    campaign_turn_balance_enabled = bool(campaign_turn_cfg.get("enabled", False))
+    campaign_turn_balance_max_adjust = float(campaign_turn_cfg.get("max_adjust", 0.05))
+    campaign_turn_balance_smoothing_alpha = float(campaign_turn_cfg.get("smoothing_alpha", 0.35))
+    campaign_turn_balance_min_turn_samples = int(campaign_turn_cfg.get("min_turn_samples", 20))
 
     min_route_length = max(1, min_route_length)
     max_route_length = max(1, max_route_length)
@@ -755,6 +760,10 @@ def main() -> None:
         lane_graph_lane_change_freeze_distance_m=lane_graph_lane_change_freeze_distance_m,
         lane_graph_turn_threshold_deg=lane_graph_turn_threshold_deg,
         lane_graph_max_search_expansions=lane_graph_max_search_expansions,
+        campaign_turn_balance_enabled=campaign_turn_balance_enabled,
+        campaign_turn_balance_max_adjust=campaign_turn_balance_max_adjust,
+        campaign_turn_balance_smoothing_alpha=campaign_turn_balance_smoothing_alpha,
+        campaign_turn_balance_min_turn_samples=campaign_turn_balance_min_turn_samples,
     )
 
     # Run campaign

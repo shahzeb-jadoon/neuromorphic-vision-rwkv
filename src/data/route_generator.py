@@ -45,6 +45,10 @@ class RouteConfig:
     validate_junction_approach_exit: bool = True
     validation_max_regen_attempts: int = 3
     validation_max_issues: int = 16
+    campaign_turn_balance_enabled: bool = False
+    campaign_turn_balance_max_adjust: float = 0.05
+    campaign_turn_balance_smoothing_alpha: float = 0.35
+    campaign_turn_balance_min_turn_samples: int = 20
 
 
 class BalancedRouteGenerator:
@@ -72,6 +76,16 @@ class BalancedRouteGenerator:
         self.topology = self.map.get_topology()
         self.spawn_points = self.map.get_spawn_points()
         self.route_planner = self._build_route_planner()
+        self._campaign_turn_counts: dict[str, int] = {
+            "LEFT": 0,
+            "RIGHT": 0,
+            "STRAIGHT": 0,
+        }
+        self._campaign_turn_deficit_ema: dict[str, float] = {
+            "LEFT": 0.0,
+            "RIGHT": 0.0,
+            "STRAIGHT": 0.0,
+        }
 
         # Build intersection graph
         self._junctions = self._find_junctions()
@@ -198,10 +212,12 @@ class BalancedRouteGenerator:
                 continue
 
             if not bool(self.config.validate_junction_approach_exit):
+                self._record_campaign_turn_counts(route)
                 return route
 
             report = self._validate_approach_conditioned_route(route)
             if int(report["invalid_transition_count"]) == 0:
+                self._record_campaign_turn_counts(route)
                 return route
 
             logger.warning(
@@ -329,6 +345,7 @@ class BalancedRouteGenerator:
             "RIGHT": 0,
             "STRAIGHT": 0,
         }
+        target_fracs = self._target_fracs_for_route()
         total_waypoints = 0
 
         max_segments = 20  # Safety limit
@@ -387,6 +404,7 @@ class BalancedRouteGenerator:
                     exit_wps,
                     turn_counts,
                     rng,
+                    target_fracs=target_fracs,
                 )
                 if junction_segment:
                     if len(junction_segment) > remaining_budget:
@@ -438,16 +456,83 @@ class BalancedRouteGenerator:
             if canonical in ("LEFT", "RIGHT", "STRAIGHT"):
                 turn_counts[canonical] = int(turn_counts.get(canonical, 0)) + 1
 
-    def _choose_desired_turn(
-        self,
-        turn_counts: dict[str, int],
-        rng: np.random.Generator,
-    ) -> str:
-        target_fracs = {
+    def _ensure_campaign_state(self) -> None:
+        if not hasattr(self, "_campaign_turn_counts"):
+            self._campaign_turn_counts = {
+                "LEFT": 0,
+                "RIGHT": 0,
+                "STRAIGHT": 0,
+            }
+        if not hasattr(self, "_campaign_turn_deficit_ema"):
+            self._campaign_turn_deficit_ema = {
+                "LEFT": 0.0,
+                "RIGHT": 0.0,
+                "STRAIGHT": 0.0,
+            }
+
+    def _base_target_fracs(self) -> dict[str, float]:
+        return {
             "LEFT": max(0.0, float(self.config.target_left)),
             "RIGHT": max(0.0, float(self.config.target_right)),
             "STRAIGHT": max(0.0, float(self.config.target_straight)),
         }
+
+    def _target_fracs_for_route(self) -> dict[str, float]:
+        base = self._base_target_fracs()
+        if not bool(self.config.campaign_turn_balance_enabled):
+            return base
+
+        self._ensure_campaign_state()
+
+        labels = list(base.keys())
+        observed_total = sum(int(self._campaign_turn_counts.get(lbl, 0)) for lbl in labels)
+        min_samples = max(0, int(self.config.campaign_turn_balance_min_turn_samples))
+        if observed_total < min_samples:
+            return base
+
+        alpha = float(np.clip(float(self.config.campaign_turn_balance_smoothing_alpha), 0.0, 1.0))
+        max_adjust = max(0.0, float(self.config.campaign_turn_balance_max_adjust))
+
+        adjusted: dict[str, float] = {}
+        for lbl in labels:
+            base_frac = base[lbl]
+            observed_frac = float(self._campaign_turn_counts.get(lbl, 0)) / float(observed_total)
+            deficit = base_frac - observed_frac
+            prev_ema = float(self._campaign_turn_deficit_ema.get(lbl, 0.0))
+            smoothed_deficit = alpha * deficit + (1.0 - alpha) * prev_ema
+            self._campaign_turn_deficit_ema[lbl] = smoothed_deficit
+
+            correction = float(np.clip(smoothed_deficit, -max_adjust, max_adjust))
+            adjusted[lbl] = max(0.0, base_frac + correction)
+
+        if sum(adjusted.values()) <= 1e-9:
+            return base
+
+        return adjusted
+
+    def _record_campaign_turn_counts(
+        self,
+        route: list[tuple[Any, str]],
+    ) -> None:
+        if not route:
+            return
+
+        self._ensure_campaign_state()
+
+        for _, road_option in route:
+            canonical = self._canonical_option_name(road_option)
+            if canonical in self._campaign_turn_counts:
+                self._campaign_turn_counts[canonical] += 1
+
+    def _choose_desired_turn(
+        self,
+        turn_counts: dict[str, int],
+        rng: np.random.Generator,
+        target_fracs: dict[str, float] | None = None,
+    ) -> str:
+        if target_fracs is None:
+            target_fracs = self._target_fracs_for_route()
+
         labels = list(target_fracs.keys())
         total_target = sum(target_fracs.values())
         if total_target <= 1e-9:
@@ -478,11 +563,12 @@ class BalancedRouteGenerator:
         exit_waypoints: list[Any],
         turn_counts: dict[str, int],
         rng: np.random.Generator,
+        target_fracs: dict[str, float] | None = None,
     ) -> list[tuple[Any, str]]:
         if not exit_waypoints:
             return []
 
-        desired_turn = self._choose_desired_turn(turn_counts, rng)
+        desired_turn = self._choose_desired_turn(turn_counts, rng, target_fracs=target_fracs)
         candidate_segments: list[tuple[int, int, int, list[tuple[Any, str]]]] = []
 
         for candidate_idx in rng.permutation(len(exit_waypoints)):
