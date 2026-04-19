@@ -543,6 +543,87 @@ def test_lead_vehicle_info_accepts_oncoming_immediate_conflict() -> None:
     assert lead_lateral == 0.3
 
 
+def test_lead_vehicle_info_rejects_same_direction_adjacent_sat_overlap() -> None:
+    expert = _build_expert()
+    expert._cached_half_lane = 1.7
+    expert.config.vehicle_adjacent_sat_gate_enabled = True
+    expert.config.vehicle_adjacent_sat_lateral_margin_m = 0.35
+    expert.config.vehicle_adjacent_sat_vertical_max_m = 1.0
+
+    nearby = [
+        {
+            "is_ahead": True,
+            "same_direction": True,
+            "obb_in_lane": True,
+            "distance": 4.0,
+            "longitudinal": 5.0,
+            "lateral": 3.2,
+            "vertical_sep": 0.2,
+            "speed_kmh": 8.0,
+        }
+    ]
+
+    lead_distance, lead_speed, lead_lateral = expert._lead_vehicle_info(nearby, ego_speed_kmh=20.0)
+
+    assert lead_distance is None
+    assert lead_speed is None
+    assert lead_lateral is None
+
+
+def test_lead_vehicle_info_rejects_same_direction_sat_with_large_vertical_separation() -> None:
+    expert = _build_expert()
+    expert._cached_half_lane = 1.7
+    expert.config.vehicle_adjacent_sat_gate_enabled = True
+    expert.config.vehicle_adjacent_sat_lateral_margin_m = 0.35
+    expert.config.vehicle_adjacent_sat_vertical_max_m = 1.0
+
+    nearby = [
+        {
+            "is_ahead": True,
+            "same_direction": True,
+            "obb_in_lane": True,
+            "distance": 3.0,
+            "longitudinal": 4.0,
+            "lateral": 0.3,
+            "vertical_sep": 1.4,
+            "speed_kmh": 5.0,
+        }
+    ]
+
+    lead_distance, lead_speed, lead_lateral = expert._lead_vehicle_info(nearby, ego_speed_kmh=10.0)
+
+    assert lead_distance is None
+    assert lead_speed is None
+    assert lead_lateral is None
+
+
+def test_lead_vehicle_info_accepts_same_direction_sat_conflict_in_corridor() -> None:
+    expert = _build_expert()
+    expert._cached_half_lane = 1.7
+    expert.config.vehicle_adjacent_sat_gate_enabled = True
+    expert.config.vehicle_adjacent_sat_lateral_margin_m = 0.35
+    expert.config.vehicle_adjacent_sat_vertical_max_m = 1.0
+
+    nearby = [
+        {
+            "is_ahead": True,
+            "same_direction": True,
+            "obb_in_lane": True,
+            "distance": 3.2,
+            "longitudinal": 4.5,
+            "lateral": 0.4,
+            "vertical_sep": 0.1,
+            "speed_kmh": 7.5,
+        }
+    ]
+
+    lead_distance, lead_speed, lead_lateral = expert._lead_vehicle_info(nearby, ego_speed_kmh=12.0)
+
+    assert lead_distance == 3.2
+    assert lead_speed == 7.5
+    assert lead_lateral == 0.4
+
+
 def test_closest_pedestrian_distance_uses_hybrid_floor() -> None:
     expert = _build_expert()
     setattr(expert, "_dynamic_half_lane", lambda _t: 1.75)

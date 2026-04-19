@@ -131,6 +131,9 @@ class ExpertConfig:
     vehicle_emergency_time: float = 1.2  # seconds — scale emergency with speed
     vehicle_comfort_decel: float = 3.0  # m/s² — comfortable braking for following
     vehicle_allow_lateral_fallback: bool = False  # if False, only SAT (obb_in_lane) can select lead
+    vehicle_adjacent_sat_gate_enabled: bool = True
+    vehicle_adjacent_sat_lateral_margin_m: float = 0.35
+    vehicle_adjacent_sat_vertical_max_m: float = 1.0
     vehicle_oncoming_conflict_gate_enabled: bool = True
     oncoming_lead_lateral_max_m: float = 1.2
     oncoming_lead_longitudinal_max_m: float = 12.0
@@ -4214,6 +4217,9 @@ class PrivilegedExpert:
             if not v["is_ahead"]:
                 continue
             obb_flag = v.get("obb_in_lane", False)
+            if obb_flag and v.get("same_direction", True):
+                if not self._passes_same_direction_sat_conflict_gate(v):
+                    obb_flag = False
             if not v.get("same_direction", True):
                 if not obb_flag:
                     continue
@@ -4232,6 +4238,26 @@ class PrivilegedExpert:
             if in_lane:
                 return v["distance"], v.get("speed_kmh"), v.get("lateral")
         return None, None, None
+
+    def _passes_same_direction_sat_conflict_gate(self, vehicle_info: Dict[str, Any]) -> bool:
+        """Return True only for plausible same-direction SAT lead conflicts."""
+        cfg = self.config
+        if not cfg.vehicle_adjacent_sat_gate_enabled:
+            return True
+
+        longitudinal = float(vehicle_info.get("longitudinal", -1.0))
+        lateral = abs(float(vehicle_info.get("lateral", 999.0)))
+        vertical_sep = abs(float(vehicle_info.get("vertical_sep", 0.0)))
+
+        if longitudinal <= 0.0:
+            return False
+
+        max_lateral = self._cached_half_lane + float(cfg.vehicle_adjacent_sat_lateral_margin_m)
+        if lateral > max_lateral:
+            return False
+        if vertical_sep > float(cfg.vehicle_adjacent_sat_vertical_max_m):
+            return False
+        return True
 
     def _passes_oncoming_conflict_gate(self, vehicle_info: Dict[str, Any], ego_speed_kmh: float) -> bool:
         """Return True only for immediate oncoming conflict candidates."""
