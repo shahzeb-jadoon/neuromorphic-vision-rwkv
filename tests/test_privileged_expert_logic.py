@@ -936,6 +936,51 @@ def test_route_legality_continuity_guard_keeps_large_skip_gap() -> None:
     assert expert._legality_continuity_kept >= 1
 
 
+def test_route_tail_hardening_trims_terminal_severe_gap_suffix() -> None:
+    expert = _build_expert()
+    expert.config.planner_tail_gap_hardening_enabled = True
+    expert.config.planner_tail_severe_gap_m = 20.0
+
+    wp0 = _Waypoint(0.0, 0.0, road_id=1, lane_id=1, yaw=0.0)
+    wp1 = _Waypoint(1.0, 0.0, road_id=1, lane_id=1, yaw=0.0)
+    wp2 = _Waypoint(2.0, 0.0, road_id=1, lane_id=1, yaw=0.0)
+    wp3 = _Waypoint(35.0, 0.0, road_id=1, lane_id=1, yaw=0.0)
+    wp4 = _Waypoint(66.0, 0.0, road_id=1, lane_id=1, yaw=0.0)
+
+    hardened = expert._harden_route_tail_severe_gaps(
+        [
+            (wp0, RoadOption.LANEFOLLOW),
+            (wp1, RoadOption.LANEFOLLOW),
+            (wp2, RoadOption.LANEFOLLOW),
+            (wp3, RoadOption.LANEFOLLOW),
+            (wp4, RoadOption.LANEFOLLOW),
+        ]
+    )
+
+    assert [wp for wp, _ in hardened] == [wp0, wp1, wp2]
+
+
+def test_route_tail_hardening_does_not_trim_non_terminal_gap() -> None:
+    expert = _build_expert()
+    expert.config.planner_tail_gap_hardening_enabled = True
+    expert.config.planner_tail_severe_gap_m = 20.0
+
+    wp0 = _Waypoint(0.0, 0.0, road_id=1, lane_id=1, yaw=0.0)
+    wp1 = _Waypoint(30.0, 0.0, road_id=1, lane_id=1, yaw=0.0)
+    wp2 = _Waypoint(31.0, 0.0, road_id=1, lane_id=1, yaw=0.0)
+    wp3 = _Waypoint(32.0, 0.0, road_id=1, lane_id=1, yaw=0.0)
+
+    route = [
+        (wp0, RoadOption.LANEFOLLOW),
+        (wp1, RoadOption.LANEFOLLOW),
+        (wp2, RoadOption.LANEFOLLOW),
+        (wp3, RoadOption.LANEFOLLOW),
+    ]
+    hardened = expert._harden_route_tail_severe_gaps(route)
+
+    assert [wp for wp, _ in hardened] == [wp0, wp1, wp2, wp3]
+
+
 def test_route_legality_rejects_lane_sign_flip_without_exception() -> None:
     expert = _build_expert()
     expert.config.planner_allow_lane_id_sign_flip = False

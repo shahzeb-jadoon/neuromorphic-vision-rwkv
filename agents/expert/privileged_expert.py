@@ -252,6 +252,8 @@ class ExpertConfig:
     planner_mandatory_exit_window_m: float = 30.0
     planner_exit_lane_leave_distance_m: float = 30.0
     planner_legality_max_skip_gap_m: float = 30.0
+    planner_tail_gap_hardening_enabled: bool = True
+    planner_tail_severe_gap_m: float = 30.0
     route_watchdog_enabled: bool = True
     route_watchdog_wp_buffer_head_dist_m: float = 30.0
     route_watchdog_min_corridor_segments: int = 1
@@ -899,6 +901,58 @@ class PrivilegedExpert:
             )
         return filtered
 
+    def _harden_route_tail_severe_gaps(
+        self,
+        route: List[Tuple["carla.Waypoint", RoadOption]],
+    ) -> List[Tuple["carla.Waypoint", RoadOption]]:
+        """Trim terminal severe-gap suffixes from route geometry.
+
+        A specific failure mode is a legality-preserved continuity gap near the
+        route tail that creates a large spatial jump while route_completion is
+        already at 100%. For safety, only a *suffix* of severe gaps is trimmed;
+        interior gaps are left intact for watchdog/fail-fast handling.
+        """
+        cfg = self.config
+        if not bool(cfg.planner_tail_gap_hardening_enabled):
+            return list(route)
+        if len(route) < 3:
+            return list(route)
+
+        severe_gap_m = max(0.5, float(cfg.planner_tail_severe_gap_m))
+        last_transition_idx = len(route) - 2
+
+        severe_tail_start: int | None = None
+        for idx in range(last_transition_idx, -1, -1):
+            wp_prev, _ = route[idx]
+            wp_next, _ = route[idx + 1]
+            try:
+                gap_m = float(wp_prev.transform.location.distance(wp_next.transform.location))
+            except (AttributeError, TypeError):
+                break
+
+            if gap_m >= severe_gap_m:
+                severe_tail_start = idx
+                continue
+            if severe_tail_start is not None:
+                break
+
+        if severe_tail_start is None:
+            return list(route)
+
+        hardened = list(route[: severe_tail_start + 1])
+        if len(hardened) < 2:
+            return list(route)
+
+        severe_tail_transitions = last_transition_idx - severe_tail_start + 1
+        removed_waypoints = len(route) - len(hardened)
+        logger.warning(
+            "Route tail hardening trimmed %d waypoint(s) after %d severe tail transition(s) >= %.2fm",
+            removed_waypoints,
+            severe_tail_transitions,
+            severe_gap_m,
+        )
+        return hardened
+
     def set_route(self, route: List[Tuple["carla.Waypoint", RoadOption]]) -> None:
         """Load a pre-computed route (list of (waypoint, RoadOption))."""
         route_waypoints = list(route)
@@ -931,6 +985,7 @@ class PrivilegedExpert:
 
         route_waypoints = self._densify_route_transitions(route_waypoints)
         route_waypoints = self._enforce_route_legality(route_waypoints)
+        route_waypoints = self._harden_route_tail_severe_gaps(route_waypoints)
         self._route = route_waypoints
         self._route_wp_identity_to_index = {}
         for idx, (wp, _cmd) in enumerate(route_waypoints):
