@@ -784,6 +784,52 @@ def test_lead_vehicle_info_turn_emergency_override_requires_turn_context() -> No
     assert lead_lateral is None
 
 
+def test_emergency_route_corridor_conflict_requires_turn_command() -> None:
+    expert = _build_expert()
+
+    vehicle_info = {
+        "same_direction": True,
+        "obb_in_lane": True,
+        "distance": 3.0,
+        "longitudinal": 4.5,
+        "lateral": 2.4,
+        "vertical_sep": 0.1,
+        "speed_kmh": 0.0,
+    }
+
+    assert (
+        expert._is_emergency_close_route_corridor_conflict(
+            vehicle_info,
+            ego_speed_kmh=20.0,
+            nav_command=RoadOption.LANEFOLLOW,
+        )
+        is False
+    )
+
+
+def test_emergency_route_corridor_conflict_accepts_close_turn_blocker() -> None:
+    expert = _build_expert()
+
+    vehicle_info = {
+        "same_direction": True,
+        "obb_in_lane": True,
+        "distance": 3.0,
+        "longitudinal": 4.5,
+        "lateral": 2.4,
+        "vertical_sep": 0.1,
+        "speed_kmh": 0.0,
+    }
+
+    assert (
+        expert._is_emergency_close_route_corridor_conflict(
+            vehicle_info,
+            ego_speed_kmh=20.0,
+            nav_command=RoadOption.RIGHT,
+        )
+        is True
+    )
+
+
 def test_closest_pedestrian_distance_uses_hybrid_floor() -> None:
     expert = _build_expert()
     setattr(expert, "_dynamic_half_lane", lambda _t: 1.75)

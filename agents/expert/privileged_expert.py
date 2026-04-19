@@ -4294,6 +4294,23 @@ class PrivilegedExpert:
         - emergency-close distance, and
         - near-stationary blocker.
         """
+        return self._is_emergency_close_route_corridor_conflict(
+            vehicle_info,
+            ego_speed_kmh,
+            nav_command,
+        )
+
+    def _is_emergency_close_route_corridor_conflict(
+        self,
+        vehicle_info: Dict[str, Any],
+        ego_speed_kmh: float,
+        nav_command: RoadOption | None,
+    ) -> bool:
+        """Authoritative emergency-close conflict check using route-corridor SAT evidence.
+
+        This is intentionally narrow and conservative for emergency-only override
+        behavior in junction-turn contexts.
+        """
         if nav_command not in (RoadOption.LEFT, RoadOption.RIGHT):
             return False
 
