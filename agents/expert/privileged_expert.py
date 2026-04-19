@@ -2710,7 +2710,14 @@ class PrivilegedExpert:
         turning_block_active = False
 
         if lead_distance is not None:
-            if mode == DrivingMode.TURNING and lead_speed is not None and lead_speed < 0.5:
+            # Emergency range always wins over turn-lateral filtering.
+            # Lateral nulling is only allowed outside dyn_emergency.
+            if (
+                lead_distance >= dyn_emergency
+                and mode == DrivingMode.TURNING
+                and lead_speed is not None
+                and lead_speed < 0.5
+            ):
                 # During turns, only treat near-centerline stopped vehicles as blockers.
                 # Off-axis stopped vehicles (adjacent lane/shoulder) should not deadlock us.
                 ego_half_width = self.vehicle.bounding_box.extent.y

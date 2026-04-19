@@ -493,6 +493,39 @@ def test_turning_keeps_stopped_vehicle_in_corridor_as_blocker(monkeypatch: Monke
     assert target == 0.0
 
 
+def test_turning_emergency_distance_overrides_lateral_nulling(monkeypatch: MonkeyPatch) -> None:
+    expert = _build_expert()
+    expert._prev_target = 20.0
+
+    junction_wp = _Waypoint(0.0, 0.0, road_id=10, lane_id=1)
+    junction_wp.is_junction = True
+    expert.map = SimpleNamespace(get_waypoint=lambda _loc: junction_wp)
+
+    fake_tl = SimpleNamespace(Green=1, Yellow=2, Red=3)
+    monkeypatch.setattr(
+        "agents.expert.privileged_expert.carla", SimpleNamespace(TrafficLightState=fake_tl)
+    )
+
+    # lead_distance is inside dyn_emergency at 20 km/h, while lead_lateral is
+    # outside turn-centerline blocker band. Emergency must still fire.
+    target, mode = expert._plan_speed(
+        speed_kmh=20.0,
+        nav_command=RoadOption.LEFT,
+        tl_state=None,
+        tl_distance=None,
+        ss_distance=None,
+        ss_committed=False,
+        lead_distance=3.0,
+        lead_speed=0.0,
+        lead_lateral=3.0,
+        ped_dist=None,
+        base_target=20.0,
+    )
+
+    assert mode == DrivingMode.EMERGENCY_STOP
+    assert target == 0.0
+
+
 def test_lead_vehicle_info_rejects_oncoming_adjacent_overlap() -> None:
     expert = _build_expert()
     expert.config.vehicle_oncoming_conflict_gate_enabled = True
