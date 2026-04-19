@@ -4260,26 +4260,22 @@ class PrivilegedExpert:
     def _dynamic_half_lane(self, transform: "carla.Transform") -> float:
         """Compute corridor half-width from the current lane width.
 
-        Uses ``ego_wp.lane_width / 2`` plus a margin that scales
-        linearly between ``corridor_margin_min`` (narrow lanes like
-        Town03 @ 2.6 m) and ``corridor_margin_max`` (wide lanes like
-        Town01 @ 3.5 m).  The result is cached on ``_cached_half_lane``
-        so that ``_lead_vehicle_distance`` can reuse it without an
-        extra ``get_waypoint`` call.
+        Corridor policy uses the maximum of:
+        - ego half-width (vehicle body extent), and
+        - 97% of lane half-width (0.97 * lane_width / 2).
+
+        This reduces adjacent-lane SAT bleed while preserving a minimum
+        corridor that always covers the ego footprint.
         """
         cfg = self.config
         ego_wp = self.map.get_waypoint(transform.location)
+        ego_half = float(self.vehicle.bounding_box.extent.y)
         if ego_wp is None:
-            self._cached_half_lane = cfg.lane_half_width
-            return float(cfg.lane_half_width)
-        lw = ego_wp.lane_width
-        # Linear interpolation: 2.6m lane → margin_min, 3.5m lane → margin_max
-        t = max(0.0, min(1.0, (lw - 2.6) / 0.9))
-        margin = cfg.corridor_margin_min + t * (cfg.corridor_margin_max - cfg.corridor_margin_min)
-        min_half = float(
-            self.vehicle.bounding_box.extent.y + cfg.corridor_vehicle_half_width_margin,
-        )
-        half = float(max(lw / 2.0 + margin, min_half))
+            self._cached_half_lane = max(ego_half, float(cfg.lane_half_width))
+            return float(self._cached_half_lane)
+        lane_width = max(0.01, float(getattr(ego_wp, "lane_width", cfg.lane_half_width * 2.0)))
+        lane_half_97 = 0.97 * (lane_width / 2.0)
+        half = float(max(ego_half, lane_half_97))
         self._cached_half_lane = half
         return half
 

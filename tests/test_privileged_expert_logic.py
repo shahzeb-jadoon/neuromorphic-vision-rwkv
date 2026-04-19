@@ -51,6 +51,7 @@ class _Waypoint:
         self.transform = _Transform(_Loc(x, y), yaw=yaw)
         self.road_id = road_id
         self.lane_id = lane_id
+        self.lane_width = 3.5
         self.is_junction = False
         self._left: _Waypoint | None = None
         self._right: _Waypoint | None = None
@@ -555,6 +556,34 @@ def test_closest_pedestrian_distance_uses_hybrid_floor() -> None:
     dist = expert._closest_pedestrian_distance([ped], _Transform(_Loc(0.0, 0.0)))
 
     assert dist == 12.0
+
+
+def test_dynamic_half_lane_uses_97pct_lane_half_when_wider_than_ego() -> None:
+    expert = _build_expert()
+    wp = _Waypoint(0.0, 0.0, road_id=1, lane_id=1)
+    wp.lane_width = 3.5
+    expert.map = SimpleNamespace(get_waypoint=lambda _loc: wp)
+    expert.vehicle = SimpleNamespace(
+        bounding_box=SimpleNamespace(extent=SimpleNamespace(y=1.0)),
+    )
+
+    half = expert._dynamic_half_lane(_Transform(_Loc(0.0, 0.0)))
+
+    assert round(half, 4) == round(0.97 * (3.5 / 2.0), 4)
+
+
+def test_dynamic_half_lane_never_goes_below_ego_half_width() -> None:
+    expert = _build_expert()
+    wp = _Waypoint(0.0, 0.0, road_id=1, lane_id=1)
+    wp.lane_width = 1.5
+    expert.map = SimpleNamespace(get_waypoint=lambda _loc: wp)
+    expert.vehicle = SimpleNamespace(
+        bounding_box=SimpleNamespace(extent=SimpleNamespace(y=1.1)),
+    )
+
+    half = expert._dynamic_half_lane(_Transform(_Loc(0.0, 0.0)))
+
+    assert half == 1.1
 
 
 def test_fill_junction_gaps_prefers_bezier_for_junction_gap() -> None:
