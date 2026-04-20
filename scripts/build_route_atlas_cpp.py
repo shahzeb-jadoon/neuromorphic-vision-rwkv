@@ -2321,7 +2321,7 @@ def _validate_solver_outputs(
         not invalid_command_counts
         and (junction_routes == 0 or junction_routes_without_turn_command == 0)
         and (lane_change_routes == 0 or lane_change_routes_without_lane_change_command == 0)
-        and (not has_any_junction_edge or non_lanefollow_commands > 0)
+        and (junction_routes == 0 or non_lanefollow_commands > 0)
     )
 
     gate_errors: list[str] = []
@@ -3074,6 +3074,24 @@ def main() -> None:
     if not towns:
         raise RuntimeError(
             "No towns resolved. Provide --town, --all-towns, or valid config/cache inputs"
+        )
+
+    large_campaign_towns = {"Town12", "Town15"}
+    large_selected = sorted(town for town in towns if town in large_campaign_towns)
+    if large_selected and args.input_mode in {"carla-live", "auto"}:
+        logger.warning(
+            (
+                "Large-map campaign includes %s using %s mode. For repeated all-town "
+                "campaigns, run one live pass with --write-topology-cache, then prefer "
+                "--input-mode topology-cache for improved memory stability."
+            ),
+            ", ".join(large_selected),
+            args.input_mode,
+        )
+    if large_selected and args.input_mode == "topology-cache":
+        logger.info(
+            "Using topology-cache mode for large maps (%s): memory-stable campaign mode active",
+            ", ".join(large_selected),
         )
 
     if args.resume:
