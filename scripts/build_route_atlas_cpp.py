@@ -1022,6 +1022,7 @@ def _select_route_chunks_with_novelty(
     max_routes: int,
     combo_repeat_target: int,
     novelty_objective: bool,
+    initial_combo_hits: dict[str, int] | None = None,
 ) -> tuple[list[list[int]], dict[str, int], dict[str, Any]]:
     if not candidates:
         return (
@@ -1037,6 +1038,10 @@ def _select_route_chunks_with_novelty(
 
     selected_chunks: list[list[int]] = []
     observed_combo_hits: defaultdict[str, int] = defaultdict(int)
+    incremental_combo_hits: defaultdict[str, int] = defaultdict(int)
+    if initial_combo_hits is not None:
+        for combo_id, count in initial_combo_hits.items():
+            observed_combo_hits[str(combo_id)] = int(count)
     used: set[int] = set()
     novelty_positive_route_count = 0
     selection_trace: list[dict[str, int]] = []
@@ -1091,6 +1096,7 @@ def _select_route_chunks_with_novelty(
         selected_chunks.append(list(chosen.edge_ids))
         for combo_id, count in chosen.combo_hit_counts.items():
             observed_combo_hits[combo_id] += int(count)
+            incremental_combo_hits[combo_id] += int(count)
 
         if chosen_gain > 0:
             novelty_positive_route_count += 1
@@ -1110,9 +1116,205 @@ def _select_route_chunks_with_novelty(
         "selected_route_count": int(len(selected_chunks)),
         "novelty_enabled": bool(novelty_objective),
         "novelty_positive_route_count": int(novelty_positive_route_count),
+        "selected_combo_observations": int(sum(incremental_combo_hits.values())),
         "selection_trace": selection_trace,
     }
-    return selected_chunks, dict(observed_combo_hits), selection_stats
+    return selected_chunks, dict(incremental_combo_hits), selection_stats
+
+
+def _variant_component_sequence(
+    edge_sequence: list[int],
+    pass_index: int,
+    component_index: int,
+    seed: int,
+) -> list[int]:
+    if not edge_sequence:
+        return []
+    if pass_index <= 0:
+        return list(edge_sequence)
+
+    variant = list(edge_sequence)
+    mix = int(seed) + int(pass_index) * 1009 + int(component_index) * 131
+    if mix % 2 == 1 and len(variant) > 1:
+        variant = list(reversed(variant))
+
+    rotation = int(mix % len(variant))
+    if rotation > 0:
+        variant = variant[rotation:] + variant[:rotation]
+    return variant
+
+
+def _combo_progress_metrics(
+    all_combo_ids: set[str], combo_hits: dict[str, int], repeat_target: int
+) -> dict[str, Any]:
+    possible_combo_count = int(len(all_combo_ids))
+    observed_combo_count = int(
+        sum(1 for combo_id in all_combo_ids if int(combo_hits.get(combo_id, 0)) > 0)
+    )
+    repeat_target_combo_count = int(
+        sum(
+            1
+            for combo_id in all_combo_ids
+            if int(combo_hits.get(combo_id, 0)) >= int(repeat_target)
+        )
+    )
+
+    return {
+        "possible_combo_count": possible_combo_count,
+        "observed_combo_count": observed_combo_count,
+        "coverage_ratio": _safe_ratio(observed_combo_count, possible_combo_count),
+        "repeat_target_combo_count": repeat_target_combo_count,
+        "repeat_target_coverage_ratio": _safe_ratio(
+            repeat_target_combo_count, possible_combo_count
+        ),
+    }
+
+
+def _run_multi_pass_route_selection(
+    component_sequences: list[list[int]],
+    edges: list[EdgeGeometry],
+    all_combo_ids: set[str],
+    transition_to_combo: dict[tuple[int, int], str],
+    *,
+    max_routes_per_town: int,
+    combo_repeat_target: int,
+    min_waypoints: int,
+    max_waypoints: int,
+    novelty_objective: bool,
+    anti_repeat_combos_per_route: bool,
+    per_route_combo_repeat_limit: int,
+    multi_pass_max_passes: int,
+    multi_pass_min_passes: int,
+    target_combo_coverage_ratio: float,
+    target_repeat_coverage_ratio: float,
+    seed: int,
+) -> tuple[list[list[int]], dict[str, int], dict[str, Any]]:
+    if not component_sequences:
+        return (
+            [],
+            {},
+            {
+                "passes_executed": 0,
+                "stop_reason": "no_components",
+                "target_combo_coverage_ratio": float(target_combo_coverage_ratio),
+                "target_repeat_coverage_ratio": float(target_repeat_coverage_ratio),
+                "pass_summaries": [],
+            },
+        )
+
+    selected_routes: list[list[int]] = []
+    seen_route_signatures: set[tuple[int, ...]] = set()
+    combo_hits: defaultdict[str, int] = defaultdict(int)
+    pass_summaries: list[dict[str, Any]] = []
+
+    max_passes = max(1, int(multi_pass_max_passes))
+    min_passes = max(1, int(multi_pass_min_passes))
+    stop_reason = "max_passes_reached"
+
+    for pass_index in range(max_passes):
+        if max_routes_per_town > 0:
+            remaining_routes = int(max_routes_per_town - len(selected_routes))
+            if remaining_routes <= 0:
+                stop_reason = "max_routes_reached"
+                break
+        else:
+            remaining_routes = 0
+
+        pass_sequences: list[list[int]] = []
+        for component_index, edge_sequence in enumerate(component_sequences):
+            variant = _variant_component_sequence(
+                edge_sequence=edge_sequence,
+                pass_index=int(pass_index),
+                component_index=int(component_index),
+                seed=int(seed),
+            )
+            if variant:
+                pass_sequences.append(variant)
+
+        pass_candidates = _build_route_chunk_candidates(
+            component_sequences=pass_sequences,
+            edges=edges,
+            transition_to_combo=transition_to_combo,
+            min_waypoints=int(min_waypoints),
+            max_waypoints=int(max_waypoints),
+            max_routes_per_town=int(remaining_routes),
+            anti_repeat_combos_per_route=bool(anti_repeat_combos_per_route),
+            per_route_combo_repeat_limit=int(per_route_combo_repeat_limit),
+        )
+
+        unique_candidates: list[RouteChunkCandidate] = []
+        for candidate in pass_candidates:
+            signature = tuple(candidate.edge_ids)
+            if signature in seen_route_signatures:
+                continue
+            unique_candidates.append(candidate)
+
+        selected_in_pass, incremental_hits, pass_selection_stats = (
+            _select_route_chunks_with_novelty(
+                candidates=unique_candidates,
+                max_routes=int(remaining_routes),
+                combo_repeat_target=int(combo_repeat_target),
+                novelty_objective=bool(novelty_objective),
+                initial_combo_hits=dict(combo_hits),
+            )
+        )
+
+        for combo_id, count in incremental_hits.items():
+            combo_hits[combo_id] += int(count)
+
+        for edge_route in selected_in_pass:
+            seen_route_signatures.add(tuple(edge_route))
+            selected_routes.append(edge_route)
+
+        progress = _combo_progress_metrics(
+            all_combo_ids=all_combo_ids,
+            combo_hits=dict(combo_hits),
+            repeat_target=int(combo_repeat_target),
+        )
+
+        pass_summaries.append(
+            {
+                "pass_index": int(pass_index),
+                "selected_route_count": int(len(selected_in_pass)),
+                "cumulative_route_count": int(len(selected_routes)),
+                "progress": progress,
+                "selection": pass_selection_stats,
+            }
+        )
+
+        coverage_met = float(progress["coverage_ratio"]) >= float(target_combo_coverage_ratio)
+        repeat_met = float(progress["repeat_target_coverage_ratio"]) >= float(
+            target_repeat_coverage_ratio
+        )
+        if (pass_index + 1) >= min_passes and coverage_met and repeat_met:
+            stop_reason = "combo_targets_met"
+            break
+
+        if not selected_in_pass:
+            stop_reason = "no_additional_routes_available"
+            break
+
+    if (
+        stop_reason == "max_passes_reached"
+        and max_routes_per_town > 0
+        and len(selected_routes) >= max_routes_per_town
+    ):
+        stop_reason = "max_routes_reached"
+
+    final_progress = _combo_progress_metrics(
+        all_combo_ids=all_combo_ids,
+        combo_hits=dict(combo_hits),
+        repeat_target=int(combo_repeat_target),
+    )
+    planning_stats: dict[str, Any] = {
+        "passes_executed": int(len(pass_summaries)),
+        "stop_reason": stop_reason,
+        "target_combo_coverage_ratio": float(target_combo_coverage_ratio),
+        "target_repeat_coverage_ratio": float(target_repeat_coverage_ratio),
+        "final_progress": final_progress,
+        "pass_summaries": pass_summaries,
+    }
+    return selected_routes, dict(combo_hits), planning_stats
 
 
 def _safe_ratio(numerator: int, denominator: int) -> float:
@@ -1471,22 +1673,26 @@ def _process_town(town: str, args: argparse.Namespace, client: Any | None) -> No
                 if plan.edge_sequence:
                     component_sequences.append(plan.edge_sequence)
 
-            route_candidates = _build_route_chunk_candidates(
-                component_sequences=component_sequences,
-                edges=edges,
-                transition_to_combo=transition_to_combo,
-                min_waypoints=int(args.chunk_min_waypoints),
-                max_waypoints=int(args.chunk_max_waypoints),
-                max_routes_per_town=int(args.max_routes_per_town),
-                anti_repeat_combos_per_route=bool(args.anti_repeat_combos_per_route),
-                per_route_combo_repeat_limit=int(args.per_route_combo_repeat_limit),
-            )
             selected_edge_routes, selected_combo_hits, route_selection_stats = (
-                _select_route_chunks_with_novelty(
-                    candidates=route_candidates,
-                    max_routes=int(args.max_routes_per_town),
+                _run_multi_pass_route_selection(
+                    component_sequences=component_sequences,
+                    edges=edges,
+                    all_combo_ids=set(junction_combos.keys()),
+                    transition_to_combo=transition_to_combo,
+                    max_routes_per_town=int(args.max_routes_per_town),
                     combo_repeat_target=int(args.combo_repeat_target),
+                    min_waypoints=int(args.chunk_min_waypoints),
+                    max_waypoints=int(args.chunk_max_waypoints),
                     novelty_objective=bool(args.novelty_objective),
+                    anti_repeat_combos_per_route=bool(args.anti_repeat_combos_per_route),
+                    per_route_combo_repeat_limit=int(args.per_route_combo_repeat_limit),
+                    multi_pass_max_passes=int(args.multi_pass_max_passes),
+                    multi_pass_min_passes=int(args.multi_pass_min_passes),
+                    target_combo_coverage_ratio=float(args.multi_pass_target_coverage_ratio),
+                    target_repeat_coverage_ratio=float(
+                        args.multi_pass_target_repeat_coverage_ratio
+                    ),
+                    seed=int(args.seed),
                 )
             )
 
@@ -1550,6 +1756,12 @@ def _process_town(town: str, args: argparse.Namespace, client: Any | None) -> No
                 "novelty_objective": bool(args.novelty_objective),
                 "anti_repeat_combos_per_route": bool(args.anti_repeat_combos_per_route),
                 "per_route_combo_repeat_limit": int(args.per_route_combo_repeat_limit),
+                "multi_pass_max_passes": int(args.multi_pass_max_passes),
+                "multi_pass_min_passes": int(args.multi_pass_min_passes),
+                "multi_pass_target_coverage_ratio": float(args.multi_pass_target_coverage_ratio),
+                "multi_pass_target_repeat_coverage_ratio": float(
+                    args.multi_pass_target_repeat_coverage_ratio
+                ),
                 "solver": solver,
                 "seed": int(args.seed),
                 "carla_host": args.carla_host,
@@ -1708,6 +1920,30 @@ def _parse_args() -> argparse.Namespace:
         default=1,
         help="Maximum times a junction-combo may appear in one emitted route",
     )
+    parser.add_argument(
+        "--multi-pass-max-passes",
+        type=int,
+        default=8,
+        help="Maximum diversified planning passes for route selection",
+    )
+    parser.add_argument(
+        "--multi-pass-min-passes",
+        type=int,
+        default=1,
+        help="Minimum number of planning passes before early stop checks apply",
+    )
+    parser.add_argument(
+        "--multi-pass-target-coverage-ratio",
+        type=float,
+        default=1.0,
+        help="Coverage ratio threshold used by multi-pass stop criteria",
+    )
+    parser.add_argument(
+        "--multi-pass-target-repeat-coverage-ratio",
+        type=float,
+        default=1.0,
+        help="Repeat-target coverage ratio threshold used by multi-pass stop criteria",
+    )
 
     parser.add_argument(
         "--straight-threshold-deg",
@@ -1746,6 +1982,16 @@ def _parse_args() -> argparse.Namespace:
 
     args = parser.parse_args()
     args.towns = [_normalize_town_name(town) for group in args.town_groups for town in group]
+    args.combo_repeat_target = max(1, int(args.combo_repeat_target))
+    args.per_route_combo_repeat_limit = max(1, int(args.per_route_combo_repeat_limit))
+    args.multi_pass_max_passes = max(1, int(args.multi_pass_max_passes))
+    args.multi_pass_min_passes = max(1, int(args.multi_pass_min_passes))
+    args.multi_pass_target_coverage_ratio = min(
+        1.0, max(0.0, float(args.multi_pass_target_coverage_ratio))
+    )
+    args.multi_pass_target_repeat_coverage_ratio = min(
+        1.0, max(0.0, float(args.multi_pass_target_repeat_coverage_ratio))
+    )
     return args
 
 
