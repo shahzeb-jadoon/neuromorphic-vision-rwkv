@@ -92,6 +92,16 @@ class JunctionCombo:
     outgoing_lane: tuple[int, int, int]
 
 
+@dataclass
+class RouteChunkCandidate:
+    """Route candidate represented as edge-id chunk plus precomputed combo counts."""
+
+    edge_ids: list[int]
+    combo_hit_counts: dict[str, int]
+    component_index: int
+    component_chunk_index: int
+
+
 def _normalize_town_name(name: str) -> str:
     base = str(name).split("/")[-1]
     if base.endswith("_Opt"):
@@ -838,6 +848,273 @@ def _split_route_points(
     return chunks
 
 
+def _edge_waypoint_increment(previous_edge: EdgeGeometry | None, edge: EdgeGeometry) -> int:
+    if not edge.points:
+        return 1
+    increment = int(len(edge.points))
+    if previous_edge is not None and previous_edge.points:
+        if _distance_xyz(previous_edge.points[-1], edge.points[0]) <= 0.05:
+            increment = max(1, increment - 1)
+    return max(1, increment)
+
+
+def _split_edge_sequence_for_routes(
+    edge_sequence: list[int],
+    edges: list[EdgeGeometry],
+    transition_to_combo: dict[tuple[int, int], str],
+    min_waypoints: int,
+    max_waypoints: int,
+    max_routes: int,
+    anti_repeat_combos_per_route: bool,
+    per_route_combo_repeat_limit: int,
+) -> list[list[int]]:
+    if not edge_sequence:
+        return []
+
+    chunks: list[list[int]] = []
+    idx = 0
+    total_edges = len(edge_sequence)
+
+    while idx < total_edges:
+        if max_routes > 0 and len(chunks) >= max_routes:
+            break
+
+        chunk: list[int] = []
+        combo_counts: defaultdict[str, int] = defaultdict(int)
+        waypoint_count = 0
+        previous_edge_id: int | None = None
+
+        while idx < total_edges:
+            edge_id = int(edge_sequence[idx])
+            edge = edges[edge_id]
+
+            combo_id: str | None = None
+            if previous_edge_id is not None:
+                combo_id = transition_to_combo.get((int(previous_edge_id), edge_id))
+                if (
+                    anti_repeat_combos_per_route
+                    and per_route_combo_repeat_limit > 0
+                    and combo_id is not None
+                    and int(combo_counts[combo_id]) >= int(per_route_combo_repeat_limit)
+                ):
+                    break
+
+            previous_edge = edges[previous_edge_id] if previous_edge_id is not None else None
+            increment = _edge_waypoint_increment(previous_edge, edge)
+
+            if chunk and max_waypoints > 0 and (waypoint_count + increment) > max_waypoints:
+                break
+
+            chunk.append(edge_id)
+            waypoint_count += increment
+            if combo_id is not None:
+                combo_counts[combo_id] += 1
+
+            previous_edge_id = edge_id
+            idx += 1
+
+            if max_waypoints > 0 and waypoint_count >= max_waypoints:
+                break
+
+        if not chunk:
+            edge_id = int(edge_sequence[idx])
+            chunk = [edge_id]
+            waypoint_count = max(1, len(edges[edge_id].points))
+            idx += 1
+
+        if waypoint_count < min_waypoints and idx < total_edges:
+            while idx < total_edges and waypoint_count < min_waypoints:
+                edge_id = int(edge_sequence[idx])
+                edge = edges[edge_id]
+
+                combo_id = None
+                if previous_edge_id is not None:
+                    combo_id = transition_to_combo.get((int(previous_edge_id), edge_id))
+                    if (
+                        anti_repeat_combos_per_route
+                        and per_route_combo_repeat_limit > 0
+                        and combo_id is not None
+                        and int(combo_counts[combo_id]) >= int(per_route_combo_repeat_limit)
+                    ):
+                        break
+
+                previous_edge = edges[previous_edge_id] if previous_edge_id is not None else None
+                increment = _edge_waypoint_increment(previous_edge, edge)
+
+                if max_waypoints > 0 and (waypoint_count + increment) > max_waypoints:
+                    break
+
+                chunk.append(edge_id)
+                waypoint_count += increment
+                if combo_id is not None:
+                    combo_counts[combo_id] += 1
+
+                previous_edge_id = edge_id
+                idx += 1
+
+        if waypoint_count < min_waypoints and chunks:
+            chunks[-1].extend(chunk)
+        else:
+            chunks.append(chunk)
+
+    return chunks
+
+
+def _combo_novelty_gain(
+    candidate_combo_hits: dict[str, int],
+    observed_combo_hits: dict[str, int],
+    repeat_target: int,
+) -> tuple[int, int]:
+    novelty_gain = 0
+    new_combo_count = 0
+
+    for combo_id, count in candidate_combo_hits.items():
+        count_i = int(count)
+        current = int(observed_combo_hits.get(combo_id, 0))
+        deficit = max(0, int(repeat_target) - current)
+        novelty_gain += min(deficit, count_i)
+        if current == 0 and count_i > 0:
+            new_combo_count += 1
+
+    return int(novelty_gain), int(new_combo_count)
+
+
+def _build_route_chunk_candidates(
+    component_sequences: list[list[int]],
+    edges: list[EdgeGeometry],
+    transition_to_combo: dict[tuple[int, int], str],
+    min_waypoints: int,
+    max_waypoints: int,
+    max_routes_per_town: int,
+    anti_repeat_combos_per_route: bool,
+    per_route_combo_repeat_limit: int,
+) -> list[RouteChunkCandidate]:
+    candidates: list[RouteChunkCandidate] = []
+    max_chunks_per_component = max_routes_per_town if max_routes_per_town > 0 else 0
+
+    for component_index, edge_sequence in enumerate(component_sequences):
+        chunks = _split_edge_sequence_for_routes(
+            edge_sequence=edge_sequence,
+            edges=edges,
+            transition_to_combo=transition_to_combo,
+            min_waypoints=int(min_waypoints),
+            max_waypoints=int(max_waypoints),
+            max_routes=int(max_chunks_per_component),
+            anti_repeat_combos_per_route=bool(anti_repeat_combos_per_route),
+            per_route_combo_repeat_limit=int(per_route_combo_repeat_limit),
+        )
+        for chunk_index, chunk in enumerate(chunks):
+            combo_hit_counts = _count_observed_combo_hits(chunk, transition_to_combo)
+            candidates.append(
+                RouteChunkCandidate(
+                    edge_ids=chunk,
+                    combo_hit_counts=combo_hit_counts,
+                    component_index=int(component_index),
+                    component_chunk_index=int(chunk_index),
+                )
+            )
+
+    return candidates
+
+
+def _select_route_chunks_with_novelty(
+    candidates: list[RouteChunkCandidate],
+    max_routes: int,
+    combo_repeat_target: int,
+    novelty_objective: bool,
+) -> tuple[list[list[int]], dict[str, int], dict[str, Any]]:
+    if not candidates:
+        return (
+            [],
+            {},
+            {
+                "candidate_route_count": 0,
+                "selected_route_count": 0,
+                "novelty_enabled": bool(novelty_objective),
+                "novelty_positive_route_count": 0,
+            },
+        )
+
+    selected_chunks: list[list[int]] = []
+    observed_combo_hits: defaultdict[str, int] = defaultdict(int)
+    used: set[int] = set()
+    novelty_positive_route_count = 0
+    selection_trace: list[dict[str, int]] = []
+
+    while True:
+        if max_routes > 0 and len(selected_chunks) >= max_routes:
+            break
+
+        remaining_indices = [idx for idx in range(len(candidates)) if idx not in used]
+        if not remaining_indices:
+            break
+
+        selected_index: int
+        chosen_gain = 0
+        chosen_new_count = 0
+
+        if novelty_objective:
+            scored: list[tuple[int, int, int, int, int, int, int]] = []
+            for idx in remaining_indices:
+                candidate = candidates[idx]
+                gain, new_count = _combo_novelty_gain(
+                    candidate.combo_hit_counts,
+                    observed_combo_hits,
+                    combo_repeat_target,
+                )
+                scored.append(
+                    (
+                        int(gain),
+                        int(new_count),
+                        int(len(candidate.combo_hit_counts)),
+                        int(-len(candidate.edge_ids)),
+                        int(-candidate.component_index),
+                        int(-candidate.component_chunk_index),
+                        int(idx),
+                    )
+                )
+            scored.sort(reverse=True)
+            top = scored[0]
+            selected_index = int(top[-1])
+            chosen_gain = int(top[0])
+            chosen_new_count = int(top[1])
+
+            if chosen_gain <= 0:
+                selected_index = int(min(remaining_indices))
+                chosen_gain = 0
+                chosen_new_count = 0
+        else:
+            selected_index = int(min(remaining_indices))
+
+        used.add(selected_index)
+        chosen = candidates[selected_index]
+        selected_chunks.append(list(chosen.edge_ids))
+        for combo_id, count in chosen.combo_hit_counts.items():
+            observed_combo_hits[combo_id] += int(count)
+
+        if chosen_gain > 0:
+            novelty_positive_route_count += 1
+
+        selection_trace.append(
+            {
+                "candidate_index": int(selected_index),
+                "novelty_gain": int(chosen_gain),
+                "new_combo_count": int(chosen_new_count),
+                "component_index": int(chosen.component_index),
+                "component_chunk_index": int(chosen.component_chunk_index),
+            }
+        )
+
+    selection_stats: dict[str, Any] = {
+        "candidate_route_count": int(len(candidates)),
+        "selected_route_count": int(len(selected_chunks)),
+        "novelty_enabled": bool(novelty_objective),
+        "novelty_positive_route_count": int(novelty_positive_route_count),
+        "selection_trace": selection_trace,
+    }
+    return selected_chunks, dict(observed_combo_hits), selection_stats
+
+
 def _safe_ratio(numerator: int, denominator: int) -> float:
     if denominator <= 0:
         return 0.0
@@ -1178,7 +1455,7 @@ def _process_town(town: str, args: argparse.Namespace, client: Any | None) -> No
 
         try:
             planned_components: list[ComponentPlan] = []
-            full_edge_sequence: list[int] = []
+            component_sequences: list[list[int]] = []
 
             for component_nodes in components:
                 component_edge_ids = [
@@ -1191,21 +1468,46 @@ def _process_town(town: str, args: argparse.Namespace, client: Any | None) -> No
 
                 plan = _plan_component(component_edge_ids, edges, solver)
                 planned_components.append(plan)
-                full_edge_sequence.extend(plan.edge_sequence)
+                if plan.edge_sequence:
+                    component_sequences.append(plan.edge_sequence)
 
-            stitched_points = _sequence_to_points(full_edge_sequence, edges)
-            annotated_points = _annotate_road_options(
-                stitched_points,
-                straight_threshold_deg=float(args.straight_threshold_deg),
-                turn_threshold_deg=float(args.turn_threshold_deg),
-            )
-
-            routes = _split_route_points(
-                annotated_points,
+            route_candidates = _build_route_chunk_candidates(
+                component_sequences=component_sequences,
+                edges=edges,
+                transition_to_combo=transition_to_combo,
                 min_waypoints=int(args.chunk_min_waypoints),
                 max_waypoints=int(args.chunk_max_waypoints),
-                max_routes=int(args.max_routes_per_town),
+                max_routes_per_town=int(args.max_routes_per_town),
+                anti_repeat_combos_per_route=bool(args.anti_repeat_combos_per_route),
+                per_route_combo_repeat_limit=int(args.per_route_combo_repeat_limit),
             )
+            selected_edge_routes, selected_combo_hits, route_selection_stats = (
+                _select_route_chunks_with_novelty(
+                    candidates=route_candidates,
+                    max_routes=int(args.max_routes_per_town),
+                    combo_repeat_target=int(args.combo_repeat_target),
+                    novelty_objective=bool(args.novelty_objective),
+                )
+            )
+
+            routes: list[list[dict[str, Any]]] = []
+            kept_edge_routes: list[list[int]] = []
+            for edge_route in selected_edge_routes:
+                stitched_points = _sequence_to_points(edge_route, edges)
+                if len(stitched_points) < 2:
+                    continue
+                routes.append(
+                    _annotate_road_options(
+                        stitched_points,
+                        straight_threshold_deg=float(args.straight_threshold_deg),
+                        turn_threshold_deg=float(args.turn_threshold_deg),
+                    )
+                )
+                kept_edge_routes.append(edge_route)
+
+            full_edge_sequence = [
+                edge_id for edge_route in kept_edge_routes for edge_id in edge_route
+            ]
 
             combo_hits = _count_observed_combo_hits(full_edge_sequence, transition_to_combo)
             combo_ledger = _build_junction_combo_ledger_payload(
@@ -1216,6 +1518,8 @@ def _process_town(town: str, args: argparse.Namespace, client: Any | None) -> No
                 repeat_target=int(args.combo_repeat_target),
             )
             combo_stats = dict(combo_ledger["summary"])
+            combo_stats["route_selection"] = route_selection_stats
+            combo_stats["selected_combo_observations"] = int(sum(selected_combo_hits.values()))
 
             duplicated_total = sum(plan.duplicated_edge_count for plan in planned_components)
             eulerian_components = sum(1 for plan in planned_components if plan.eulerian)
@@ -1243,6 +1547,9 @@ def _process_town(town: str, args: argparse.Namespace, client: Any | None) -> No
                 "chunk_max_waypoints": int(args.chunk_max_waypoints),
                 "max_routes_per_town": int(args.max_routes_per_town),
                 "combo_repeat_target": int(args.combo_repeat_target),
+                "novelty_objective": bool(args.novelty_objective),
+                "anti_repeat_combos_per_route": bool(args.anti_repeat_combos_per_route),
+                "per_route_combo_repeat_limit": int(args.per_route_combo_repeat_limit),
                 "solver": solver,
                 "seed": int(args.seed),
                 "carla_host": args.carla_host,
@@ -1368,6 +1675,38 @@ def _parse_args() -> argparse.Namespace:
         type=int,
         default=1,
         help="Minimum hit target per junction-combo for ledger satisfaction metrics",
+    )
+    parser.add_argument(
+        "--novelty-objective",
+        dest="novelty_objective",
+        action="store_true",
+        default=True,
+        help="Enable novelty-aware route chunk selection against combo repeat deficits",
+    )
+    parser.add_argument(
+        "--no-novelty-objective",
+        dest="novelty_objective",
+        action="store_false",
+        help="Disable novelty-aware route chunk selection",
+    )
+    parser.add_argument(
+        "--anti-repeat-combos-per-route",
+        dest="anti_repeat_combos_per_route",
+        action="store_true",
+        default=True,
+        help="Prevent repeating the same junction-combo more than the per-route limit",
+    )
+    parser.add_argument(
+        "--no-anti-repeat-combos-per-route",
+        dest="anti_repeat_combos_per_route",
+        action="store_false",
+        help="Allow repeated junction-combos within a single route",
+    )
+    parser.add_argument(
+        "--per-route-combo-repeat-limit",
+        type=int,
+        default=1,
+        help="Maximum times a junction-combo may appear in one emitted route",
     )
 
     parser.add_argument(
