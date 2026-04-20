@@ -1547,6 +1547,12 @@ def _split_edge_sequence_for_routes(
             edge_id = int(edge_sequence[idx])
             edge = edges[edge_id]
 
+            # Enforce directed edge continuity inside a chunk.
+            if previous_edge_id is not None:
+                previous_edge_geom = edges[int(previous_edge_id)]
+                if int(previous_edge_geom.v) != int(edge.u):
+                    break
+
             combo_id: str | None = None
             if previous_edge_id is not None:
                 combo_id = transition_to_combo.get((int(previous_edge_id), edge_id))
@@ -1585,6 +1591,12 @@ def _split_edge_sequence_for_routes(
             while idx < total_edges and waypoint_count < min_waypoints:
                 edge_id = int(edge_sequence[idx])
                 edge = edges[edge_id]
+
+                # Do not force-append a discontinuous edge when extending undersized chunks.
+                if previous_edge_id is not None:
+                    previous_edge_geom = edges[int(previous_edge_id)]
+                    if int(previous_edge_geom.v) != int(edge.u):
+                        break
 
                 combo_id = None
                 if previous_edge_id is not None:
@@ -1875,8 +1887,6 @@ def _variant_component_sequence(
 
     variant = list(edge_sequence)
     mix = int(seed) + int(pass_index) * 1009 + int(component_index) * 131
-    if mix % 2 == 1 and len(variant) > 1:
-        variant = list(reversed(variant))
 
     rotation = int(mix % len(variant))
     if rotation > 0:
@@ -2268,6 +2278,9 @@ def _validate_solver_outputs(
     junction_routes_without_turn_command = 0
     lane_change_routes = 0
     lane_change_routes_without_lane_change_command = 0
+    large_gap_routes = 0
+    max_route_gap_m = 0.0
+    max_allowed_route_gap_m = 5.0
 
     for edge_route, route_points in zip(edge_routes, routes):
         waypoint_count = int(len(route_points))
@@ -2302,6 +2315,30 @@ def _validate_solver_outputs(
             if _edge_is_junction(end_edge):
                 unsafe_route_end_count += 1
 
+        route_max_gap_m = 0.0
+        for wp0, wp1 in zip(route_points, route_points[1:]):
+            gap_m = float(
+                math.dist(
+                    (
+                        float(wp0.get("x", 0.0)),
+                        float(wp0.get("y", 0.0)),
+                        float(wp0.get("z", 0.0)),
+                    ),
+                    (
+                        float(wp1.get("x", 0.0)),
+                        float(wp1.get("y", 0.0)),
+                        float(wp1.get("z", 0.0)),
+                    ),
+                )
+            )
+            if gap_m > route_max_gap_m:
+                route_max_gap_m = gap_m
+
+        if route_max_gap_m > max_allowed_route_gap_m:
+            large_gap_routes += 1
+        if route_max_gap_m > max_route_gap_m:
+            max_route_gap_m = route_max_gap_m
+
     total_commands = int(sum(command_counts.values()))
     lanefollow_commands = int(command_counts.get("LANEFOLLOW", 0))
     non_lanefollow_commands = int(total_commands - lanefollow_commands)
@@ -2315,6 +2352,7 @@ def _validate_solver_outputs(
     no_oversized_routes = bool(oversized_routes == 0)
     no_undersized_routes = bool(undersized_routes == 0)
     no_unsafe_route_endcuts = bool(unsafe_route_end_count == 0)
+    no_large_gap_routes = bool(large_gap_routes == 0)
     non_empty_combo_space_live = bool(not combo_space_empty_live)
 
     command_distribution_sane = bool(
@@ -2331,6 +2369,10 @@ def _validate_solver_outputs(
         gate_errors.append(f"undersized_routes={undersized_routes}")
     if not no_unsafe_route_endcuts:
         gate_errors.append(f"unsafe_route_endcuts={unsafe_route_end_count}")
+    if not no_large_gap_routes:
+        gate_errors.append(
+            f"large_gap_routes={large_gap_routes} (threshold_m={max_allowed_route_gap_m:.1f})"
+        )
     if not non_empty_combo_space_live:
         gate_errors.append("live_combo_space_empty")
     if not command_distribution_sane:
@@ -2351,6 +2393,9 @@ def _validate_solver_outputs(
         "oversized_routes": int(oversized_routes),
         "undersized_routes": int(undersized_routes),
         "unsafe_route_endcuts": int(unsafe_route_end_count),
+        "large_gap_routes": int(large_gap_routes),
+        "max_route_gap_m": round(float(max_route_gap_m), 3),
+        "max_allowed_route_gap_m": float(max_allowed_route_gap_m),
         "combo_possible_count": int(combo_possible_count),
         "has_any_junction_edge": bool(has_any_junction_edge),
         "non_lanefollow_commands": int(non_lanefollow_commands),
@@ -2358,6 +2403,7 @@ def _validate_solver_outputs(
             "no_oversized_routes": no_oversized_routes,
             "no_undersized_routes": no_undersized_routes,
             "no_unsafe_route_endcuts": no_unsafe_route_endcuts,
+            "no_large_gap_routes": no_large_gap_routes,
             "non_empty_combo_space_live": non_empty_combo_space_live,
             "command_distribution_sane": command_distribution_sane,
         },
