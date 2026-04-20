@@ -41,7 +41,7 @@ logger = logging.getLogger("build_route_atlas_cpp")
 
 RUN_STATE_SCHEMA_VERSION = 1
 JUNCTION_COMBO_LEDGER_SCHEMA_VERSION = 1
-TOPOLOGY_CACHE_SCHEMA_VERSION = 3
+TOPOLOGY_CACHE_SCHEMA_VERSION = 4
 
 
 @dataclass
@@ -66,6 +66,7 @@ class EdgeGeometry:
     sampled_junction_ids: list[int]
     sampled_start_junction_ids: list[int]
     sampled_end_junction_ids: list[int]
+    road_option_hint: str
     weight_m: float
     points: list[tuple[float, float, float, float]]  # x,y,z,yaw
 
@@ -375,11 +376,215 @@ def _collect_sampled_junction_ids(
     return sorted(all_ids), sorted(start_ids), sorted(end_ids)
 
 
+def _point_from_waypoint(wp: Any) -> tuple[float, float, float, float]:
+    return (
+        float(wp.transform.location.x),
+        float(wp.transform.location.y),
+        float(wp.transform.location.z),
+        float(wp.transform.rotation.yaw),
+    )
+
+
+def _resolve_entry_edge_for_waypoint(
+    waypoint: Any,
+    edges: list[EdgeGeometry],
+    entry_edge_ids_by_node: dict[int, list[int]],
+    lane_edge_ids: dict[tuple[int, int, int], list[int]],
+) -> int | None:
+    direct = entry_edge_ids_by_node.get(int(waypoint.id), [])
+    wp_point = _point_from_waypoint(waypoint)
+
+    if len(direct) == 1:
+        return int(direct[0])
+
+    if direct:
+        return int(
+            min(
+                direct,
+                key=lambda edge_id: (
+                    _distance_xyz(
+                        wp_point,
+                        edges[int(edge_id)].points[0] if edges[int(edge_id)].points else wp_point,
+                    ),
+                    int(edge_id),
+                ),
+            )
+        )
+
+    lane_key = (int(waypoint.road_id), int(waypoint.section_id), int(waypoint.lane_id))
+    candidates = lane_edge_ids.get(lane_key, [])
+    if not candidates:
+        return None
+
+    return int(
+        min(
+            candidates,
+            key=lambda edge_id: (
+                _distance_xyz(
+                    wp_point,
+                    edges[int(edge_id)].points[0] if edges[int(edge_id)].points else wp_point,
+                ),
+                int(edge_id),
+            ),
+        )
+    )
+
+
+def _lane_change_allowed(waypoint: Any, direction: str) -> bool:
+    lane_change_flag = waypoint.lane_change
+    if direction == "left":
+        flag_allowed = lane_change_flag in (carla.LaneChange.Left, carla.LaneChange.Both)
+        marking = waypoint.left_lane_marking
+        marking_allowed = bool(
+            marking is not None and (marking.lane_change & carla.LaneChange.Left)
+        )
+        return bool(flag_allowed or marking_allowed)
+
+    if direction == "right":
+        flag_allowed = lane_change_flag in (carla.LaneChange.Right, carla.LaneChange.Both)
+        marking = waypoint.right_lane_marking
+        marking_allowed = bool(
+            marking is not None and (marking.lane_change & carla.LaneChange.Right)
+        )
+        return bool(flag_allowed or marking_allowed)
+
+    return False
+
+
+def _augment_edges_with_lane_changes(
+    edges: list[EdgeGeometry],
+    sampled_waypoints_by_edge_id: dict[int, list[Any]],
+) -> list[EdgeGeometry]:
+    if not edges:
+        return edges
+
+    entry_edge_ids_by_node: defaultdict[int, list[int]] = defaultdict(list)
+    lane_edge_ids: defaultdict[tuple[int, int, int], list[int]] = defaultdict(list)
+    for edge in edges:
+        entry_edge_ids_by_node[int(edge.u)].append(int(edge.edge_id))
+        lane_edge_ids[(int(edge.road_id), int(edge.section_id), int(edge.lane_id))].append(
+            int(edge.edge_id)
+        )
+
+    added_edges: list[EdgeGeometry] = []
+    seen_signatures: set[tuple[int, int, str]] = set()
+
+    for source_edge_id, sampled_waypoints in sampled_waypoints_by_edge_id.items():
+        source_edge = edges[int(source_edge_id)]
+        if _edge_is_junction(source_edge):
+            continue
+
+        left_found = False
+        right_found = False
+
+        for source_wp in sampled_waypoints:
+            if bool(source_wp.is_junction):
+                break
+
+            directions = (
+                ("left", "CHANGELANELEFT", source_wp.get_left_lane, left_found),
+                ("right", "CHANGELANERIGHT", source_wp.get_right_lane, right_found),
+            )
+
+            for direction, road_option, lane_fn, already_found in directions:
+                if already_found:
+                    continue
+                if not _lane_change_allowed(source_wp, direction):
+                    continue
+
+                target_wp = lane_fn()
+                if target_wp is None:
+                    continue
+                if target_wp.lane_type != carla.LaneType.Driving:
+                    continue
+                if bool(target_wp.is_junction):
+                    continue
+                if int(target_wp.road_id) != int(source_wp.road_id):
+                    continue
+                if int(target_wp.section_id) != int(source_wp.section_id):
+                    continue
+
+                target_edge_id = _resolve_entry_edge_for_waypoint(
+                    waypoint=target_wp,
+                    edges=edges,
+                    entry_edge_ids_by_node=dict(entry_edge_ids_by_node),
+                    lane_edge_ids=dict(lane_edge_ids),
+                )
+                if target_edge_id is None:
+                    continue
+
+                target_edge = edges[int(target_edge_id)]
+                if _edge_is_junction(target_edge):
+                    continue
+
+                source_node_id = int(source_edge.u)
+                target_node_id = int(target_edge.u)
+                if source_node_id == target_node_id:
+                    continue
+
+                signature = (source_node_id, target_node_id, str(road_option))
+                if signature in seen_signatures:
+                    continue
+                seen_signatures.add(signature)
+
+                source_point = (
+                    source_edge.points[0] if source_edge.points else _point_from_waypoint(source_wp)
+                )
+                target_point = (
+                    target_edge.points[0] if target_edge.points else _point_from_waypoint(target_wp)
+                )
+                lateral_dist = _distance_xyz(source_point, target_point)
+                if lateral_dist <= 0.05:
+                    continue
+
+                new_edge_id = int(len(edges) + len(added_edges))
+                added_edges.append(
+                    EdgeGeometry(
+                        edge_id=new_edge_id,
+                        segment_id=(
+                            f"lc:{source_edge.segment_id}->{target_edge.segment_id}:{direction}"
+                        ),
+                        u=source_node_id,
+                        v=target_node_id,
+                        road_id=int(source_edge.road_id),
+                        section_id=int(source_edge.section_id),
+                        lane_id=int(source_edge.lane_id),
+                        end_road_id=int(target_edge.road_id),
+                        end_section_id=int(target_edge.section_id),
+                        end_lane_id=int(target_edge.lane_id),
+                        start_is_junction=False,
+                        end_is_junction=False,
+                        start_junction_id=None,
+                        end_junction_id=None,
+                        sampled_is_junction=False,
+                        sampled_junction_ids=[],
+                        sampled_start_junction_ids=[],
+                        sampled_end_junction_ids=[],
+                        road_option_hint=str(road_option),
+                        weight_m=max(0.5, float(lateral_dist)),
+                        points=[source_point, target_point],
+                    )
+                )
+
+                if direction == "left":
+                    left_found = True
+                elif direction == "right":
+                    right_found = True
+
+            if left_found and right_found:
+                break
+
+    if not added_edges:
+        return edges
+    return edges + added_edges
+
+
 def _build_edges_from_carla(world: Any, sampling_resolution: float) -> list[EdgeGeometry]:
     wmap = world.get_map()
     topology = list(wmap.get_topology())
 
     edges: list[EdgeGeometry] = []
+    sampled_waypoints_by_edge_id: dict[int, list[Any]] = {}
     seen_segment_ids: set[str] = set()
 
     for wp_start, wp_end in topology:
@@ -407,9 +612,10 @@ def _build_edges_from_carla(world: Any, sampling_resolution: float) -> list[Edge
             for wp in sampled
         ]
 
+        edge_id = int(len(edges))
         edges.append(
             EdgeGeometry(
-                edge_id=len(edges),
+                edge_id=edge_id,
                 segment_id=segment_id,
                 u=int(wp_start.id),
                 v=int(wp_end.id),
@@ -435,12 +641,14 @@ def _build_edges_from_carla(world: Any, sampling_resolution: float) -> list[Edge
                 sampled_junction_ids=sampled_junction_ids,
                 sampled_start_junction_ids=sampled_start_junction_ids,
                 sampled_end_junction_ids=sampled_end_junction_ids,
+                road_option_hint="LANEFOLLOW",
                 weight_m=max(0.01, _polyline_length(points)),
                 points=points,
             )
         )
+        sampled_waypoints_by_edge_id[edge_id] = sampled
 
-    return edges
+    return _augment_edges_with_lane_changes(edges, sampled_waypoints_by_edge_id)
 
 
 def _edge_to_dict(edge: EdgeGeometry) -> dict[str, Any]:
@@ -463,6 +671,7 @@ def _edge_to_dict(edge: EdgeGeometry) -> dict[str, Any]:
         "sampled_junction_ids": [int(v) for v in edge.sampled_junction_ids],
         "sampled_start_junction_ids": [int(v) for v in edge.sampled_start_junction_ids],
         "sampled_end_junction_ids": [int(v) for v in edge.sampled_end_junction_ids],
+        "road_option_hint": edge.road_option_hint,
         "weight_m": edge.weight_m,
         "points": [[p[0], p[1], p[2], p[3]] for p in edge.points],
     }
@@ -479,6 +688,7 @@ def _edge_from_dict(raw: dict[str, Any]) -> EdgeGeometry:
     sampled_junction_ids = [int(v) for v in raw.get("sampled_junction_ids", [])]
     sampled_start_junction_ids = [int(v) for v in raw.get("sampled_start_junction_ids", [])]
     sampled_end_junction_ids = [int(v) for v in raw.get("sampled_end_junction_ids", [])]
+    road_option_hint = str(raw.get("road_option_hint", "LANEFOLLOW"))
 
     return EdgeGeometry(
         edge_id=int(raw["edge_id"]),
@@ -509,6 +719,7 @@ def _edge_from_dict(raw: dict[str, Any]) -> EdgeGeometry:
         sampled_junction_ids=sampled_junction_ids,
         sampled_start_junction_ids=sampled_start_junction_ids,
         sampled_end_junction_ids=sampled_end_junction_ids,
+        road_option_hint=road_option_hint,
         weight_m=float(raw.get("weight_m", 0.01)),
         points=[
             (float(p[0]), float(p[1]), float(p[2]), float(p[3])) for p in raw.get("points", [])
@@ -559,6 +770,7 @@ def _load_topology_cache(cache_path: Path) -> tuple[float, list[EdgeGeometry]]:
         "sampled_junction_ids",
         "sampled_start_junction_ids",
         "sampled_end_junction_ids",
+        "road_option_hint",
     )
     for idx, raw in enumerate(raw_edges):
         if not isinstance(raw, dict):
@@ -954,10 +1166,16 @@ def _edge_commands_for_route(
     if not edge_sequence:
         return []
 
-    commands: list[str] = ["LANEFOLLOW"] * len(edge_sequence)
+    commands: list[str] = [
+        str(edges[int(edge_id)].road_option_hint or "LANEFOLLOW") for edge_id in edge_sequence
+    ]
     idx = 0
     while idx < len(edge_sequence):
         edge = edges[int(edge_sequence[idx])]
+        if commands[idx] != "LANEFOLLOW":
+            idx += 1
+            continue
+
         if not _edge_is_junction(edge):
             commands[idx] = "LANEFOLLOW"
             idx += 1
@@ -966,7 +1184,7 @@ def _edge_commands_for_route(
         run_end = idx
         while run_end + 1 < len(edge_sequence):
             nxt_edge = edges[int(edge_sequence[run_end + 1])]
-            if not _edge_is_junction(nxt_edge):
+            if commands[run_end + 1] != "LANEFOLLOW" or not _edge_is_junction(nxt_edge):
                 break
             run_end += 1
 
@@ -1966,6 +2184,20 @@ def _junction_evidence_summary(edges: list[EdgeGeometry]) -> dict[str, int]:
     }
 
 
+def _lane_change_edge_summary(edges: list[EdgeGeometry]) -> dict[str, int]:
+    left = sum(1 for edge in edges if str(edge.road_option_hint) == "CHANGELANELEFT")
+    right = sum(1 for edge in edges if str(edge.road_option_hint) == "CHANGELANERIGHT")
+    lane_change_total = int(left + right)
+    return {
+        "lane_change_edge_count": lane_change_total,
+        "lane_change_left_edge_count": int(left),
+        "lane_change_right_edge_count": int(right),
+        "lanefollow_edge_count": int(
+            sum(1 for edge in edges if str(edge.road_option_hint) == "LANEFOLLOW")
+        ),
+    }
+
+
 def _build_junction_combo_ledger_payload(
     town: str,
     solver: str,
@@ -2293,7 +2525,7 @@ def _process_town(town: str, args: argparse.Namespace, client: Any | None) -> No
             fallback_components = sum(1 for plan in planned_components if plan.solver_fallback_used)
 
             edge_stats = {
-                "driving_edge_count": len(edges),
+                "atlas_edge_count": len(edges),
                 "traversal_edge_steps": len(full_edge_sequence),
                 "unique_traversed_edges": len(set(full_edge_sequence)),
                 "weak_component_count": len(planned_components),
@@ -2305,6 +2537,7 @@ def _process_town(town: str, args: argparse.Namespace, client: Any | None) -> No
                     6,
                 ),
                 "junction_evidence": _junction_evidence_summary(edges),
+                "lane_change_edges": _lane_change_edge_summary(edges),
             }
 
             settings = {
