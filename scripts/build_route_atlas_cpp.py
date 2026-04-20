@@ -41,7 +41,7 @@ logger = logging.getLogger("build_route_atlas_cpp")
 
 RUN_STATE_SCHEMA_VERSION = 1
 JUNCTION_COMBO_LEDGER_SCHEMA_VERSION = 1
-TOPOLOGY_CACHE_SCHEMA_VERSION = 2
+TOPOLOGY_CACHE_SCHEMA_VERSION = 3
 
 
 @dataclass
@@ -62,6 +62,10 @@ class EdgeGeometry:
     end_is_junction: bool
     start_junction_id: int | None
     end_junction_id: int | None
+    sampled_is_junction: bool
+    sampled_junction_ids: list[int]
+    sampled_start_junction_ids: list[int]
+    sampled_end_junction_ids: list[int]
     weight_m: float
     points: list[tuple[float, float, float, float]]  # x,y,z,yaw
 
@@ -333,6 +337,44 @@ def _sample_segment_waypoints(
     return sampled
 
 
+def _single_or_none(values: list[int]) -> int | None:
+    if len(values) != 1:
+        return None
+    return int(values[0])
+
+
+def _collect_sampled_junction_ids(
+    sampled_waypoints: list[Any],
+    boundary_window: int = 3,
+) -> tuple[list[int], list[int], list[int]]:
+    if not sampled_waypoints:
+        return [], [], []
+
+    n = len(sampled_waypoints)
+    window = max(1, min(int(boundary_window), n))
+
+    all_ids: set[int] = set()
+    start_ids: set[int] = set()
+    end_ids: set[int] = set()
+
+    for idx, wp in enumerate(sampled_waypoints):
+        if not bool(wp.is_junction):
+            continue
+        junction = wp.get_junction()
+        if junction is None:
+            continue
+
+        junction_id = int(junction.id)
+        all_ids.add(junction_id)
+
+        if idx < window:
+            start_ids.add(junction_id)
+        if idx >= (n - window):
+            end_ids.add(junction_id)
+
+    return sorted(all_ids), sorted(start_ids), sorted(end_ids)
+
+
 def _build_edges_from_carla(world: Any, sampling_resolution: float) -> list[EdgeGeometry]:
     wmap = world.get_map()
     topology = list(wmap.get_topology())
@@ -352,6 +394,9 @@ def _build_edges_from_carla(world: Any, sampling_resolution: float) -> list[Edge
         seen_segment_ids.add(segment_id)
 
         sampled = _sample_segment_waypoints(wp_start, wp_end, sampling_resolution)
+        sampled_junction_ids, sampled_start_junction_ids, sampled_end_junction_ids = (
+            _collect_sampled_junction_ids(sampled)
+        )
         points = [
             (
                 float(wp.transform.location.x),
@@ -374,14 +419,22 @@ def _build_edges_from_carla(world: Any, sampling_resolution: float) -> list[Edge
                 end_road_id=int(wp_end.road_id),
                 end_section_id=int(wp_end.section_id),
                 end_lane_id=int(wp_end.lane_id),
-                start_is_junction=bool(wp_start.is_junction),
-                end_is_junction=bool(wp_end.is_junction),
+                start_is_junction=bool(wp_start.is_junction) or bool(sampled_start_junction_ids),
+                end_is_junction=bool(wp_end.is_junction) or bool(sampled_end_junction_ids),
                 start_junction_id=(
-                    int(wp_start.get_junction().id) if bool(wp_start.is_junction) else None
+                    int(wp_start.get_junction().id)
+                    if bool(wp_start.is_junction)
+                    else _single_or_none(sampled_start_junction_ids)
                 ),
                 end_junction_id=(
-                    int(wp_end.get_junction().id) if bool(wp_end.is_junction) else None
+                    int(wp_end.get_junction().id)
+                    if bool(wp_end.is_junction)
+                    else _single_or_none(sampled_end_junction_ids)
                 ),
+                sampled_is_junction=bool(sampled_junction_ids),
+                sampled_junction_ids=sampled_junction_ids,
+                sampled_start_junction_ids=sampled_start_junction_ids,
+                sampled_end_junction_ids=sampled_end_junction_ids,
                 weight_m=max(0.01, _polyline_length(points)),
                 points=points,
             )
@@ -406,6 +459,10 @@ def _edge_to_dict(edge: EdgeGeometry) -> dict[str, Any]:
         "end_is_junction": edge.end_is_junction,
         "start_junction_id": edge.start_junction_id,
         "end_junction_id": edge.end_junction_id,
+        "sampled_is_junction": edge.sampled_is_junction,
+        "sampled_junction_ids": [int(v) for v in edge.sampled_junction_ids],
+        "sampled_start_junction_ids": [int(v) for v in edge.sampled_start_junction_ids],
+        "sampled_end_junction_ids": [int(v) for v in edge.sampled_end_junction_ids],
         "weight_m": edge.weight_m,
         "points": [[p[0], p[1], p[2], p[3]] for p in edge.points],
     }
@@ -419,6 +476,10 @@ def _edge_from_dict(raw: dict[str, Any]) -> EdgeGeometry:
     if end_junction_id is not None:
         end_junction_id = int(end_junction_id)
 
+    sampled_junction_ids = [int(v) for v in raw.get("sampled_junction_ids", [])]
+    sampled_start_junction_ids = [int(v) for v in raw.get("sampled_start_junction_ids", [])]
+    sampled_end_junction_ids = [int(v) for v in raw.get("sampled_end_junction_ids", [])]
+
     return EdgeGeometry(
         edge_id=int(raw["edge_id"]),
         segment_id=str(raw["segment_id"]),
@@ -430,10 +491,24 @@ def _edge_from_dict(raw: dict[str, Any]) -> EdgeGeometry:
         end_road_id=int(raw.get("end_road_id", raw.get("road_id", 0))),
         end_section_id=int(raw.get("end_section_id", raw.get("section_id", 0))),
         end_lane_id=int(raw.get("end_lane_id", raw.get("lane_id", 0))),
-        start_is_junction=bool(raw.get("start_is_junction", start_junction_id is not None)),
-        end_is_junction=bool(raw.get("end_is_junction", end_junction_id is not None)),
+        start_is_junction=bool(
+            raw.get(
+                "start_is_junction",
+                start_junction_id is not None or bool(sampled_start_junction_ids),
+            )
+        ),
+        end_is_junction=bool(
+            raw.get(
+                "end_is_junction",
+                end_junction_id is not None or bool(sampled_end_junction_ids),
+            )
+        ),
         start_junction_id=start_junction_id,
         end_junction_id=end_junction_id,
+        sampled_is_junction=bool(raw.get("sampled_is_junction", bool(sampled_junction_ids))),
+        sampled_junction_ids=sampled_junction_ids,
+        sampled_start_junction_ids=sampled_start_junction_ids,
+        sampled_end_junction_ids=sampled_end_junction_ids,
         weight_m=float(raw.get("weight_m", 0.01)),
         points=[
             (float(p[0]), float(p[1]), float(p[2]), float(p[3])) for p in raw.get("points", [])
@@ -480,6 +555,10 @@ def _load_topology_cache(cache_path: Path) -> tuple[float, list[EdgeGeometry]]:
         "end_is_junction",
         "start_junction_id",
         "end_junction_id",
+        "sampled_is_junction",
+        "sampled_junction_ids",
+        "sampled_start_junction_ids",
+        "sampled_end_junction_ids",
     )
     for idx, raw in enumerate(raw_edges):
         if not isinstance(raw, dict):
@@ -490,6 +569,18 @@ def _load_topology_cache(cache_path: Path) -> tuple[float, list[EdgeGeometry]]:
         if missing:
             raise RuntimeError(
                 f"Stale topology cache {cache_path}; missing edge fields: {', '.join(missing)}"
+            )
+        if not isinstance(raw.get("sampled_junction_ids"), list):
+            raise RuntimeError(
+                f"Invalid topology cache {cache_path}; sampled_junction_ids must be a list"
+            )
+        if not isinstance(raw.get("sampled_start_junction_ids"), list):
+            raise RuntimeError(
+                f"Invalid topology cache {cache_path}; sampled_start_junction_ids must be a list"
+            )
+        if not isinstance(raw.get("sampled_end_junction_ids"), list):
+            raise RuntimeError(
+                f"Invalid topology cache {cache_path}; sampled_end_junction_ids must be a list"
             )
 
     sampling_resolution = float(payload.get("sampling_resolution_m", 2.0))
@@ -783,7 +874,26 @@ def _sequence_to_points(
 
 
 def _edge_is_junction(edge: EdgeGeometry) -> bool:
-    return bool(edge.start_is_junction or edge.end_is_junction)
+    return bool(
+        edge.start_is_junction
+        or edge.end_is_junction
+        or edge.sampled_is_junction
+        or edge.sampled_junction_ids
+    )
+
+
+def _edge_start_junction_ids(edge: EdgeGeometry) -> set[int]:
+    ids = {int(v) for v in edge.sampled_start_junction_ids}
+    if edge.start_junction_id is not None:
+        ids.add(int(edge.start_junction_id))
+    return ids
+
+
+def _edge_end_junction_ids(edge: EdgeGeometry) -> set[int]:
+    ids = {int(v) for v in edge.sampled_end_junction_ids}
+    if edge.end_junction_id is not None:
+        ids.add(int(edge.end_junction_id))
+    return ids
 
 
 def _edge_entry_yaw(edge: EdgeGeometry) -> float:
@@ -1711,11 +1821,24 @@ def _build_junction_combo(incoming: EdgeGeometry, outgoing: EdgeGeometry) -> Jun
     if incoming.v != outgoing.u:
         return None
 
+    if not (_edge_is_junction(incoming) or _edge_is_junction(outgoing)):
+        return None
+
+    incoming_end_ids = _edge_end_junction_ids(incoming)
+    outgoing_start_ids = _edge_start_junction_ids(outgoing)
+    shared_boundary_ids = sorted(incoming_end_ids.intersection(outgoing_start_ids))
+
     junction_id: int | None = None
-    if incoming.end_is_junction and incoming.end_junction_id is not None:
+    if shared_boundary_ids:
+        junction_id = int(shared_boundary_ids[0])
+    elif incoming.end_is_junction and incoming.end_junction_id is not None:
         junction_id = int(incoming.end_junction_id)
     elif outgoing.start_is_junction and outgoing.start_junction_id is not None:
         junction_id = int(outgoing.start_junction_id)
+    else:
+        boundary_union = sorted(incoming_end_ids.union(outgoing_start_ids))
+        if len(boundary_union) == 1:
+            junction_id = int(boundary_union[0])
 
     if junction_id is None:
         return None
@@ -1810,6 +1933,36 @@ def _combo_summary(
             satisfied_repeat_target, possible_combo_count
         ),
         "total_observations": total_observations,
+    }
+
+
+def _junction_evidence_summary(edges: list[EdgeGeometry]) -> dict[str, int]:
+    endpoint_count = 0
+    sampled_count = 0
+    endpoint_only_count = 0
+    sampled_only_count = 0
+    both_count = 0
+
+    for edge in edges:
+        endpoint_flag = bool(edge.start_is_junction or edge.end_is_junction)
+        sampled_flag = bool(edge.sampled_is_junction or edge.sampled_junction_ids)
+        if endpoint_flag:
+            endpoint_count += 1
+        if sampled_flag:
+            sampled_count += 1
+        if endpoint_flag and sampled_flag:
+            both_count += 1
+        elif endpoint_flag:
+            endpoint_only_count += 1
+        elif sampled_flag:
+            sampled_only_count += 1
+
+    return {
+        "endpoint_junction_edge_count": int(endpoint_count),
+        "sampled_junction_edge_count": int(sampled_count),
+        "endpoint_only_junction_edge_count": int(endpoint_only_count),
+        "sampled_only_junction_edge_count": int(sampled_only_count),
+        "endpoint_and_sampled_junction_edge_count": int(both_count),
     }
 
 
@@ -2151,11 +2304,13 @@ def _process_town(town: str, args: argparse.Namespace, client: Any | None) -> No
                     (len(set(full_edge_sequence)) / float(len(edges))) if edges else 0.0,
                     6,
                 ),
+                "junction_evidence": _junction_evidence_summary(edges),
             }
 
             settings = {
                 "input_mode": resolved_input_mode,
                 "sampling_resolution_m": float(sampling_resolution),
+                "topology_cache_schema_version": int(TOPOLOGY_CACHE_SCHEMA_VERSION),
                 "target_coverage": float(args.target_coverage),
                 "chunk_min_waypoints": int(args.chunk_min_waypoints),
                 "chunk_max_waypoints": int(args.chunk_max_waypoints),
