@@ -125,6 +125,7 @@ routes:
     max_chains_per_episode: 8  # hard cap for bounded runtime + diagnostics clarity
     min_route_length: 120      # continuation route floor (waypoints)
     max_route_length: 260      # continuation route cap (waypoints)
+    preload_remaining_waypoints: 40  # pre-load next route near end to avoid late control handoff
     atlas_active_horizon: 4    # lazy-loaded destination anchors kept ready
     atlas_bank_size: 24        # strict memory cap for queued atlas anchors
     atlas_min_destination_distance_m: 60.0

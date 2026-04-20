@@ -58,6 +58,7 @@ class RouteContinuationConfig:
     atlas_active_horizon: int = 4
     atlas_bank_size: int = 32
     atlas_min_destination_distance_m: float = 60.0
+    preload_remaining_waypoints: int = 0
 
 
 class _LazyAtlasContinuationPlanner:
@@ -123,7 +124,33 @@ class _LazyAtlasContinuationPlanner:
     def next_route(self, current_location: Any) -> list[tuple[Any, str]]:
         self._refill(current_location)
 
-        start_wp = self.route_gen.map.get_waypoint(current_location)
+        lane_type_driving: Any | None = None
+        try:
+            import carla as _carla
+
+            lane_type_driving = _carla.LaneType.Driving
+        except Exception:
+            lane_type_driving = None
+
+        start_wp = None
+        try:
+            if lane_type_driving is not None:
+                start_wp = self.route_gen.map.get_waypoint(
+                    current_location,
+                    project_to_road=True,
+                    lane_type=lane_type_driving,
+                )
+            else:
+                start_wp = self.route_gen.map.get_waypoint(
+                    current_location,
+                    project_to_road=True,
+                )
+        except Exception:
+            try:
+                start_wp = self.route_gen.map.get_waypoint(current_location)
+            except Exception:
+                start_wp = None
+
         if start_wp is None:
             return []
 
@@ -188,6 +215,10 @@ def parse_route_continuation_config(routes_cfg: dict) -> RouteContinuationConfig
         atlas_min_destination_distance_m=max(
             0.0,
             float(cont_cfg.get("atlas_min_destination_distance_m", 60.0)),
+        ),
+        preload_remaining_waypoints=max(
+            0,
+            int(cont_cfg.get("preload_remaining_waypoints", 0)),
         ),
     )
 
@@ -935,13 +966,14 @@ def main() -> None:
     if continuation_cfg.enabled:
         logger.info(
             "Route continuation enabled: mode=%s chains=%d len=[%d,%d] "
-            "atlas_horizon=%d atlas_bank=%d",
+            "atlas_horizon=%d atlas_bank=%d preload_remaining_wp=%d",
             continuation_cfg.mode,
             continuation_cfg.max_chains_per_episode,
             continuation_cfg.min_route_length,
             continuation_cfg.max_route_length,
             continuation_cfg.atlas_active_horizon,
             continuation_cfg.atlas_bank_size,
+            continuation_cfg.preload_remaining_waypoints,
         )
 
     # Run campaign
@@ -1110,6 +1142,9 @@ def main() -> None:
                 route_waypoints=route,
                 route_continuation_provider=continuation_provider,
                 route_continuation_max_chains=continuation_max_chains,
+                route_continuation_preload_remaining_waypoints=(
+                    continuation_cfg.preload_remaining_waypoints
+                ),
             )
             result.config_hash = _episode_config_hash(config)
             logger.info(

@@ -1759,6 +1759,7 @@ class ExpertDataCollector:
         route_waypoints: list | None = None,
         route_continuation_provider: Callable[[Any], list[tuple[Any, str]] | None] | None = None,
         route_continuation_max_chains: int = 0,
+        route_continuation_preload_remaining_waypoints: int = 0,
     ) -> EpisodeResult:
         """Collect a single episode of expert driving data.
 
@@ -1777,6 +1778,9 @@ class ExpertDataCollector:
                 ``[(carla.Transform, RoadOption_str), ...]`` format.
             route_continuation_max_chains: Maximum number of continuation
                 routes allowed in this episode.
+            route_continuation_preload_remaining_waypoints: When >0, request
+                continuation early once the active route head reaches this many
+                or fewer remaining waypoints.
 
         Returns:
             EpisodeResult with status and metadata.
@@ -1805,6 +1809,10 @@ class ExpertDataCollector:
         route_watchdog_streak = 0
         fail_fast_reason: str | None = None
         route_chains_applied = 0
+        continuation_preload_remaining_wp = max(
+            0,
+            int(route_continuation_preload_remaining_waypoints),
+        )
 
         try:
             assert self.world is not None
@@ -2039,6 +2047,47 @@ class ExpertDataCollector:
                 expert.set_route(route_local)
                 return len(route_local)
 
+            def _try_apply_continuation(frame_idx: int, trigger: str) -> bool:
+                nonlocal route_chains_applied, route_watchdog_streak
+
+                if route_continuation_provider is None:
+                    return False
+                if route_chains_applied >= max(0, int(route_continuation_max_chains)):
+                    return False
+
+                try:
+                    current_loc = vehicle.get_transform().location
+                    continuation_route = route_continuation_provider(current_loc)
+                except Exception as e:
+                    logger.warning("Route continuation provider failed: %s", e)
+                    return False
+
+                if not continuation_route:
+                    return False
+
+                route_len = _set_expert_route(continuation_route)
+                if route_len <= 0:
+                    return False
+
+                route_chains_applied += 1
+                route_watchdog_streak = 0
+                if trigger == "done":
+                    logger.info(
+                        "Applied route continuation #%d at frame %d (%d waypoints)",
+                        route_chains_applied,
+                        frame_idx,
+                        route_len,
+                    )
+                else:
+                    logger.info(
+                        "Applied route continuation #%d at frame %d (%d waypoints) [%s]",
+                        route_chains_applied,
+                        frame_idx,
+                        route_len,
+                        trigger,
+                    )
+                return True
+
             # Build route
             if route_waypoints:
                 # route_waypoints = [(transform, road_option_str), ...]
@@ -2165,31 +2214,7 @@ class ExpertDataCollector:
 
                 # Check if expert finished route
                 if expert.done():
-                    continued = False
-                    if route_continuation_provider is not None and route_chains_applied < max(
-                        0, int(route_continuation_max_chains)
-                    ):
-                        try:
-                            current_loc = vehicle.get_transform().location
-                            continuation_route = route_continuation_provider(current_loc)
-                        except Exception as e:
-                            logger.warning("Route continuation provider failed: %s", e)
-                            continuation_route = None
-
-                        if continuation_route:
-                            route_len = _set_expert_route(continuation_route)
-                            if route_len > 0:
-                                route_chains_applied += 1
-                                route_watchdog_streak = 0
-                                logger.info(
-                                    "Applied route continuation #%d at frame %d (%d waypoints)",
-                                    route_chains_applied,
-                                    frame_idx,
-                                    route_len,
-                                )
-                                continued = True
-
-                    if continued:
+                    if _try_apply_continuation(frame_idx, "done"):
                         continue
 
                     logger.info("Expert completed route at frame %d", frame_idx)
@@ -2236,6 +2261,23 @@ class ExpertDataCollector:
                     route_watchdog_streak += 1
                 else:
                     route_watchdog_streak = 0
+
+                if continuation_preload_remaining_wp > 0:
+                    route_len_total = len(getattr(expert, "_route", []))
+                    head_idx = int(getattr(info, "wp_buffer_head_index", -1))
+                    remaining_route_wp = (
+                        route_len_total - head_idx - 1
+                        if route_len_total > 0 and head_idx >= 0
+                        else -1
+                    )
+                    if 0 <= remaining_route_wp <= continuation_preload_remaining_wp:
+                        _try_apply_continuation(
+                            frame_idx,
+                            (
+                                f"preload remaining_wp={remaining_route_wp}"
+                                f"<={continuation_preload_remaining_wp}"
+                            ),
+                        )
 
                 should_abort_route, reason = self._route_fail_fast_decision(
                     config=config,
