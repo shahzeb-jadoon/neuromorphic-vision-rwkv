@@ -41,6 +41,7 @@ logger = logging.getLogger("build_route_atlas_cpp")
 
 RUN_STATE_SCHEMA_VERSION = 1
 JUNCTION_COMBO_LEDGER_SCHEMA_VERSION = 1
+TOPOLOGY_CACHE_SCHEMA_VERSION = 2
 
 
 @dataclass
@@ -136,7 +137,7 @@ def _load_config_towns(config_path: Path) -> list[str]:
         return []
     with config_path.open("r", encoding="utf-8") as f:
         cfg = yaml.safe_load(f) or {}
-    towns = list(cfg.get("towns", [])) + list(cfg.get("eval_towns", []))
+    towns = list(cfg.get("towns", []))
     out: list[str] = []
     seen: set[str] = set()
     for town in towns:
@@ -444,6 +445,8 @@ def _save_topology_cache(
     cache_path: Path, town: str, sampling_resolution: float, edges: list[EdgeGeometry]
 ) -> None:
     payload = {
+        "schema_version": TOPOLOGY_CACHE_SCHEMA_VERSION,
+        "created_at_unix": int(time.time()),
         "town": town,
         "sampling_resolution_m": float(sampling_resolution),
         "edge_count": len(edges),
@@ -454,9 +457,43 @@ def _save_topology_cache(
 
 
 def _load_topology_cache(cache_path: Path) -> tuple[float, list[EdgeGeometry]]:
-    payload = json.loads(cache_path.read_text(encoding="utf-8"))
+    payload_obj = json.loads(cache_path.read_text(encoding="utf-8"))
+    if not isinstance(payload_obj, dict):
+        raise RuntimeError(f"Invalid topology cache payload in {cache_path}; expected JSON object")
+    payload = cast(dict[str, Any], payload_obj)
+
+    schema_version = int(payload.get("schema_version", 0))
+    if schema_version != TOPOLOGY_CACHE_SCHEMA_VERSION:
+        raise RuntimeError(
+            (
+                f"Unsupported topology cache schema in {cache_path}; "
+                f"expected {TOPOLOGY_CACHE_SCHEMA_VERSION}, got {schema_version}"
+            )
+        )
+
+    raw_edges = payload.get("edges", [])
+    if not isinstance(raw_edges, list):
+        raise RuntimeError(f"Invalid topology cache edges in {cache_path}; expected list")
+
+    required_fields = (
+        "start_is_junction",
+        "end_is_junction",
+        "start_junction_id",
+        "end_junction_id",
+    )
+    for idx, raw in enumerate(raw_edges):
+        if not isinstance(raw, dict):
+            raise RuntimeError(
+                f"Invalid edge entry at index {idx} in {cache_path}; expected object"
+            )
+        missing = [field for field in required_fields if field not in raw]
+        if missing:
+            raise RuntimeError(
+                f"Stale topology cache {cache_path}; missing edge fields: {', '.join(missing)}"
+            )
+
     sampling_resolution = float(payload.get("sampling_resolution_m", 2.0))
-    edges = [_edge_from_dict(raw) for raw in payload.get("edges", [])]
+    edges = [_edge_from_dict(cast(dict[str, Any], raw)) for raw in raw_edges]
     return sampling_resolution, edges
 
 
@@ -745,46 +782,145 @@ def _sequence_to_points(
     return deduped
 
 
+def _edge_is_junction(edge: EdgeGeometry) -> bool:
+    return bool(edge.start_is_junction or edge.end_is_junction)
+
+
+def _edge_entry_yaw(edge: EdgeGeometry) -> float:
+    if edge.points:
+        return float(edge.points[0][3])
+    return 0.0
+
+
+def _edge_exit_yaw(edge: EdgeGeometry) -> float:
+    if edge.points:
+        return float(edge.points[-1][3])
+    return 0.0
+
+
+def _classify_junction_run_command(
+    edge_sequence: list[int],
+    edges: list[EdgeGeometry],
+    run_start: int,
+    run_end: int,
+    straight_threshold_deg: float,
+    turn_threshold_deg: float,
+) -> str:
+    prev_idx = run_start - 1
+    while prev_idx >= 0 and _edge_is_junction(edges[int(edge_sequence[prev_idx])]):
+        prev_idx -= 1
+
+    next_idx = run_end + 1
+    while next_idx < len(edge_sequence) and _edge_is_junction(edges[int(edge_sequence[next_idx])]):
+        next_idx += 1
+
+    run_first = edges[int(edge_sequence[run_start])]
+    run_last = edges[int(edge_sequence[run_end])]
+
+    if prev_idx >= 0:
+        entry_yaw = _edge_exit_yaw(edges[int(edge_sequence[prev_idx])])
+    else:
+        entry_yaw = _edge_entry_yaw(run_first)
+
+    if next_idx < len(edge_sequence):
+        exit_yaw = _edge_entry_yaw(edges[int(edge_sequence[next_idx])])
+    else:
+        exit_yaw = _edge_exit_yaw(run_last)
+
+    total_delta = _angle_wrap_deg(float(exit_yaw) - float(entry_yaw))
+    if abs(total_delta) <= float(straight_threshold_deg):
+        return "STRAIGHT"
+    if abs(total_delta) < float(turn_threshold_deg):
+        return "STRAIGHT"
+    return "RIGHT" if total_delta > 0.0 else "LEFT"
+
+
+def _edge_commands_for_route(
+    edge_sequence: list[int],
+    edges: list[EdgeGeometry],
+    straight_threshold_deg: float,
+    turn_threshold_deg: float,
+) -> list[str]:
+    if not edge_sequence:
+        return []
+
+    commands: list[str] = ["LANEFOLLOW"] * len(edge_sequence)
+    idx = 0
+    while idx < len(edge_sequence):
+        edge = edges[int(edge_sequence[idx])]
+        if not _edge_is_junction(edge):
+            commands[idx] = "LANEFOLLOW"
+            idx += 1
+            continue
+
+        run_end = idx
+        while run_end + 1 < len(edge_sequence):
+            nxt_edge = edges[int(edge_sequence[run_end + 1])]
+            if not _edge_is_junction(nxt_edge):
+                break
+            run_end += 1
+
+        run_cmd = _classify_junction_run_command(
+            edge_sequence=edge_sequence,
+            edges=edges,
+            run_start=int(idx),
+            run_end=int(run_end),
+            straight_threshold_deg=float(straight_threshold_deg),
+            turn_threshold_deg=float(turn_threshold_deg),
+        )
+        for j in range(idx, run_end + 1):
+            commands[j] = run_cmd
+        idx = run_end + 1
+
+    return commands
+
+
 def _annotate_road_options(
-    points: list[tuple[float, float, float, float]],
+    edge_sequence: list[int],
+    edges: list[EdgeGeometry],
     straight_threshold_deg: float,
     turn_threshold_deg: float,
 ) -> list[dict[str, Any]]:
-    if not points:
+    if not edge_sequence:
         return []
 
-    annotated: list[dict[str, Any]] = []
-    prev_yaw = float(points[0][3])
-    annotated.append(
-        {
-            "x": float(points[0][0]),
-            "y": float(points[0][1]),
-            "z": float(points[0][2]),
-            "yaw": float(points[0][3]),
-            "road_option": "LANEFOLLOW",
-        }
+    edge_commands = _edge_commands_for_route(
+        edge_sequence=edge_sequence,
+        edges=edges,
+        straight_threshold_deg=float(straight_threshold_deg),
+        turn_threshold_deg=float(turn_threshold_deg),
     )
 
-    for idx in range(1, len(points)):
-        x, y, z, yaw = points[idx]
-        delta = _angle_wrap_deg(float(yaw) - prev_yaw)
-        if abs(delta) <= straight_threshold_deg:
-            cmd = "LANEFOLLOW"
-        elif abs(delta) >= turn_threshold_deg:
-            cmd = "RIGHT" if delta > 0.0 else "LEFT"
-        else:
-            cmd = "STRAIGHT"
+    annotated: list[dict[str, Any]] = []
+    for idx, edge_id in enumerate(edge_sequence):
+        edge = edges[int(edge_id)]
+        points = edge.points
+        if not points:
+            continue
 
-        annotated.append(
-            {
-                "x": float(x),
-                "y": float(y),
-                "z": float(z),
-                "yaw": float(yaw),
-                "road_option": cmd,
-            }
-        )
-        prev_yaw = float(yaw)
+        start_offset = 0
+        if annotated:
+            last = annotated[-1]
+            prev_tuple = (
+                float(last["x"]),
+                float(last["y"]),
+                float(last["z"]),
+                float(last["yaw"]),
+            )
+            if _distance_xyz(prev_tuple, points[0]) <= 0.05:
+                start_offset = 1
+
+        cmd = edge_commands[idx]
+        for p in points[start_offset:]:
+            annotated.append(
+                {
+                    "x": float(p[0]),
+                    "y": float(p[1]),
+                    "z": float(p[2]),
+                    "yaw": float(p[3]),
+                    "road_option": cmd,
+                }
+            )
 
     return annotated
 
@@ -858,6 +994,169 @@ def _edge_waypoint_increment(previous_edge: EdgeGeometry | None, edge: EdgeGeome
     return max(1, increment)
 
 
+def _build_route_end_safety_context(
+    edge_sequence: list[int],
+    edges: list[EdgeGeometry],
+) -> tuple[list[int], list[bool], list[int | None], list[int | None]]:
+    n = len(edge_sequence)
+    if n <= 0:
+        return [0], [], [], []
+
+    junction_flags = [_edge_is_junction(edges[int(edge_id)]) for edge_id in edge_sequence]
+
+    increments: list[int] = []
+    previous_edge: EdgeGeometry | None = None
+    for edge_id in edge_sequence:
+        edge = edges[int(edge_id)]
+        increments.append(int(_edge_waypoint_increment(previous_edge, edge)))
+        previous_edge = edge
+
+    waypoint_prefix = [0]
+    for increment in increments:
+        waypoint_prefix.append(int(waypoint_prefix[-1]) + int(increment))
+
+    prev_junction_run_end_at_or_before: list[int | None] = [None] * n
+    last_run_end: int | None = None
+    for idx in range(n):
+        if junction_flags[idx] and (idx == (n - 1) or not junction_flags[idx + 1]):
+            last_run_end = int(idx)
+        prev_junction_run_end_at_or_before[idx] = last_run_end
+
+    next_junction_run_start_after: list[int | None] = [None] * n
+    next_run_start: int | None = None
+    for idx in range(n - 1, -1, -1):
+        next_junction_run_start_after[idx] = next_run_start
+        if junction_flags[idx] and (idx == 0 or not junction_flags[idx - 1]):
+            next_run_start = int(idx)
+
+    return (
+        waypoint_prefix,
+        junction_flags,
+        prev_junction_run_end_at_or_before,
+        next_junction_run_start_after,
+    )
+
+
+def _waypoint_range_sum(waypoint_prefix: list[int], start_idx: int, end_idx: int) -> int:
+    if start_idx > end_idx:
+        return 0
+    return int(waypoint_prefix[end_idx + 1] - waypoint_prefix[start_idx])
+
+
+def _route_end_is_junction_safe(
+    end_index: int,
+    waypoint_prefix: list[int],
+    junction_flags: list[bool],
+    prev_junction_run_end_at_or_before: list[int | None],
+    next_junction_run_start_after: list[int | None],
+    min_waypoints_before_next_junction: int,
+    min_waypoints_after_prev_junction: int,
+) -> bool:
+    if end_index < 0 or end_index >= len(junction_flags):
+        return False
+
+    # Never terminate within a junction-tagged edge.
+    if bool(junction_flags[end_index]):
+        return False
+
+    waypoints_before_next_junction: int | None = None
+    next_run_start = next_junction_run_start_after[end_index]
+    if next_run_start is not None:
+        waypoints_before_next_junction = _waypoint_range_sum(
+            waypoint_prefix=waypoint_prefix,
+            start_idx=int(end_index + 1),
+            end_idx=int(next_run_start - 1),
+        )
+
+    waypoints_after_prev_junction: int | None = None
+    prev_run_end = prev_junction_run_end_at_or_before[end_index]
+    if prev_run_end is not None and end_index > int(prev_run_end):
+        waypoints_after_prev_junction = _waypoint_range_sum(
+            waypoint_prefix=waypoint_prefix,
+            start_idx=int(prev_run_end + 1),
+            end_idx=int(end_index),
+        )
+
+    # Endpoint is acceptable when it is either sufficiently before the next
+    # junction entrance or sufficiently after the previous junction exit.
+    if (
+        waypoints_before_next_junction is not None
+        and waypoints_before_next_junction < int(min_waypoints_before_next_junction)
+        and (
+            waypoints_after_prev_junction is None
+            or waypoints_after_prev_junction < int(min_waypoints_after_prev_junction)
+        )
+    ):
+        return False
+
+    if (
+        waypoints_after_prev_junction is not None
+        and waypoints_after_prev_junction < int(min_waypoints_after_prev_junction)
+        and (
+            waypoints_before_next_junction is None
+            or waypoints_before_next_junction < int(min_waypoints_before_next_junction)
+        )
+    ):
+        return False
+
+    return True
+
+
+def _adjust_chunk_end_cuts_for_junction_clearance(
+    initial_cuts: list[int],
+    consumed_end_index: int,
+    waypoint_prefix: list[int],
+    junction_flags: list[bool],
+    prev_junction_run_end_at_or_before: list[int | None],
+    next_junction_run_start_after: list[int | None],
+    min_waypoints_before_next_junction: int,
+    min_waypoints_after_prev_junction: int,
+) -> list[int]:
+    if not initial_cuts:
+        return []
+
+    adjusted_cuts = [int(cut) for cut in initial_cuts]
+
+    def _is_safe(cut: int) -> bool:
+        return _route_end_is_junction_safe(
+            end_index=int(cut),
+            waypoint_prefix=waypoint_prefix,
+            junction_flags=junction_flags,
+            prev_junction_run_end_at_or_before=prev_junction_run_end_at_or_before,
+            next_junction_run_start_after=next_junction_run_start_after,
+            min_waypoints_before_next_junction=int(min_waypoints_before_next_junction),
+            min_waypoints_after_prev_junction=int(min_waypoints_after_prev_junction),
+        )
+
+    idx = 0
+    while idx < len(adjusted_cuts):
+        left_bound = int(adjusted_cuts[idx - 1] + 1) if idx > 0 else 0
+        adjusted_cuts[idx] = int(
+            max(left_bound, min(int(adjusted_cuts[idx]), int(consumed_end_index)))
+        )
+
+        # Prefer moving the split forward; if needed, absorb single-edge next
+        # chunks until a safe boundary is found.
+        while not _is_safe(int(adjusted_cuts[idx])):
+            if idx < len(adjusted_cuts) - 1:
+                if int(adjusted_cuts[idx]) < int(adjusted_cuts[idx + 1] - 1):
+                    adjusted_cuts[idx] = int(adjusted_cuts[idx] + 1)
+                else:
+                    adjusted_cuts[idx] = int(adjusted_cuts[idx + 1])
+                    del adjusted_cuts[idx + 1]
+            else:
+                break
+
+        # If forward movement cannot resolve the boundary, retreat backward.
+        left_bound = int(adjusted_cuts[idx - 1] + 1) if idx > 0 else 0
+        while not _is_safe(int(adjusted_cuts[idx])) and int(adjusted_cuts[idx]) > left_bound:
+            adjusted_cuts[idx] = int(adjusted_cuts[idx] - 1)
+
+        idx += 1
+
+    return [int(cut) for cut in adjusted_cuts]
+
+
 def _split_edge_sequence_for_routes(
     edge_sequence: list[int],
     edges: list[EdgeGeometry],
@@ -867,11 +1166,14 @@ def _split_edge_sequence_for_routes(
     max_routes: int,
     anti_repeat_combos_per_route: bool,
     per_route_combo_repeat_limit: int,
+    route_end_min_waypoints_before_junction: int,
+    route_end_min_waypoints_after_junction: int,
 ) -> list[list[int]]:
     if not edge_sequence:
         return []
 
     chunks: list[list[int]] = []
+    chunk_waypoint_counts: list[int] = []
     idx = 0
     total_edges = len(edge_sequence)
 
@@ -953,11 +1255,79 @@ def _split_edge_sequence_for_routes(
                 idx += 1
 
         if waypoint_count < min_waypoints and chunks:
-            chunks[-1].extend(chunk)
+            can_merge = bool(max_waypoints <= 0) or (
+                int(chunk_waypoint_counts[-1]) + int(waypoint_count) <= int(max_waypoints)
+            )
+            if can_merge:
+                chunks[-1].extend(chunk)
+                chunk_waypoint_counts[-1] = int(chunk_waypoint_counts[-1]) + int(waypoint_count)
+            else:
+                chunks.append(chunk)
+                chunk_waypoint_counts.append(int(waypoint_count))
         else:
             chunks.append(chunk)
+            chunk_waypoint_counts.append(int(waypoint_count))
 
-    return chunks
+    if not chunks:
+        return []
+
+    initial_cuts: list[int] = []
+    cursor = 0
+    for chunk in chunks:
+        if not chunk:
+            continue
+        cursor += len(chunk)
+        initial_cuts.append(int(cursor - 1))
+
+    if not initial_cuts:
+        return []
+
+    (
+        waypoint_prefix,
+        junction_flags,
+        prev_junction_run_end_at_or_before,
+        next_junction_run_start_after,
+    ) = _build_route_end_safety_context(edge_sequence=edge_sequence, edges=edges)
+
+    adjusted_cuts = _adjust_chunk_end_cuts_for_junction_clearance(
+        initial_cuts=initial_cuts,
+        consumed_end_index=int(initial_cuts[-1]),
+        waypoint_prefix=waypoint_prefix,
+        junction_flags=junction_flags,
+        prev_junction_run_end_at_or_before=prev_junction_run_end_at_or_before,
+        next_junction_run_start_after=next_junction_run_start_after,
+        min_waypoints_before_next_junction=int(route_end_min_waypoints_before_junction),
+        min_waypoints_after_prev_junction=int(route_end_min_waypoints_after_junction),
+    )
+
+    safe_cuts: list[int] = []
+    for cut in adjusted_cuts:
+        if _route_end_is_junction_safe(
+            end_index=int(cut),
+            waypoint_prefix=waypoint_prefix,
+            junction_flags=junction_flags,
+            prev_junction_run_end_at_or_before=prev_junction_run_end_at_or_before,
+            next_junction_run_start_after=next_junction_run_start_after,
+            min_waypoints_before_next_junction=int(route_end_min_waypoints_before_junction),
+            min_waypoints_after_prev_junction=int(route_end_min_waypoints_after_junction),
+        ):
+            safe_cuts.append(int(cut))
+
+    if not safe_cuts:
+        return []
+
+    adjusted_chunks: list[list[int]] = []
+    start_idx = 0
+    for cut in safe_cuts:
+        end_idx = int(cut)
+        if end_idx < start_idx:
+            end_idx = int(start_idx)
+        adjusted_chunks.append(
+            [int(edge_id) for edge_id in edge_sequence[start_idx : int(end_idx + 1)]]
+        )
+        start_idx = int(end_idx + 1)
+
+    return adjusted_chunks
 
 
 def _combo_novelty_gain(
@@ -988,6 +1358,8 @@ def _build_route_chunk_candidates(
     max_routes_per_town: int,
     anti_repeat_combos_per_route: bool,
     per_route_combo_repeat_limit: int,
+    route_end_min_waypoints_before_junction: int,
+    route_end_min_waypoints_after_junction: int,
 ) -> list[RouteChunkCandidate]:
     candidates: list[RouteChunkCandidate] = []
     max_chunks_per_component = max_routes_per_town if max_routes_per_town > 0 else 0
@@ -1002,6 +1374,8 @@ def _build_route_chunk_candidates(
             max_routes=int(max_chunks_per_component),
             anti_repeat_combos_per_route=bool(anti_repeat_combos_per_route),
             per_route_combo_repeat_limit=int(per_route_combo_repeat_limit),
+            route_end_min_waypoints_before_junction=int(route_end_min_waypoints_before_junction),
+            route_end_min_waypoints_after_junction=int(route_end_min_waypoints_after_junction),
         )
         for chunk_index, chunk in enumerate(chunks):
             combo_hit_counts = _count_observed_combo_hits(chunk, transition_to_combo)
@@ -1183,6 +1557,8 @@ def _run_multi_pass_route_selection(
     novelty_objective: bool,
     anti_repeat_combos_per_route: bool,
     per_route_combo_repeat_limit: int,
+    route_end_min_waypoints_before_junction: int,
+    route_end_min_waypoints_after_junction: int,
     multi_pass_max_passes: int,
     multi_pass_min_passes: int,
     target_combo_coverage_ratio: float,
@@ -1240,6 +1616,8 @@ def _run_multi_pass_route_selection(
             max_routes_per_town=int(remaining_routes),
             anti_repeat_combos_per_route=bool(anti_repeat_combos_per_route),
             per_route_combo_repeat_limit=int(per_route_combo_repeat_limit),
+            route_end_min_waypoints_before_junction=int(route_end_min_waypoints_before_junction),
+            route_end_min_waypoints_after_junction=int(route_end_min_waypoints_after_junction),
         )
 
         unique_candidates: list[RouteChunkCandidate] = []
@@ -1604,8 +1982,25 @@ def _load_or_build_edges(
     cache_path = args.cache_dir / f"{town}.json"
 
     if args.input_mode in {"topology-cache", "auto"} and cache_path.exists():
-        sampling_resolution, edges = _load_topology_cache(cache_path)
-        return sampling_resolution, edges, "topology-cache"
+        try:
+            sampling_resolution, edges = _load_topology_cache(cache_path)
+            return sampling_resolution, edges, "topology-cache"
+        except Exception as exc:
+            if args.input_mode == "topology-cache":
+                raise RuntimeError(
+                    (
+                        f"Topology cache {cache_path} is stale/invalid ({exc}). "
+                        "Rebuild cache using --input-mode carla-live --write-topology-cache"
+                    )
+                ) from exc
+            logger.warning(
+                (
+                    "Ignoring stale/invalid topology cache %s (%s); "
+                    "falling back to live extraction"
+                ),
+                cache_path,
+                exc,
+            )
 
     if args.input_mode == "topology-cache" and not cache_path.exists():
         raise FileNotFoundError(f"Topology cache missing: {cache_path}")
@@ -1694,6 +2089,12 @@ def _process_town(town: str, args: argparse.Namespace, client: Any | None) -> No
                     novelty_objective=bool(args.novelty_objective),
                     anti_repeat_combos_per_route=bool(args.anti_repeat_combos_per_route),
                     per_route_combo_repeat_limit=int(args.per_route_combo_repeat_limit),
+                    route_end_min_waypoints_before_junction=int(
+                        args.route_end_min_waypoints_before_junction
+                    ),
+                    route_end_min_waypoints_after_junction=int(
+                        args.route_end_min_waypoints_after_junction
+                    ),
                     multi_pass_max_passes=int(args.multi_pass_max_passes),
                     multi_pass_min_passes=int(args.multi_pass_min_passes),
                     target_combo_coverage_ratio=float(args.multi_pass_target_coverage_ratio),
@@ -1707,16 +2108,15 @@ def _process_town(town: str, args: argparse.Namespace, client: Any | None) -> No
             routes: list[list[dict[str, Any]]] = []
             kept_edge_routes: list[list[int]] = []
             for edge_route in selected_edge_routes:
-                stitched_points = _sequence_to_points(edge_route, edges)
-                if len(stitched_points) < 2:
-                    continue
-                routes.append(
-                    _annotate_road_options(
-                        stitched_points,
-                        straight_threshold_deg=float(args.straight_threshold_deg),
-                        turn_threshold_deg=float(args.turn_threshold_deg),
-                    )
+                route_points = _annotate_road_options(
+                    edge_sequence=edge_route,
+                    edges=edges,
+                    straight_threshold_deg=float(args.straight_threshold_deg),
+                    turn_threshold_deg=float(args.turn_threshold_deg),
                 )
+                if len(route_points) < 2:
+                    continue
+                routes.append(route_points)
                 kept_edge_routes.append(edge_route)
 
             full_edge_sequence = [
@@ -1759,6 +2159,12 @@ def _process_town(town: str, args: argparse.Namespace, client: Any | None) -> No
                 "target_coverage": float(args.target_coverage),
                 "chunk_min_waypoints": int(args.chunk_min_waypoints),
                 "chunk_max_waypoints": int(args.chunk_max_waypoints),
+                "route_end_min_waypoints_before_junction": int(
+                    args.route_end_min_waypoints_before_junction
+                ),
+                "route_end_min_waypoints_after_junction": int(
+                    args.route_end_min_waypoints_after_junction
+                ),
                 "max_routes_per_town": int(args.max_routes_per_town),
                 "combo_repeat_target": int(args.combo_repeat_target),
                 "novelty_objective": bool(args.novelty_objective),
@@ -1885,6 +2291,24 @@ def _parse_args() -> argparse.Namespace:
         "--chunk-max-waypoints", type=int, default=260, help="Max waypoints per route chunk"
     )
     parser.add_argument(
+        "--route-end-min-waypoints-before-junction",
+        type=int,
+        default=10,
+        help=(
+            "Minimum non-junction waypoints required between a route end and the next "
+            "junction entrance"
+        ),
+    )
+    parser.add_argument(
+        "--route-end-min-waypoints-after-junction",
+        type=int,
+        default=2,
+        help=(
+            "Minimum non-junction waypoints required after the previous junction before "
+            "allowing a route end"
+        ),
+    )
+    parser.add_argument(
         "--max-routes-per-town",
         type=int,
         default=150,
@@ -1992,6 +2416,12 @@ def _parse_args() -> argparse.Namespace:
     args.towns = [_normalize_town_name(town) for group in args.town_groups for town in group]
     args.combo_repeat_target = max(1, int(args.combo_repeat_target))
     args.per_route_combo_repeat_limit = max(1, int(args.per_route_combo_repeat_limit))
+    args.route_end_min_waypoints_before_junction = max(
+        0, int(args.route_end_min_waypoints_before_junction)
+    )
+    args.route_end_min_waypoints_after_junction = max(
+        0, int(args.route_end_min_waypoints_after_junction)
+    )
     args.multi_pass_max_passes = max(1, int(args.multi_pass_max_passes))
     args.multi_pass_min_passes = max(1, int(args.multi_pass_min_passes))
     args.multi_pass_target_coverage_ratio = min(
