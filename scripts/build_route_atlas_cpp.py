@@ -1149,6 +1149,25 @@ def _classify_junction_run_command(
     else:
         exit_yaw = _edge_exit_yaw(run_last)
 
+    # Parity guard with lane-graph planner semantics: if a junction run exits
+    # onto the same lane lineage, treat it as straight regardless of local yaw
+    # artifacts around junction polygons.
+    if prev_idx >= 0 and next_idx < len(edge_sequence):
+        prev_edge = edges[int(edge_sequence[prev_idx])]
+        next_edge = edges[int(edge_sequence[next_idx])]
+        same_start_lane = (
+            int(prev_edge.road_id) == int(next_edge.road_id)
+            and int(prev_edge.section_id) == int(next_edge.section_id)
+            and int(prev_edge.lane_id) == int(next_edge.lane_id)
+        )
+        same_end_to_start_lane = (
+            int(prev_edge.end_road_id) == int(next_edge.road_id)
+            and int(prev_edge.end_section_id) == int(next_edge.section_id)
+            and int(prev_edge.end_lane_id) == int(next_edge.lane_id)
+        )
+        if same_start_lane or same_end_to_start_lane:
+            return "STRAIGHT"
+
     total_delta = _angle_wrap_deg(float(exit_yaw) - float(entry_yaw))
     if abs(total_delta) <= float(straight_threshold_deg):
         return "STRAIGHT"
