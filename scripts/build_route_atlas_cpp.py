@@ -1162,9 +1162,9 @@ def _combo_progress_metrics(
     return {
         "possible_combo_count": possible_combo_count,
         "observed_combo_count": observed_combo_count,
-        "coverage_ratio": _safe_ratio(observed_combo_count, possible_combo_count),
+        "coverage_ratio": _coverage_ratio_or_complete(observed_combo_count, possible_combo_count),
         "repeat_target_combo_count": repeat_target_combo_count,
-        "repeat_target_coverage_ratio": _safe_ratio(
+        "repeat_target_coverage_ratio": _coverage_ratio_or_complete(
             repeat_target_combo_count, possible_combo_count
         ),
     }
@@ -1323,6 +1323,12 @@ def _safe_ratio(numerator: int, denominator: int) -> float:
     return round(float(numerator) / float(denominator), 6)
 
 
+def _coverage_ratio_or_complete(numerator: int, denominator: int) -> float:
+    if denominator <= 0:
+        return 1.0
+    return _safe_ratio(numerator, denominator)
+
+
 def _build_junction_combo(incoming: EdgeGeometry, outgoing: EdgeGeometry) -> JunctionCombo | None:
     if incoming.v != outgoing.u:
         return None
@@ -1420,9 +1426,11 @@ def _combo_summary(
         "repeat_target": int(repeat_target),
         "possible_combo_count": possible_combo_count,
         "observed_combo_count": observed_combo_count,
-        "coverage_ratio": _safe_ratio(observed_combo_count, possible_combo_count),
+        "coverage_ratio": _coverage_ratio_or_complete(observed_combo_count, possible_combo_count),
         "repeat_target_combo_count": satisfied_repeat_target,
-        "repeat_target_coverage_ratio": _safe_ratio(satisfied_repeat_target, possible_combo_count),
+        "repeat_target_coverage_ratio": _coverage_ratio_or_complete(
+            satisfied_repeat_target, possible_combo_count
+        ),
         "total_observations": total_observations,
     }
 
