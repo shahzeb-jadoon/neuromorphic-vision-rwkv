@@ -1322,6 +1322,16 @@ def _edge_waypoint_increment(previous_edge: EdgeGeometry | None, edge: EdgeGeome
     return max(1, increment)
 
 
+def _edge_sequence_waypoint_count(edge_sequence: list[int], edges: list[EdgeGeometry]) -> int:
+    waypoint_count = 0
+    previous_edge: EdgeGeometry | None = None
+    for edge_id in edge_sequence:
+        edge = edges[int(edge_id)]
+        waypoint_count += int(_edge_waypoint_increment(previous_edge, edge))
+        previous_edge = edge
+    return int(max(0, waypoint_count))
+
+
 def _build_route_end_safety_context(
     edge_sequence: list[int],
     edges: list[EdgeGeometry],
@@ -1655,7 +1665,16 @@ def _split_edge_sequence_for_routes(
         )
         start_idx = int(end_idx + 1)
 
-    return adjusted_chunks
+    contract_chunks: list[list[int]] = []
+    for chunk in adjusted_chunks:
+        waypoint_count = int(_edge_sequence_waypoint_count(chunk, edges))
+        if waypoint_count < int(min_waypoints):
+            continue
+        if max_waypoints > 0 and waypoint_count > int(max_waypoints):
+            continue
+        contract_chunks.append(chunk)
+
+    return contract_chunks
 
 
 def _combo_novelty_gain(
@@ -2198,6 +2217,140 @@ def _lane_change_edge_summary(edges: list[EdgeGeometry]) -> dict[str, int]:
     }
 
 
+def _validate_solver_outputs(
+    *,
+    edge_routes: list[list[int]],
+    routes: list[list[dict[str, Any]]],
+    edges: list[EdgeGeometry],
+    combo_stats: dict[str, Any],
+    resolved_input_mode: str,
+    min_waypoints: int,
+    max_waypoints: int,
+    route_end_min_waypoints_before_junction: int,
+    route_end_min_waypoints_after_junction: int,
+    strict: bool,
+) -> dict[str, Any]:
+    allowed_commands = {
+        "LANEFOLLOW",
+        "STRAIGHT",
+        "LEFT",
+        "RIGHT",
+        "CHANGELANELEFT",
+        "CHANGELANERIGHT",
+    }
+
+    command_counts: defaultdict[str, int] = defaultdict(int)
+    invalid_command_counts: defaultdict[str, int] = defaultdict(int)
+
+    oversized_routes = 0
+    undersized_routes = 0
+    unsafe_route_end_count = 0
+    junction_routes = 0
+    junction_routes_without_turn_command = 0
+    lane_change_routes = 0
+    lane_change_routes_without_lane_change_command = 0
+
+    for edge_route, route_points in zip(edge_routes, routes):
+        waypoint_count = int(len(route_points))
+        if waypoint_count < int(min_waypoints):
+            undersized_routes += 1
+        if max_waypoints > 0 and waypoint_count > int(max_waypoints):
+            oversized_routes += 1
+
+        labels = [str(point.get("road_option", "")) for point in route_points]
+        for label in labels:
+            command_counts[label] += 1
+            if label not in allowed_commands:
+                invalid_command_counts[label] += 1
+
+        has_junction_edge = any(_edge_is_junction(edges[int(edge_id)]) for edge_id in edge_route)
+        if has_junction_edge:
+            junction_routes += 1
+            if not any(label in {"STRAIGHT", "LEFT", "RIGHT"} for label in labels):
+                junction_routes_without_turn_command += 1
+
+        has_lane_change_edge = any(
+            str(edges[int(edge_id)].road_option_hint) in {"CHANGELANELEFT", "CHANGELANERIGHT"}
+            for edge_id in edge_route
+        )
+        if has_lane_change_edge:
+            lane_change_routes += 1
+            if not any(label in {"CHANGELANELEFT", "CHANGELANERIGHT"} for label in labels):
+                lane_change_routes_without_lane_change_command += 1
+
+        if edge_route:
+            end_edge = edges[int(edge_route[-1])]
+            if _edge_is_junction(end_edge):
+                unsafe_route_end_count += 1
+
+    total_commands = int(sum(command_counts.values()))
+    lanefollow_commands = int(command_counts.get("LANEFOLLOW", 0))
+    non_lanefollow_commands = int(total_commands - lanefollow_commands)
+
+    has_any_junction_edge = any(_edge_is_junction(edge) for edge in edges)
+    combo_possible_count = int(combo_stats.get("possible_combo_count", 0))
+    combo_space_empty_live = bool(
+        resolved_input_mode == "carla-live" and has_any_junction_edge and combo_possible_count <= 0
+    )
+
+    no_oversized_routes = bool(oversized_routes == 0)
+    no_undersized_routes = bool(undersized_routes == 0)
+    no_unsafe_route_endcuts = bool(unsafe_route_end_count == 0)
+    non_empty_combo_space_live = bool(not combo_space_empty_live)
+
+    command_distribution_sane = bool(
+        not invalid_command_counts
+        and (junction_routes == 0 or junction_routes_without_turn_command == 0)
+        and (lane_change_routes == 0 or lane_change_routes_without_lane_change_command == 0)
+        and (not has_any_junction_edge or non_lanefollow_commands > 0)
+    )
+
+    gate_errors: list[str] = []
+    if not no_oversized_routes:
+        gate_errors.append(f"oversized_routes={oversized_routes}")
+    if not no_undersized_routes:
+        gate_errors.append(f"undersized_routes={undersized_routes}")
+    if not no_unsafe_route_endcuts:
+        gate_errors.append(f"unsafe_route_endcuts={unsafe_route_end_count}")
+    if not non_empty_combo_space_live:
+        gate_errors.append("live_combo_space_empty")
+    if not command_distribution_sane:
+        gate_errors.append("command_distribution_sanity_failed")
+
+    validation_summary: dict[str, Any] = {
+        "strict": bool(strict),
+        "route_count": int(len(routes)),
+        "total_commands": int(total_commands),
+        "command_counts": {k: int(v) for k, v in sorted(command_counts.items())},
+        "invalid_command_counts": {k: int(v) for k, v in sorted(invalid_command_counts.items())},
+        "junction_routes": int(junction_routes),
+        "junction_routes_without_turn_command": int(junction_routes_without_turn_command),
+        "lane_change_routes": int(lane_change_routes),
+        "lane_change_routes_without_lane_change_command": int(
+            lane_change_routes_without_lane_change_command
+        ),
+        "oversized_routes": int(oversized_routes),
+        "undersized_routes": int(undersized_routes),
+        "unsafe_route_endcuts": int(unsafe_route_end_count),
+        "combo_possible_count": int(combo_possible_count),
+        "has_any_junction_edge": bool(has_any_junction_edge),
+        "non_lanefollow_commands": int(non_lanefollow_commands),
+        "gates": {
+            "no_oversized_routes": no_oversized_routes,
+            "no_undersized_routes": no_undersized_routes,
+            "no_unsafe_route_endcuts": no_unsafe_route_endcuts,
+            "non_empty_combo_space_live": non_empty_combo_space_live,
+            "command_distribution_sane": command_distribution_sane,
+        },
+        "errors": gate_errors,
+    }
+
+    if strict and gate_errors:
+        raise RuntimeError("Validation gates failed: " + ", ".join(gate_errors))
+
+    return validation_summary
+
+
 def _build_junction_combo_ledger_payload(
     town: str,
     solver: str,
@@ -2253,6 +2406,7 @@ def _write_solver_outputs(
     edge_stats: dict[str, Any],
     combo_stats: dict[str, Any],
     combo_ledger: dict[str, Any],
+    validation_gates: dict[str, Any],
     settings: dict[str, Any],
     resume_existing_routes: bool,
 ) -> None:
@@ -2320,6 +2474,7 @@ def _write_solver_outputs(
         "total_length_m": round(total_length_m, 3),
         "edge_stats": edge_stats,
         "combo_stats": combo_stats,
+        "validation_gates": validation_gates,
         "settings": settings,
         "routes": route_records,
     }
@@ -2492,6 +2647,8 @@ def _process_town(town: str, args: argparse.Namespace, client: Any | None) -> No
 
             routes: list[list[dict[str, Any]]] = []
             kept_edge_routes: list[list[int]] = []
+            dropped_undersized_routes = 0
+            dropped_oversized_routes = 0
             for edge_route in selected_edge_routes:
                 route_points = _annotate_road_options(
                     edge_sequence=edge_route,
@@ -2499,7 +2656,14 @@ def _process_town(town: str, args: argparse.Namespace, client: Any | None) -> No
                     straight_threshold_deg=float(args.straight_threshold_deg),
                     turn_threshold_deg=float(args.turn_threshold_deg),
                 )
-                if len(route_points) < 2:
+                waypoint_count = int(len(route_points))
+                min_waypoints = max(2, int(args.chunk_min_waypoints))
+                max_waypoints = int(args.chunk_max_waypoints)
+                if waypoint_count < min_waypoints:
+                    dropped_undersized_routes += 1
+                    continue
+                if max_waypoints > 0 and waypoint_count > max_waypoints:
+                    dropped_oversized_routes += 1
                     continue
                 routes.append(route_points)
                 kept_edge_routes.append(edge_route)
@@ -2520,12 +2684,33 @@ def _process_town(town: str, args: argparse.Namespace, client: Any | None) -> No
             combo_stats["route_selection"] = route_selection_stats
             combo_stats["selected_combo_observations"] = int(sum(selected_combo_hits.values()))
 
+            validation_gates = _validate_solver_outputs(
+                edge_routes=kept_edge_routes,
+                routes=routes,
+                edges=edges,
+                combo_stats=combo_stats,
+                resolved_input_mode=resolved_input_mode,
+                min_waypoints=max(2, int(args.chunk_min_waypoints)),
+                max_waypoints=int(args.chunk_max_waypoints),
+                route_end_min_waypoints_before_junction=int(
+                    args.route_end_min_waypoints_before_junction
+                ),
+                route_end_min_waypoints_after_junction=int(
+                    args.route_end_min_waypoints_after_junction
+                ),
+                strict=bool(args.strict_validation_gates),
+            )
+
             duplicated_total = sum(plan.duplicated_edge_count for plan in planned_components)
             eulerian_components = sum(1 for plan in planned_components if plan.eulerian)
             fallback_components = sum(1 for plan in planned_components if plan.solver_fallback_used)
 
             edge_stats = {
                 "atlas_edge_count": len(edges),
+                "selected_edge_route_count_pre_contract": int(len(selected_edge_routes)),
+                "selected_edge_route_count_post_contract": int(len(kept_edge_routes)),
+                "dropped_undersized_routes": int(dropped_undersized_routes),
+                "dropped_oversized_routes": int(dropped_oversized_routes),
                 "traversal_edge_steps": len(full_edge_sequence),
                 "unique_traversed_edges": len(set(full_edge_sequence)),
                 "weak_component_count": len(planned_components),
@@ -2564,6 +2749,7 @@ def _process_town(town: str, args: argparse.Namespace, client: Any | None) -> No
                 "multi_pass_target_repeat_coverage_ratio": float(
                     args.multi_pass_target_repeat_coverage_ratio
                 ),
+                "strict_validation_gates": bool(args.strict_validation_gates),
                 "solver": solver,
                 "seed": int(args.seed),
                 "carla_host": args.carla_host,
@@ -2578,6 +2764,7 @@ def _process_town(town: str, args: argparse.Namespace, client: Any | None) -> No
                 edge_stats,
                 combo_stats,
                 combo_ledger,
+                validation_gates,
                 settings,
                 resume_existing_routes=bool(args.resume),
             )
@@ -2598,6 +2785,13 @@ def _process_town(town: str, args: argparse.Namespace, client: Any | None) -> No
                 len(set(full_edge_sequence)),
                 float(combo_stats["coverage_ratio"]),
             )
+            if validation_gates.get("errors"):
+                logger.warning(
+                    "Town %s solver=%s validation gate warnings: %s",
+                    town,
+                    solver,
+                    validation_gates.get("errors"),
+                )
         except Exception as exc:
             if args.resume and state is not None:
                 _mark_combo_status(state, state_path, town, solver, status="failed", error=str(exc))
@@ -2797,6 +2991,19 @@ def _parse_args() -> argparse.Namespace:
         type=Path,
         default=None,
         help="Path to resume state JSON (default: <output>/atlas_run_state.json)",
+    )
+    parser.add_argument(
+        "--strict-validation-gates",
+        dest="strict_validation_gates",
+        action="store_true",
+        default=True,
+        help="Fail a town/solver run when route-atlas validation gates are violated",
+    )
+    parser.add_argument(
+        "--no-strict-validation-gates",
+        dest="strict_validation_gates",
+        action="store_false",
+        help="Log validation gate violations without failing the run",
     )
     parser.add_argument("--log-level", type=str, default="INFO", help="Logging level")
 
