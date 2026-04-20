@@ -1,7 +1,7 @@
 # Phase-1 Test Collection Issues
 
-> **Branch:** `feature/issue-01-bezier-arc`
-> **Latest verified baseline:** `1bda16c` — `feat(debug): add route-scoped overlays and visualization tooling`
+> **Branch:** `feature/waypoint-planner-policy`
+> **Latest verified baseline:** `5a1371f` — `feat(collection): add route continuation chaining`
 > **Source:** All issues discovered and verified during a 6-town, 18-episode test collection run.
 > **If revert needed:** check out a known-good commit from the branch log.
 
@@ -11,12 +11,13 @@
 
 | File | Issue | Priority | Tasks | Status |
 |------|-------|----------|-------|--------|
-| [ISSUE-01](ISSUE-01-junction-waypoints.md) | `nexts[0]` picks wrong road at junction exits → fence collision (Town07 ep1 frame 641) | Tier 2 (fix) / Tier 3 (Bezier arcs) | F10, F11, F14 | Partially fixed (F3/F4 done; core branch-selection fix pending) |
-| [ISSUE-02](ISSUE-02-traffic-light-state-machine.md) | TL/VEH_FOLLOW interactions: stale stop-line, follow-through red, deadlock, yellow-commit reset | Tier 1/Tier 2 | F8, F9, F9b, F13 | Partially fixed (F8/F9/F13 done; F9b pending) |
+| [ISSUE-01](ISSUE-01-junction-waypoints.md) | Junction branch selection and gap-filling stability | Tier 2 (fix) / Tier 3 (Bezier arcs) | F10, F11, F14 | Partially fixed (F3/F4 done; F10/F11 refactor in code, runtime closure evidence pending) |
+| [ISSUE-02](ISSUE-02-traffic-light-state-machine.md) | TL/VEH_FOLLOW interactions: stale stop-line, follow-through red, deadlock, yellow-commit reset | Tier 1/Tier 2 | F8, F9, F9b, F13 | Mostly fixed (F8/F9/F9b/F13 implemented; keep regression watch in long runs) |
 | [ISSUE-03](ISSUE-03-lane-change-mislabeling.md) | 775-frame CHANGELEFT mislabeling + manifest hides nav 5+6 | Tier 0 (F5) / Tier 1 (F7) / Tier 2 (F12) | F5, F7, F12 | Partially fixed (F5/F7 done; F12 partial) |
 | [ISSUE-04](ISSUE-04-pedestrian-false-positives.md) | Fixed 3.0 m pedestrian threshold too wide; `_dynamic_half_lane()` already exists | Tier 1 (F6, 1-line) / Tier 3 (F15) | F6, F15 | Partially fixed (F6 done; F15 pending) |
 | [ISSUE-05](ISSUE-05-stop-sign-proximity.md) | `stop_sign_route_proximity: 2.5` too tight for curved approaches | Tier 0 (F1) | F1 | Deferred by user |
 | [ISSUE-06](ISSUE-06-monitoring-instrumentation.md) | Monitoring and instrumentation gaps from first test run | Tier 0 (F2–F5) | F2, F3, F4, F5 | Mostly fixed |
+| [ISSUE-12](ISSUE-12-exhaustive-route-atlas-coverage-planning.md) | Offline exhaustive route atlas coverage planning + background-safe execution | New planning track | RP1 | Open (planning started; script implementation pending) |
 
 ---
 
@@ -25,7 +26,7 @@
 ```
 Tier 0 — Zero risk (config + instrumentation, no logic changes)
   F1  stop_sign_route_proximity 2.5 → 4.0          [ISSUE-05]
-  F2  timeout_duration 75 → 80                      [ISSUE-06]  DONE
+  F2  timeout_duration 75 → 80 → 120                [ISSUE-06]  DONE
   F3  gap_fill_diverged + gap_fill_rpcs → HDF5      [ISSUE-06]  DONE
   F4  route_completion → HDF5                        [ISSUE-06]  DONE
   F5  manifest nav_distribution: include 5+6         [ISSUE-03] / [ISSUE-06]  DONE
@@ -35,17 +36,20 @@ Tier 1 — Low risk (targeted logic changes)
   F7  suppress LC labels during TURNING             [ISSUE-03]  DONE
   F8  turning stopped-lead lateral gate             [ISSUE-02]  DONE
   F9  VEH_FOLLOW: red TL override                   [ISSUE-02]  DONE
-  F9b clear _tl_proceed_committed on full stop      [ISSUE-02]  PENDING
+  F9b clear _tl_proceed_committed on full stop      [ISSUE-02]  DONE
 
 Tier 2 — Medium risk (waypoint pipeline + TL state machine)
-  F10 heading-aligned nexts[] in _fill_buffer()     [ISSUE-01]
-  F11 heading-aligned nexts[] in _fill_junction_gaps() [ISSUE-01]
+  F10 heading-aligned branch selection in _fill_buffer() [ISSUE-01]  IN CODE, VALIDATE
+  F11 heading-aligned branch selection in _fill_junction_gaps() [ISSUE-01]  IN CODE, VALIDATE
   F12 ground-truth lane_id lane-change detection     [ISSUE-03]  PARTIAL
   F13 _tl_stop_loc re-evaluation after gap fill      [ISSUE-02]  DONE
 
 Tier 3 — High complexity (architectural change)
   F14 Bezier/spline junction arcs                    [ISSUE-01] ← industry standard
   F15 road-surface pedestrian check via map API      [ISSUE-04]
+
+New planning track (parallelizable with collection runs)
+  RP1 exhaustive route atlas coverage planner script [ISSUE-12]  OPEN
 ```
 
 ---
@@ -82,6 +86,10 @@ ISSUE-05 (stop sign proximity)
 ISSUE-06 (monitoring)
     └── supports verification of → ISSUE-01 (F3, F4)
     └── supports visibility of → ISSUE-03 (F5)
+
+ISSUE-12 (route atlas planning)
+  └── uses coverage metrics from topology + route sidecars
+  └── intended as offline/background precompute path
 ```
 
 ---

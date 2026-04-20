@@ -1,15 +1,18 @@
 # Implementation Plan — Remaining Work
 
-> **Last updated:** 2026-04-10
+> **Last updated:** 2026-04-19
 > **Schema:** v3.1 — 3-camera panoramic (3×640×320, 60° FOV, yaws −60/0/+60°),
 >   PrivilegedExpert agent, RoadOption nav commands, privileged metadata + corridor diagnostics per frame.
-> **Current branch:** `feature/issue-01-bezier-arc`
-> **Latest verified baseline commit:** `1bda16c` — `feat(debug): add route-scoped overlays and visualization tooling`
+> **Current branch:** `feature/waypoint-planner-policy`
+> **Latest verified baseline commit:** `5a1371f` — `feat(collection): add route continuation chaining`
 > **If revert needed:** use a commit from the verified log below.
 
 ### Relevant commit log (April sync window)
 
 ```
+5a1371f  feat(collection): add route continuation chaining
+c87818d  fix(expert): unify vertical conflict gate and score route-tail branches
+44fed49  feat(routes): add bounded campaign turn-balance control
 017b71a  fix(config): increase timeout_duration 75→80 seconds
 75b10c9  feat(data): write gap_fill_diverged and route_completion to HDF5
 3baf485  fix(manifest): include nav classes 5–6 in distribution
@@ -53,13 +56,13 @@ Recent hotfixes outside the original F1-F15 table:
 The issues are grouped by risk level. Work through tier by tier, running
 `bash scripts/test_collection.sh` (smoke test) after each tier completes.
 
-### Status Snapshot (2026-04-10)
+### Status Snapshot (2026-04-19)
 
 | State | Items |
 |---|---|
-| Done | F2, F3, F4, F5, F6, F7, F8, F9, F13 |
-| Partially done | F12 (non-junction same-road lane_id override implemented; policy decisions OD-1/OD-2 still open) |
-| Pending | F9b, F10, F11, F14, F15 |
+| Done | F2, F3, F4, F5, F6, F7, F8, F9, F9b, F13 |
+| Partially done | F10/F11 (branch-selection refactor in code; long-run validation still pending), F12 (non-junction same-road lane_id override implemented; policy decisions OD-1/OD-2 still open) |
+| Pending | F14, F15, RP1, RP2, RP3, RP4, RP5, RP6, RP7 |
 | Deferred | F1 (user-requested defer) |
 
 ---
@@ -70,7 +73,7 @@ The issues are grouped by risk level. Work through tier by tier, running
 | # | Task | Effort | Issue File | Description |
 |---|------|--------|------------|-------------|
 | F1 | Fix `stop_sign_route_proximity` | 5 min | [ISSUE-05](issues/ISSUE-05-stop-sign-proximity.md) | **User-deferred (2026-04-02):** keep `2.5` to avoid adjacent-lane false stops observed when value > 3.0. |
-| F2 | Fix `timeout_duration` | 2 min | [ISSUE-06](issues/ISSUE-06-monitoring-instrumentation.md) | **DONE** (`017b71a`): `timeout_duration` is `80` in `configs/collection.yaml`. |
+| F2 | Fix `timeout_duration` | 2 min | [ISSUE-06](issues/ISSUE-06-monitoring-instrumentation.md) | **DONE** (`017b71a`, later retuned): `timeout_duration` is now `120` in `configs/collection.yaml` for improved stability in marginal TL/queue scenarios. |
 | F3 | Write `gap_fill_diverged` to HDF5 | 15 min | [ISSUE-01](issues/ISSUE-01-junction-waypoints.md) | **DONE** (`75b10c9`): HDF5 dataset creation + per-frame write are present in `expert_collector.py`. |
 | F4 | Write `route_completion` to HDF5 | 10 min | [ISSUE-01](issues/ISSUE-01-junction-waypoints.md) | **DONE** (`75b10c9`): persisted per frame in HDF5. |
 | F5 | Fix manifest `nav_distribution` | 15 min | [ISSUE-03](issues/ISSUE-03-lane-change-mislabeling.md) | **DONE** (`3baf485`, `77ed724`): nav classes 5/6 are included in distribution output. |
@@ -86,7 +89,7 @@ The issues are grouped by risk level. Work through tier by tier, running
 | F7 | Suppress lane-change labels during TURNING | 30 min | [ISSUE-03](issues/ISSUE-03-lane-change-mislabeling.md) | **DONE** (`fbf0939`): TURNING transition behavior no longer emits persistent lane-change labels. |
 | F8 | Turning stopped-lead deadlock fix | 30 min | [ISSUE-02](issues/ISSUE-02-traffic-light-state-machine.md) | **DONE** (`f0e4549`, `a24e48a`, `ea5587d`): implemented lateral-gated blocker logic (not blanket lead skipping). |
 | F9 | VEH_FOLLOW red-light TL override | 45 min | [ISSUE-02](issues/ISSUE-02-traffic-light-state-machine.md) | **DONE** (`2c8b0e5`): red/yellow TL stop intent outranks vehicle-follow targeting. |
-| F9b | Clear yellow-commit on full stop | 20 min | [ISSUE-02](issues/ISSUE-02-traffic-light-state-machine.md) | **PENDING:** add explicit reset of `_tl_proceed_committed` when ego fully stops before the stop line. |
+| F9b | Clear yellow-commit on full stop | 20 min | [ISSUE-02](issues/ISSUE-02-traffic-light-state-machine.md) | **DONE:** explicit reset is present in `privileged_expert.py` (`if self._tl_proceed_committed and speed_kmh < 0.5: ...`). |
 
 ---
 
@@ -95,8 +98,8 @@ The issues are grouped by risk level. Work through tier by tier, running
 
 | # | Task | Effort | Issue File | Description |
 |---|------|--------|------------|-------------|
-| F10 | Replace `nexts[0]` in `_fill_buffer()` | 2 hr | [ISSUE-01](issues/ISSUE-01-junction-waypoints.md) | **PENDING:** route-end extension still uses `nexts[0]` (`privileged_expert.py` line 696). |
-| F11 | Replace `nexts[0]` in `_fill_junction_gaps()` | 1 hr | [ISSUE-01](issues/ISSUE-01-junction-waypoints.md) | **PENDING (higher urgency than F10):** live junction path still uses `nexts[0]` (`privileged_expert.py` line 810). |
+| F10 | Replace `nexts[0]` in `_fill_buffer()` | 2 hr | [ISSUE-01](issues/ISSUE-01-junction-waypoints.md) | **IN CODE (needs runtime confirmation):** route-end branch selection now scores legal candidates instead of positional `nexts[0]`. Validate with long-run `gap_fill_diverged` / route-sidecar checks. |
+| F11 | Replace `nexts[0]` in `_fill_junction_gaps()` | 1 hr | [ISSUE-01](issues/ISSUE-01-junction-waypoints.md) | **IN CODE (needs runtime confirmation):** junction gap-fill forward chaining now uses target-oriented best-next selection (`_pick_best_next`) plus divergence guards; verify in overnight runs. |
 | F12 | Ground-truth `lane_id` lane-change detection | 2 hr | [ISSUE-03](issues/ISSUE-03-lane-change-mislabeling.md) | **PARTIAL:** non-junction, same-road lane_id crossing override exists. OD-1/OD-2 still required for final labeling policy. |
 | F13 | Fix `_tl_stop_loc` stale reference during TURNING | 3 hr | [ISSUE-02](issues/ISSUE-02-traffic-light-state-machine.md) | **DONE** (`ef3a25e`): stop-line reference refresh is called after buffer and gap-fill updates. |
 
@@ -123,10 +126,34 @@ These two decisions require explicit user input. See issue files for full contex
 
 ---
 
+### Newly Tracked Remaining Work (2026-04-19)
+
+These rows capture gaps discovered during the latest policy + docs audit and are now part of the active implementation backlog.
+
+| # | Task | Effort | Scope | Description |
+|---|------|--------|-------|-------------|
+| RP1 | Exhaustive route atlas coverage planning script | 1-2 days (MVP) | Collection infrastructure | Build a dedicated offline atlas precompute path (`scripts/build_route_atlas.py`) that targets road-lane and connector coverage, writes atlas artifacts incrementally, and can run as a background job with bounded memory. |
+| RP2 | Lane-change target-lane occupancy safety gate | 4-6 hrs | Expert policy | Before executing lane-change commands, explicitly check occupancy in the destination lane and block unsafe transitions. |
+| RP3 | Stop-sign right-of-way negotiation state machine | 1-2 days | Expert policy | Replace timer-only stop-sign behavior with queued entrance-leader and junction-clear conflict handling (with bounded fail-safe timeout). |
+| RP4 | Right-turn yellow overshoot exception policy | 3-4 hrs | Expert policy | Add narrow right-turn yellow exception for already-committed/past-stop-line behavior, with conflict and pedestrian safety gates. |
+| RP5 | ISSUE-09 static obstacle handling | 4-8 hrs | Hazard perception | Track and respond to static actors (`static.*`) relevant to ego path, starting with conservative emergency/slowdown behavior. |
+| RP6 | ISSUE-10 junction width-clearance handling | 4-8 hrs | Hazard perception | Add lateral clearance checks in narrow junction passes to reduce side-swipe collisions with adjacent vehicles. |
+| RP7 | ISSUE-11 double-blocker hardening + F10/F11 closure evidence | 1 day | Junction reliability | Verify and harden race-condition behavior around gap-fill/bezier transitions; attach evidence from long-run diagnostics. |
+
+Background-friendly first execution candidate (once RP1 script lands):
+
+| Stage | Command shape | Notes |
+|---|---|---|
+| Atlas build (single town) | `python scripts/build_route_atlas.py --town Town03 --output data/atlas --max-routes 150 --target-coverage 0.95` | Run one town per process to bound RSS and avoid OOM spikes. |
+| Multi-town sweep | `for t in Town01 Town03 Town04 Town05 Town06 Town07 Town10HD; do ...; done` | Keep Town12/Town15 out of initial atlas pass due large-map resource risk. |
+
+---
+
 ### Post-Phase-0: Re-Collection Run
 
 Tier 0 is complete. Tier 1 is complete except F9b.
-Finish F9b, smoke-test, then proceed with Tier 2 (F11 first, then F10).
+Tier 1 is now complete including F9b. Tier 2 code changes for F10/F11 are landed, but closure requires runtime validation.
+Next practical order: validate F10/F11 behavior on long-run data, then start RP1 atlas script work in parallel.
 
 | Task | Description | Time |
 |------|-------------|------|
@@ -153,7 +180,7 @@ Finish F9b, smoke-test, then proceed with Tier 2 (F11 first, then F10).
 
 | # | Task | Effort | Description |
 |---|------|--------|-------------|
-| D10 | Expand town coverage | 15 min | Add Town02, 06, 07, 10, 12, 15 to `collection.yaml`. Town02 reserved as eval-only. |
+| D10 | Review town coverage policy | 30 min | Keep Town02 eval-only. Maintain Town12/Town15 as optional for collection and out-of-scope for initial atlas build until large-map resource envelope is validated. |
 | D8 | Velocity stats (initial) | 30 min | Compute `VELOCITY_MEAN`/`VELOCITY_STD` from overnight data. Update `driving_dataset.py`. |
 | — | Regenerate toy data | 5 min | Run `make toy-data` with CARLA for v3.1 toy dataset. |
 
@@ -235,7 +262,8 @@ Finish F9b, smoke-test, then proceed with Tier 2 (F11 first, then F10).
 | Training instability | Short TBPTT segments (T=32), W&B gradient monitoring. |
 | Distribution drift | Steering noise (D7) + DAgger (stretch). |
 | Phase 0 Tier 2 regressions | Run `test_collection.sh` smoke test after each tier. Revert to `514a2b8` if needed. |
-| nexts[0] fix incomplete | Verify using new `gap_fill_diverged` HDF5 field after F10/F11. |
+| F10/F11 runtime closure risk | Validate branch-selection behavior with `gap_fill_diverged`, route sidecars, and per-town long-run diagnostics before marking ISSUE-01 closed. |
+| Atlas precompute OOM/storage risk | Build one town per process, stream artifacts incrementally, and enforce route-count / coverage budgets with checkpoint-resume support. |
 | Lane-change label redesign (OD-1) | Decision needed before F12. Existing data may need relabeling. |
 | Blind-spot imitation gap (OD-2) | Decision needed before F12. Affects training alignment. |
 
