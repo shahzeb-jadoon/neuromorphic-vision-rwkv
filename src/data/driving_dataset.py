@@ -331,7 +331,8 @@ class DrivingSequenceDataset(Dataset):
 
         # Auxiliary targets
         target_speed_t = torch.from_numpy(target_speed.copy())
-        driving_mode_t = torch.from_numpy(driving_mode.copy()).long()
+        # DrivingMode enum is 1-indexed (values 1-8); remap to 0-indexed for CrossEntropy.
+        driving_mode_t = torch.from_numpy(driving_mode.copy()).long() - 1
         position_t = torch.from_numpy(position.copy())
 
         # Future waypoints: relative (x, y) offsets at t+5, t+10, t+15, t+20.
