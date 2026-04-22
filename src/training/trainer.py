@@ -257,6 +257,13 @@ class Trainer:
         seed_everything(cfg.run.seed, cfg.run.deterministic)
         self.device = self._resolve_device(cfg.run.device)
 
+        if self.device.type == "cuda":
+            gpu_name = torch.cuda.get_device_name(self.device)
+            vram_gb = torch.cuda.get_device_properties(self.device).total_memory / 1e9
+            print(f"[trainer] device: {self.device}  ({gpu_name}, {vram_gb:.1f} GB VRAM)")
+        else:
+            print(f"[trainer] device: {self.device}  (no GPU — training will be slow)")
+
         self.model = VisionRWKVDriver(cfg.model).to(self.device)
         self.teacher: VisionRWKVDriver | None = self._build_teacher_if_needed()
 

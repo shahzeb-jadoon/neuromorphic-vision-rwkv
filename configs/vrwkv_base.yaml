@@ -11,7 +11,7 @@ run:
   seed: 42
   deterministic: true
   resume: auto
-  device: auto
+  device: cuda
 
 dataset:
   data_dir: /mnt/data/carla_data
