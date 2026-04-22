@@ -61,6 +61,36 @@ class TestDatasetShapes:
         item = train_dataset[0]
         assert item["velocity"].shape == (16, 3)
 
+    def test_images_shape_with_resize(self, toy_data_dir: Path) -> None:
+        ds = DrivingSequenceDataset(
+            data_dir=toy_data_dir,
+            seq_len=16,
+            stride=8,
+            split="train",
+            val_fraction=0.34,
+            seed=42,
+            augment=False,
+            resize_height=160,
+            resize_width=960,
+        )
+        item = ds[0]
+        assert item["images"].shape == (16, 3, 160, 960)
+
+    def test_resize_with_default_augment_path(self, toy_data_dir: Path) -> None:
+        ds = DrivingSequenceDataset(
+            data_dir=toy_data_dir,
+            seq_len=16,
+            stride=8,
+            split="val",
+            val_fraction=0.34,
+            seed=42,
+            augment=None,
+            resize_height=160,
+            resize_width=960,
+        )
+        item = ds[0]
+        assert item["images"].shape[-2:] == (160, 960)
+
     def test_dtypes(self, train_dataset: DrivingSequenceDataset) -> None:
         item = train_dataset[0]
         assert item["images"].dtype == torch.float32

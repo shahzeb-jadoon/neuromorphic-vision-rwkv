@@ -22,6 +22,7 @@ from typing import Any
 import h5py
 import numpy as np
 import torch
+import torch.nn.functional as F
 from torch.utils.data import Dataset, WeightedRandomSampler
 
 from src.data import hdf5_schema as S
@@ -31,11 +32,12 @@ IMAGENET_MEAN = torch.tensor([0.485, 0.456, 0.406]).view(3, 1, 1)
 IMAGENET_STD = torch.tensor([0.229, 0.224, 0.225]).view(3, 1, 1)
 
 # Velocity z-score normalisation constants.
-# Computed from 720 overnight episodes (1,190,641 frames) via Welford's algorithm.
-# World-frame (vx, vy, vz) in m/s.  Will be recomputed after Phase-1b re-collection.
-VELOCITY_STATS_VERSION = "overnight_v1"
-VELOCITY_MEAN = torch.tensor([-0.183039, 0.017519, 0.004639])
-VELOCITY_STD = torch.tensor([4.115619, 3.930360, 0.131611])
+# Computed from cleaned v1 corpus (1,099 episodes, 3,624,673 frames)
+# on 2026-04-21 via Welford's algorithm.
+# World-frame (vx, vy, vz) in m/s.
+VELOCITY_STATS_VERSION = "v1_cleaned_2026_04_21"
+VELOCITY_MEAN = torch.tensor([-0.069918, -0.101425, 0.001077])
+VELOCITY_STD = torch.tensor([4.864434, 3.784082, 0.128879])
 
 
 class DrivingSequenceDataset(Dataset):
@@ -54,6 +56,8 @@ class DrivingSequenceDataset(Dataset):
         augment: Whether to apply data augmentation (default: True for train).
         n_cameras: Number of cameras in the panoramic image (default: 3).
             Used by the horizontal flip augmentation to swap camera panels.
+        resize_height: Optional output height for on-the-fly resize.
+        resize_width: Optional output width for on-the-fly resize.
     """
 
     def __init__(
@@ -66,6 +70,8 @@ class DrivingSequenceDataset(Dataset):
         seed: int = 42,
         augment: bool | None = None,
         n_cameras: int = 3,
+        resize_height: int | None = None,
+        resize_width: int | None = None,
     ) -> None:
         self.data_dir = Path(data_dir)
         self.seq_len = seq_len
@@ -87,6 +93,15 @@ class DrivingSequenceDataset(Dataset):
             self.augment = split == "train"
         else:
             self.augment = augment
+
+        if (resize_height is None) != (resize_width is None):
+            raise ValueError("resize_height and resize_width must both be set, or both be None")
+        if resize_height is not None and resize_height <= 0:
+            raise ValueError(f"resize_height must be positive, got {resize_height}")
+        if resize_width is not None and resize_width <= 0:
+            raise ValueError(f"resize_width must be positive, got {resize_width}")
+        self.resize_height = resize_height
+        self.resize_width = resize_width
 
         # Discover episode files
         all_episodes = sorted(self.data_dir.glob("episode_*.h5"))
@@ -238,8 +253,10 @@ class DrivingSequenceDataset(Dataset):
 
         Returns:
             Dictionary with:
-                images: (seq_len, 3, H, W_total) float32, ImageNet-normalized.
-                    W_total = n_cameras * per_camera_width (panoramic).
+                images: (seq_len, 3, H_out, W_out) float32, ImageNet-normalized.
+                    By default H_out/W_out match stored panoramic frames
+                    (H=320, W=3*camera_width). If resize_* is set, images are
+                    resized on the fly for ablations and memory tuning.
                 controls: (seq_len, 2) float32 [steering, acceleration]
                     acceleration = throttle - brake  ∈ [-1, 1]
                 nav_command: (seq_len,) int64  (RoadOption values, 0-indexed)
@@ -299,6 +316,15 @@ class DrivingSequenceDataset(Dataset):
         # Data augmentation BEFORE normalization (operates on [0, 1] pixel values)
         if self.augment:
             images, controls = self._augment(images, controls)
+
+        # Optional on-the-fly resize for resolution ablation experiments.
+        if self.resize_height is not None and self.resize_width is not None:
+            images = F.interpolate(
+                images,
+                size=(self.resize_height, self.resize_width),
+                mode="bilinear",
+                align_corners=False,
+            )
 
         # ImageNet normalization (after augmentation so jitter operates on real intensities)
         images = (images - IMAGENET_MEAN) / IMAGENET_STD
