@@ -1,0 +1,9 @@
+# Copy this file into your run directory as runtime_overrides.yaml.
+# The trainer polls this file during training and applies new values when
+# `version` increments.
+
+version: 1
+changes:
+  optimization.learning_rate: 5.0e-5
+  loss.waypoint_weight: 0.7
+  loss.speed_weight: 0.15

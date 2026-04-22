@@ -1,0 +1,104 @@
+# Base Phase-2 training config.
+# Designed for reproducible, crash-resumable runs with clear experiment naming.
+
+run:
+  output_root: runs
+  name_prefix: vrwkv
+  run_name: null
+  project: neuromorphic-vision-rwkv
+  entity: null
+  tags: [phase2, rwkv, imitation-learning]
+  seed: 42
+  deterministic: true
+  resume: auto
+  device: auto
+
+dataset:
+  data_dir: /mnt/data/carla_data
+  seq_len: 32
+  stride: 16
+  val_fraction: 0.2
+  batch_size: 4
+  num_workers: 4
+  pin_memory: true
+  weighted_sampling: true
+  augment_train: true
+  # Resolution ablation support. Set both to null for original 320x1920.
+  resize_height: null
+  resize_width: null
+
+model:
+  tokenizer:
+    img_height: 320
+    img_width: 1920
+    in_channels: 3
+    patch_size: 16
+    embed_dim: 768
+    use_qshift: true
+  encoder:
+    embed_dim: 768
+    n_layers: 12
+    n_heads: 12
+    ffn_dim: 3072
+    dropout: 0.1
+    rwkv_version: 7
+  fusion:
+    visual_dim: 768
+    nav_embed_dim: 64
+    n_nav_commands: 6
+    fused_dim: 768
+    dropout: 0.1
+  policy_head:
+    input_dim: 768
+    hidden_dims: [256, 64]
+    n_outputs: 2
+    dropout: 0.1
+
+optimization:
+  epochs: 50
+  learning_rate: 1.0e-4
+  weight_decay: 1.0e-2
+  gradient_clip: 1.0
+  amp: true
+  ema_decay: 0.0
+
+scheduler:
+  name: cosine
+  warmup_steps: 1000
+  min_lr_ratio: 0.1
+
+loss:
+  burn_in: 8
+  control_weight: 1.0
+  speed_weight: 0.1
+  mode_weight: 0.1
+  waypoint_weight: 0.5
+
+distillation:
+  enabled: false
+  teacher_checkpoint: ""
+  weight: 0.2
+
+checkpoint:
+  save_every_steps: 500
+  save_every_epochs: 1
+  keep_last_n: 5
+  monitor_metric: val/total_loss
+  monitor_mode: min
+
+logging:
+  log_every_steps: 20
+  val_every_steps: 500
+  use_tensorboard: true
+  use_wandb: false
+  plot_on_finish: true
+  val_max_batches: 0
+
+runtime_overrides:
+  enabled: true
+  file_name: runtime_overrides.yaml
+  poll_every_steps: 100
+
+quantization:
+  export_dynamic_int8: false
+  export_path: quantized/model_dynamic_int8.pt
