@@ -1,7 +1,7 @@
 # ── Neuromorphic Vision-RWKV for Autonomous Driving ──────────────────
 # Convenience targets for common development tasks.
 
-.PHONY: test lint format typecheck ci clean analyze train help setup
+.PHONY: test lint format typecheck ci clean analyze train tune help setup
 
 help:  ## Show this help message
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | \
@@ -53,7 +53,10 @@ validate:  ## Validate dataset integrity
 # ── Training (Phase 2) ───────────────────────────────────────────────
 
 train:  ## Start model training (Phase 2)
-	@echo "Training pipeline not yet implemented — Phase 2"
+	python scripts/train.py --config configs/vrwkv_base.yaml
+
+tune:  ## Run Optuna hyperparameter search (short trials)
+	python scripts/tune_hparams.py --config configs/vrwkv_base.yaml --n-trials 10 --trial-epochs 2
 
 # ── Utilities ────────────────────────────────────────────────────────
 

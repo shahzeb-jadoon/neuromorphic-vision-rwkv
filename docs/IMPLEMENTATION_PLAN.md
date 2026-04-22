@@ -17,6 +17,29 @@ Schema v3.1 with corridor diagnostics
 1,125 episodes collected (overnight run) — to be re-collected after fixes
 ```
 
+### 2026-04-21 Hygiene Pass Decisions (Verified)
+
+This section captures decisions and results from the Phase-2 preparation pass so
+they are not lost or repeated.
+
+| Item | Decision / Result | Evidence |
+|---|---|---|
+| Branch baseline | Continue on `phase-2/model-architecture` (no merge-first dependency for OOM safety) | `git rev-list --left-right --count phase-2/model-architecture...main` and OOM-fix ancestry checks |
+| Corrupt orphan file | `episode_67a8416d.h5` deleted from `/mnt/data/carla_data` | HDF5 open failure reproduced before deletion; file no longer exists |
+| Town07 policy | Physical move to backup completed (not deleted) | `town07_backup_20260421_152554/` created; active dataset now has 0 Town07 episodes |
+| Manifest safety | Manifest backup created and entries updated | `/mnt/data/carla_data/collection_manifest_backup_20260421_152627.json` |
+| Active v1 dataset size | 1,099 episodes remain (after Town07 move and orphan removal) | Post-move verification scan |
+| Extrapolated nav labels | Applied after dry-run; STRAIGHT added, lane-change remained 0 | `scripts/extrapolate_nav_labels.py --apply` summary |
+| Extrapolation totals | 69,934 STRAIGHT frames (1.9%), 0 lane-change frames | Apply summary on 3,624,619 frames |
+| Velocity normalisation refresh | Recomputed and updated in `driving_dataset.py` | Welford pass over 3,624,673 velocity rows |
+
+### Immediate Phase-2 Start State (Post-Hygiene)
+
+- Dataset constructor now initializes successfully on `/mnt/data/carla_data`.
+- v1 corpus is cleaner (Town07 excluded physically, corrupt orphan removed).
+- Navigation labels are improved for STRAIGHT (still no lane-change signal).
+- Core model forward passes are implemented on `phase-2/train-v1-olddata`; next blocker is trainer/integration wiring and end-to-end training loop validation.
+
 ---
 
 ## Phase 1 Remaining — Expert Fixes & Re-Collection
