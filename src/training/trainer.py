@@ -7,10 +7,14 @@ import csv
 import math
 import random
 import signal
+import time
+import warnings
 from dataclasses import asdict
 from datetime import datetime
 from pathlib import Path
 from typing import Any
+
+from tqdm import tqdm
 
 import numpy as np
 import torch
@@ -296,6 +300,7 @@ class Trainer:
         self._stop_requested = False
         self._stop_reason = ""
         self._last_override_version = -1
+        self._last_val_loss: float | None = None
 
         self._register_signal_handlers()
         self._maybe_resume()
@@ -352,6 +357,9 @@ class Trainer:
         )
 
         sampler = train_ds.get_sampler() if dcfg.weighted_sampling else None
+        # prefetch_factor=2 is the PyTorch default (each worker prefetches 2 batches).
+        # Lower to 1 to halve DataLoader RAM at the cost of slightly lower GPU utilisation.
+        pf = 2 if dcfg.num_workers > 0 else None
         train_loader = DataLoader(
             train_ds,
             batch_size=dcfg.batch_size,
@@ -360,15 +368,18 @@ class Trainer:
             num_workers=dcfg.num_workers,
             pin_memory=dcfg.pin_memory,
             persistent_workers=dcfg.num_workers > 0,
+            prefetch_factor=pf,
             drop_last=True,
         )
+        val_workers = max(0, dcfg.num_workers // 2)
         val_loader = DataLoader(
             val_ds,
             batch_size=dcfg.batch_size,
             shuffle=False,
-            num_workers=max(0, dcfg.num_workers // 2),
+            num_workers=val_workers,
             pin_memory=dcfg.pin_memory,
-            persistent_workers=(dcfg.num_workers // 2) > 0,
+            persistent_workers=val_workers > 0,
+            prefetch_factor=2 if val_workers > 0 else None,
             drop_last=False,
         )
         return train_loader, val_loader
@@ -389,12 +400,18 @@ class Trainer:
             cosine = 0.5 * (1.0 + math.cos(math.pi * progress))
             return min_ratio + (1.0 - min_ratio) * cosine
 
-        return torch.optim.lr_scheduler.LambdaLR(self.optimizer, lr_lambda=lr_lambda)
+        # LambdaLR calls .step() internally during __init__, which triggers a
+        # PyTorch warning about step ordering. This is a known false positive —
+        # our training loop calls optimizer.step() before scheduler.step().
+        with warnings.catch_warnings():
+            warnings.filterwarnings("ignore", "Detected call of")
+            return torch.optim.lr_scheduler.LambdaLR(self.optimizer, lr_lambda=lr_lambda)
 
     def _register_signal_handlers(self) -> None:
         def _handler(signum: int, _frame: Any) -> None:
             self._stop_requested = True
             self._stop_reason = f"signal_{signum}"
+            print("\n[trainer] Ctrl+C received — finishing step, saving checkpoint, then exiting.")
 
         signal.signal(signal.SIGINT, _handler)
         signal.signal(signal.SIGTERM, _handler)
@@ -486,7 +503,7 @@ class Trainer:
 
         pred_controls, _, aux = self.model(images, nav)
 
-        bsz, seq_len, _ = pred_controls.shape
+        _bsz, _seq_len, _ = pred_controls.shape
         frame_weight = batch["loss_weight"].to(self.device, non_blocking=True).float()
 
         # Burn-in frames warm recurrent state but do not contribute to loss.
@@ -634,6 +651,8 @@ class Trainer:
             ModelEMA.restore(model, backup)
 
         model.train()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
         return out
 
     def fit(self, max_epochs: int | None = None) -> Path:
@@ -643,11 +662,22 @@ class Trainer:
 
         try:
             resume_epoch = self.current_epoch
+            steps_per_epoch = len(self.train_loader)
+            total_steps = (target_epochs - self.current_epoch) * steps_per_epoch
+
             for epoch in range(self.current_epoch, target_epochs):
                 self.current_epoch = epoch
 
-                for batch_idx, batch in enumerate(self.train_loader):
+                pbar = tqdm(
+                    enumerate(self.train_loader),
+                    total=steps_per_epoch,
+                    desc=f"Epoch {epoch + 1}/{target_epochs}",
+                    dynamic_ncols=True,
+                    leave=True,
+                )
+                for batch_idx, batch in pbar:
                     if epoch == resume_epoch and batch_idx < self.resume_batch_in_epoch:
+                        pbar.update()
                         continue
 
                     self.global_step += 1
@@ -656,6 +686,7 @@ class Trainer:
 
                     self.optimizer.zero_grad(set_to_none=True)
 
+                    t_step_start = time.time()
                     with torch.amp.autocast(
                         device_type=self.device.type,
                         enabled=self.scaler.is_enabled(),
@@ -672,6 +703,7 @@ class Trainer:
                     self.scaler.step(self.optimizer)
                     self.scaler.update()
                     self.scheduler.step()
+                    step_secs = time.time() - t_step_start
 
                     if self.ema is not None:
                         self.ema.update(self.model)
@@ -679,17 +711,38 @@ class Trainer:
                     metrics["lr"] = self._current_lr()
                     metrics["grad_norm"] = grad_norm
 
+                    steps_done = self.global_step - (resume_epoch * steps_per_epoch)
+                    eta_secs = step_secs * (total_steps - steps_done)
+                    postfix: dict[str, str] = {
+                        "tr_loss": f"{metrics['total_loss']:.3f}",
+                        "lr": f"{metrics['lr']:.1e}",
+                        "gnorm": f"{grad_norm:.2f}",
+                        "sps": f"{1.0 / step_secs:.1f}",
+                        "eta": f"{eta_secs / 60:.0f}m",
+                    }
+                    if self._last_val_loss is not None:
+                        postfix["val_loss"] = f"{self._last_val_loss:.3f}"
+                    pbar.set_postfix(postfix)
+
                     if self.global_step % max(1, self.cfg.logging.log_every_steps) == 0:
                         self.logger.log_metrics(
                             "train", self.global_step, self.current_epoch, metrics
                         )
 
                     if self.global_step % max(1, self.cfg.logging.val_every_steps) == 0:
+                        pbar.write(f"  [val] step {self.global_step} — running validation...")
                         val_metrics = self.evaluate()
                         val_metrics["lr"] = self._current_lr()
                         val_metrics["grad_norm"] = float("nan")
+                        self._last_val_loss = val_metrics["total_loss"]
                         self.logger.log_metrics(
                             "val", self.global_step, self.current_epoch, val_metrics
+                        )
+                        pbar.write(
+                            f"  [val] step {self.global_step}  "
+                            f"loss={val_metrics['total_loss']:.3f}  "
+                            f"steer_mae={val_metrics['steer_mae']:.4f}  "
+                            f"accel_mae={val_metrics['accel_mae']:.4f}"
                         )
 
                         monitor_name = self.cfg.checkpoint.monitor_metric.split("/", maxsplit=1)[-1]
@@ -703,6 +756,7 @@ class Trainer:
                         self._save_checkpoint(tag="step")
 
                     if self._stop_requested:
+                        pbar.close()
                         self._save_checkpoint(tag=self._stop_reason or "stop")
                         self.logger.log_event(
                             step=self.global_step,
@@ -715,6 +769,7 @@ class Trainer:
                             plot_run_dashboard(self.run_dir)
                         return self.run_dir
 
+                pbar.close()
                 if (epoch + 1) % max(1, self.cfg.checkpoint.save_every_epochs) == 0:
                     self._save_checkpoint(tag="epoch")
 
