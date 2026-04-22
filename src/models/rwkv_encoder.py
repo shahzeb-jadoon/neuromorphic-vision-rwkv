@@ -68,7 +68,32 @@ class RWKVBlock(nn.Module):
                 output: (B, T, embed_dim) processed tokens.
                 new_state: (B, state_size) updated recurrent state.
         """
-        raise NotImplementedError("RWKVBlock.forward — implement in Phase 2")
+        if x.ndim != 3:
+            raise ValueError(f"RWKVBlock expected 3D input, got shape {tuple(x.shape)}")
+
+        batch = x.shape[0]
+        device = x.device
+        dtype = x.dtype
+        if state is None:
+            state = torch.zeros(batch, self.embed_dim, device=device, dtype=dtype)
+        if state.shape != (batch, self.embed_dim):
+            raise ValueError(
+                f"state shape mismatch: expected "
+                f"{(batch, self.embed_dim)}, got {tuple(state.shape)}"
+            )
+
+        mixed_input = self.ln1(x)
+        time_out = self.time_mix(mixed_input)
+        time_out = time_out + state.unsqueeze(1)
+        x = x + self.dropout(time_out)
+
+        channel_input = self.ln2(x)
+        ff = torch.relu(self.channel_mix(channel_input))
+        ff = self.channel_out(ff)
+        x = x + self.dropout(ff)
+
+        new_state = x[:, -1, :]
+        return x, new_state
 
 
 class RWKVEncoder(nn.Module):
@@ -123,4 +148,27 @@ class RWKVEncoder(nn.Module):
                     (spatial dimension pooled via mean).
                 new_state: Updated list of per-layer states.
         """
-        raise NotImplementedError("RWKVEncoder.forward — implement in Phase 2")
+        if x.ndim != 4:
+            raise ValueError(f"RWKVEncoder expected 4D input, got shape {tuple(x.shape)}")
+
+        batch, _, _, embed = x.shape
+        if embed != self.config.embed_dim:
+            raise ValueError(
+                "embed_dim mismatch: " f"expected {self.config.embed_dim}, got {embed}"
+            )
+
+        if state is None:
+            state = self.initial_state(batch, x.device)
+        if len(state) != len(self.blocks):
+            raise ValueError(
+                f"state length mismatch: expected {len(self.blocks)}, got {len(state)}"
+            )
+
+        hidden = x.mean(dim=2)  # (B, T, D)
+        new_states: RWKVState = []
+        for block, block_state in zip(self.blocks, state):
+            hidden, next_state = block(hidden, block_state)
+            new_states.append(next_state)
+
+        hidden = self.ln_out(hidden)
+        return hidden, new_states

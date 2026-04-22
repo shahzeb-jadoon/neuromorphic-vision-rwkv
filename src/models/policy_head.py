@@ -26,6 +26,8 @@ Output: (B, T, 2) — [steering, acceleration] per frame
 
 from __future__ import annotations
 
+from typing import cast
+
 import torch
 import torch.nn as nn
 
@@ -74,4 +76,4 @@ class PolicyHead(nn.Module):
                 [:, :, 1] = acceleration ∈ [-1, 1] (tanh)
                     positive = throttle, negative = brake
         """
-        raise NotImplementedError("PolicyHead.forward — implement in Phase 2")
+        return cast(torch.Tensor, self.mlp(x))

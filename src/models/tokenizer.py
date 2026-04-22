@@ -14,6 +14,8 @@ where N_patches = (H / patch_size) * (W / patch_size)
 
 from __future__ import annotations
 
+from typing import cast
+
 import torch
 import torch.nn as nn
 
@@ -59,7 +61,15 @@ class PatchEmbedding(nn.Module):
         Returns:
             (B, N_patches, embed_dim) patch tokens with position encoding.
         """
-        raise NotImplementedError("PatchEmbedding.forward — implement in Phase 2")
+        if x.ndim == 5:
+            batch, steps, channels, height, width = x.shape
+            x = x.reshape(batch * steps, channels, height, width)
+        if x.ndim != 4:
+            raise ValueError(f"PatchEmbedding expected 4D or 5D input, got shape {tuple(x.shape)}")
+
+        tokens = self.projection(x)  # (B, D, H/P, W/P)
+        tokens = tokens.flatten(2).transpose(1, 2)  # (B, N_patches, D)
+        return cast(torch.Tensor, tokens + self.position_embedding)
 
 
 class QShift(nn.Module):
@@ -94,7 +104,40 @@ class QShift(nn.Module):
         Returns:
             (B, N_patches, embed_dim) spatially mixed tokens.
         """
-        raise NotImplementedError("QShift.forward — implement in Phase 2")
+        if x.ndim != 3:
+            raise ValueError(f"QShift expected 3D input, got shape {tuple(x.shape)}")
+        batch, n_patches, embed_dim = x.shape
+        if embed_dim != self.embed_dim:
+            raise ValueError(
+                f"QShift embed_dim mismatch: expected {self.embed_dim}, got {embed_dim}"
+            )
+        expected_patches = self.n_patches_h * self.n_patches_w
+        if n_patches != expected_patches:
+            raise ValueError(
+                f"QShift patch count mismatch: expected {expected_patches}, got {n_patches}"
+            )
+
+        grid = x.view(batch, self.n_patches_h, self.n_patches_w, embed_dim)
+        shift = self.shift_size
+        chunk_up = grid[..., :shift]
+        chunk_down = grid[..., shift : 2 * shift]
+        chunk_left = grid[..., 2 * shift : 3 * shift]
+        chunk_right = grid[..., 3 * shift :]
+
+        up = torch.zeros_like(chunk_up)
+        up[:, :-1, :, :] = chunk_up[:, 1:, :, :]
+
+        down = torch.zeros_like(chunk_down)
+        down[:, 1:, :, :] = chunk_down[:, :-1, :, :]
+
+        left = torch.zeros_like(chunk_left)
+        left[:, :, :-1, :] = chunk_left[:, :, 1:, :]
+
+        right = torch.zeros_like(chunk_right)
+        right[:, :, 1:, :] = chunk_right[:, :, :-1, :]
+
+        mixed = torch.cat([up, down, left, right], dim=-1)
+        return mixed.view(batch, n_patches, embed_dim)
 
 
 class VisionTokenizer(nn.Module):
@@ -130,4 +173,15 @@ class VisionTokenizer(nn.Module):
         Returns:
             (B, T, N_patches, embed_dim) visual token sequence.
         """
-        raise NotImplementedError("VisionTokenizer.forward — implement in Phase 2")
+        if x.ndim != 5:
+            raise ValueError(f"VisionTokenizer expected 5D input, got shape {tuple(x.shape)}")
+
+        batch, steps, channels, height, width = x.shape
+        flat = x.reshape(batch * steps, channels, height, width)
+        tokens = self.patch_embed(flat)  # (B*T, N_patches, D)
+        if self.qshift is not None:
+            tokens = self.qshift(tokens)
+        return cast(
+            torch.Tensor,
+            tokens.reshape(batch, steps, self.patch_embed.n_patches, self.config.embed_dim),
+        )

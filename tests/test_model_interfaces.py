@@ -1,9 +1,9 @@
-"""Tests for model interface stubs.
+"""Tests for model interfaces.
 
 Verifies that:
 - All model modules instantiate correctly with default configs.
 - Config validation catches dimensional mismatches.
-- Forward methods raise NotImplementedError (stubs, not yet implemented).
+- Forward methods return tensors with expected shapes.
 - initial_state returns correct shapes.
 - __all__ exports resolve.
 """
@@ -105,26 +105,26 @@ class TestVisionTokenizer:
         module = VisionTokenizer(config)
         assert isinstance(module, torch.nn.Module)
 
-    def test_patch_embedding_forward_raises(self) -> None:
+    def test_patch_embedding_forward_shape(self) -> None:
         module = PatchEmbedding(TokenizerConfig())
-        x = torch.randn(1, 4, 3, 320, 1920)
-        with pytest.raises(NotImplementedError, match="PatchEmbedding"):
-            module(x)
+        x = torch.randn(2, 3, 320, 1920)
+        out = module(x)
+        assert out.shape == (2, module.n_patches, 768)
 
-    def test_qshift_forward_raises(self) -> None:
+    def test_qshift_forward_shape(self) -> None:
         n_h = 320 // 16
         n_w = 1920 // 16
         module = QShift(embed_dim=384, n_patches_h=n_h, n_patches_w=n_w)
         n_patches = n_h * n_w
         x = torch.randn(1, 4, n_patches, 384)
-        with pytest.raises(NotImplementedError, match="QShift"):
-            module(x)
+        out = module(x.view(4, n_patches, 384))
+        assert out.shape == (4, n_patches, 384)
 
-    def test_vision_tokenizer_forward_raises(self) -> None:
+    def test_vision_tokenizer_forward_shape(self) -> None:
         module = VisionTokenizer(TokenizerConfig())
         x = torch.randn(1, 4, 3, 320, 1920)
-        with pytest.raises(NotImplementedError, match="VisionTokenizer"):
-            module(x)
+        out = module(x)
+        assert out.shape == (1, 4, (320 // 16) * (1920 // 16), 768)
 
 
 # ── RWKV Encoder tests ───────────────────────────────────────────────
@@ -150,12 +150,14 @@ class TestRWKVEncoder:
         assert len(state) == 4
         assert state[0].shape == (2, 128)
 
-    def test_encoder_forward_raises(self) -> None:
+    def test_encoder_forward_shape(self) -> None:
         config = RWKVEncoderConfig(n_layers=2, embed_dim=64)
         encoder = RWKVEncoder(config)
         x = torch.randn(1, 4, 196, 64)
-        with pytest.raises(NotImplementedError, match="RWKVEncoder"):
-            encoder(x)
+        out, state = encoder(x)
+        assert out.shape == (1, 4, 64)
+        assert len(state) == 2
+        assert state[0].shape == (1, 64)
 
 
 # ── Fusion tests ──────────────────────────────────────────────────────
@@ -169,13 +171,13 @@ class TestNavigationFusion:
         module = NavigationFusion(config)
         assert isinstance(module, torch.nn.Module)
 
-    def test_fusion_forward_raises(self) -> None:
+    def test_fusion_forward_shape(self) -> None:
         config = FusionConfig()
         module = NavigationFusion(config)
         visual = torch.randn(1, 4, config.visual_dim)
         nav = torch.zeros(1, 4, dtype=torch.long)
-        with pytest.raises(NotImplementedError, match="NavigationFusion"):
-            module(visual, nav)
+        out = module(visual, nav)
+        assert out.shape == (1, 4, config.fused_dim)
 
     def test_fusion_nav_embedding_size(self) -> None:
         config = FusionConfig(n_nav_commands=5, nav_embed_dim=64)
@@ -195,12 +197,12 @@ class TestPolicyHead:
         module = PolicyHead(config)
         assert isinstance(module, torch.nn.Module)
 
-    def test_policy_head_forward_raises(self) -> None:
+    def test_policy_head_forward_shape(self) -> None:
         config = PolicyHeadConfig()
         module = PolicyHead(config)
         x = torch.randn(1, 4, 768)
-        with pytest.raises(NotImplementedError, match="PolicyHead"):
-            module(x)
+        out = module(x)
+        assert out.shape == (1, 4, 2)
 
     def test_policy_head_output_size(self) -> None:
         config = PolicyHeadConfig(input_dim=64, hidden_dims=(32, 16), n_outputs=2)
@@ -231,12 +233,14 @@ class TestVisionRWKVDriver:
         assert hasattr(model, "fusion")
         assert hasattr(model, "policy_head")
 
-    def test_model_forward_raises(self) -> None:
+    def test_model_forward_shape(self) -> None:
         model = VisionRWKVDriver(ModelConfig())
         images = torch.randn(1, 4, 3, 320, 1920)
         nav = torch.zeros(1, 4, dtype=torch.long)
-        with pytest.raises(NotImplementedError, match="VisionRWKVDriver"):
-            model(images, nav)
+        controls, state, aux = model(images, nav)
+        assert controls.shape == (1, 4, 2)
+        assert len(state) == model.config.encoder.n_layers
+        assert "speed" in aux and "mode_logits" in aux and "future_waypoints" in aux
 
     def test_model_initial_state(self) -> None:
         config = ModelConfig(

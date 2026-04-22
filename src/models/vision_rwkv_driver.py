@@ -25,6 +25,8 @@ At inference time, split back:
 
 from __future__ import annotations
 
+from typing import cast
+
 import torch
 import torch.nn as nn
 
@@ -52,7 +54,7 @@ class SpeedHead(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """(B, T, D) → (B, T, 1) target speed prediction."""
-        raise NotImplementedError("SpeedHead.forward — implement in Phase 2")
+        return cast(torch.Tensor, self.linear(x))
 
 
 class ModeHead(nn.Module):
@@ -64,7 +66,7 @@ class ModeHead(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """(B, T, D) → (B, T, 8) driving mode logits."""
-        raise NotImplementedError("ModeHead.forward — implement in Phase 2")
+        return cast(torch.Tensor, self.linear(x))
 
 
 class WaypointHead(nn.Module):
@@ -85,7 +87,9 @@ class WaypointHead(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """(B, T, D) → (B, T, K, 2) future waypoint predictions."""
-        raise NotImplementedError("WaypointHead.forward — implement in Phase 2")
+        out = self.mlp(x)
+        batch, steps, _ = out.shape
+        return cast(torch.Tensor, out.view(batch, steps, self.n_offsets, 2))
 
 
 # Phase 3 ablation auxiliary heads (documented for future implementation):
@@ -129,7 +133,7 @@ class VisionRWKVDriver(nn.Module):
         images: torch.Tensor,
         nav_command: torch.Tensor,
         state: RWKVState | None = None,
-    ) -> tuple[torch.Tensor, RWKVState]:
+    ) -> tuple[torch.Tensor, RWKVState, dict[str, torch.Tensor]]:
         """End-to-end forward pass from images to controls.
 
         Args:
@@ -141,8 +145,23 @@ class VisionRWKVDriver(nn.Module):
         Returns:
             controls: (B, T, 2) predicted [steering, acceleration].
             state:    Updated RWKVState for the next call.
+            aux:      Dict of auxiliary predictions keyed by name:
+                          speed           (B, T, 1)
+                          mode_logits     (B, T, 8)
+                          future_waypoints (B, T, K, 2)
         """
-        raise NotImplementedError("VisionRWKVDriver.forward — implement in Phase 2")
+        tokens = self.tokenizer(images)
+        features, new_state = self.encoder(tokens, state)
+        fused = self.fusion(features, nav_command)
+        controls = self.policy_head(fused)
+
+        aux: dict[str, torch.Tensor] = {
+            "speed": self.speed_head(fused),
+            "mode_logits": self.mode_head(fused),
+            "future_waypoints": self.waypoint_head(fused),
+        }
+
+        return controls, new_state, aux
 
     def initial_state(self, batch_size: int, device: torch.device | None = None) -> RWKVState:
         """Create zero-initialized state for the encoder.
