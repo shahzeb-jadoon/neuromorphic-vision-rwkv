@@ -42,9 +42,11 @@ build/
 *.hdf5
 wandb/
 runs/
+runs_fast/
 checkpoints/
 datasets/
 /data/
+migration_state.json
 .env
 
 # =============================================================================
