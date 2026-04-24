@@ -151,14 +151,16 @@ class RWKVBlock(nn.Module):
 
         # Data-dependent per-token decay: always ∈ (0, 1).
         # Inner exp maps anything to ℝ+; outer -exp maps that to ℝ-; outer exp → (0,1).
-        w = torch.exp(-torch.exp(self.W_w(xw) + self.w_log))  # (B, T, D)
+        # Cast to float32 before exp() — fp16 overflows to inf when input > ~11,
+        # which causes NaN in subsequent recurrence steps under AMP autocast.
+        w = torch.exp(-torch.exp((self.W_w(xw) + self.w_log).float())).to(dtype)  # (B, T, D)
 
         # WKV recurrence — sequential over the T dimension.
         # s: (B, D) running exponentially-decayed sum (resets each forward call).
         # y_t = r_t * (bonus * k_t * v_t + s_{t-1})
         # s_t =  w_t * s_{t-1} + k_t * v_t
-        ek = torch.exp(k)  # key in log-space → exp for non-negative weighting
-        eu = torch.exp(self.u)  # current-position bonus scalar vector (D,)
+        ek = torch.exp(k.float()).to(dtype)  # key: cast to fp32 to prevent overflow
+        eu = torch.exp(self.u.float()).to(dtype)  # bonus: same reason
         s = torch.zeros(B, D, device=device, dtype=dtype)
         y_parts: list[torch.Tensor] = []
         for t in range(T):

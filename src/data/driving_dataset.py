@@ -39,6 +39,12 @@ VELOCITY_STATS_VERSION = "v1_cleaned_2026_04_21"
 VELOCITY_MEAN = torch.tensor([-0.069918, -0.101425, 0.001077])
 VELOCITY_STD = torch.tensor([4.864434, 3.784082, 0.128879])
 
+# Speed normalisation: raw target_speed is stored in km/h.
+# Dividing by MAX_SPEED_KMH maps it to [0, 1] so speed_loss MSE stays on
+# the same scale as control_loss (~0.01–0.1) rather than 100–10,000×.
+# To recover km/h at inference: speed_pred_kmh = model_output * MAX_SPEED_KMH
+MAX_SPEED_KMH: float = 120.0
+
 
 class DrivingSequenceDataset(Dataset):
     """Dataset that returns fixed-length sequential clips from driving episodes.
@@ -263,7 +269,8 @@ class DrivingSequenceDataset(Dataset):
                 velocity: (seq_len, 3) float32  (z-score normalised)
                 loss_weight: (seq_len,) float32 — per-frame weight
                     (1.0 for moving frames, 0.1 for stationary)
-                target_speed: (seq_len,) float32  (km/h, for aux loss)
+                target_speed: (seq_len,) float32  (normalised ∈ [0, 1];
+                    multiply by MAX_SPEED_KMH to recover km/h)
                 driving_mode: (seq_len,) int64  (DrivingMode enum, for aux loss)
                 future_waypoints: (seq_len, 4, 2) float32  (relative x,y offsets
                     at t+5, t+10, t+15, t+20 frames, for aux loss)
@@ -330,7 +337,7 @@ class DrivingSequenceDataset(Dataset):
         images = (images - IMAGENET_MEAN) / IMAGENET_STD
 
         # Auxiliary targets
-        target_speed_t = torch.from_numpy(target_speed.copy())
+        target_speed_t = torch.from_numpy(target_speed.copy()) / MAX_SPEED_KMH
         # DrivingMode enum is 1-indexed (values 1-8); remap to 0-indexed for CrossEntropy.
         driving_mode_t = torch.from_numpy(driving_mode.copy()).long() - 1
         position_t = torch.from_numpy(position.copy())
