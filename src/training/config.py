@@ -54,6 +54,7 @@ class OptimizationConfig:
     gradient_clip: float = 1.0
     amp: bool = True
     ema_decay: float = 0.0  # 0 disables EMA
+    compile_encoder: bool = False  # torch.compile the RWKV encoder (mode='default')
 
 
 @dataclass

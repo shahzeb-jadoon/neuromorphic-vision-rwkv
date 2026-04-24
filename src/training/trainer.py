@@ -269,6 +269,11 @@ class Trainer:
             print(f"[trainer] device: {self.device}  (no GPU — training will be slow)")
 
         self.model = VisionRWKVDriver(cfg.model).to(self.device)
+        if cfg.optimization.compile_encoder and self.device.type == "cuda":
+            self.model.encoder = torch.compile(  # type: ignore[assignment]
+                self.model.encoder, mode="default"
+            )
+            print("[trainer] torch.compile applied to encoder (mode='default')")
         self.teacher: VisionRWKVDriver | None = self._build_teacher_if_needed()
 
         self.optimizer = torch.optim.AdamW(
