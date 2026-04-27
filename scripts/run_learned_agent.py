@@ -47,12 +47,15 @@ from agents.learned.learned_agent import LearnedAgent
 # Helpers
 # ---------------------------------------------------------------------------
 
+
 def get_windows_host_ip() -> str | None:
     """Return the Windows host IP visible from WSL2 (default gateway)."""
     try:
         result = subprocess.run(
             ["ip", "route", "show", "default"],
-            capture_output=True, text=True, check=True,
+            capture_output=True,
+            text=True,
+            check=True,
         )
         return result.stdout.strip().split()[2]
     except (subprocess.CalledProcessError, IndexError, FileNotFoundError):
@@ -172,6 +175,7 @@ def _attach_collision_sensor(
 # Single episode
 # ---------------------------------------------------------------------------
 
+
 def run_episode(
     client: carla.Client,
     checkpoint: str,
@@ -208,10 +212,12 @@ def run_episode(
 
             # Spectator chase cam — follows ego from behind and above
             tf = ego.get_transform()
-            spectator.set_transform(carla.Transform(
-                tf.location + carla.Location(z=10.0) - tf.get_forward_vector() * 10.0,
-                carla.Rotation(pitch=-25.0, yaw=tf.rotation.yaw),
-            ))
+            spectator.set_transform(
+                carla.Transform(
+                    tf.location + carla.Location(z=10.0) - tf.get_forward_vector() * 10.0,
+                    carla.Rotation(pitch=-25.0, yaw=tf.rotation.yaw),
+                )
+            )
 
             control = agent.run_step()
             ego.apply_control(control)
@@ -227,8 +233,14 @@ def run_episode(
                 break
 
             if step % 100 == 0:
-                _nav_names = {0: "LEFT", 1: "RIGHT", 2: "STRAIGHT", 3: "LANEFOLLOW",
-                              4: "CHGLEFT", 5: "CHGRIGHT"}
+                _nav_names = {
+                    0: "LEFT",
+                    1: "RIGHT",
+                    2: "STRAIGHT",
+                    3: "LANEFOLLOW",
+                    4: "CHGLEFT",
+                    5: "CHGRIGHT",
+                }
                 nav_label = _nav_names.get(agent.last_nav_cmd, str(agent.last_nav_cmd))
                 print(
                     f"  step={step:>4}  speed={speed_kmh:.1f} km/h  "
@@ -277,9 +289,10 @@ def run_episode(
         "reached_goal": final_ego_loc.distance(destination) < 5.0,
         "route_completion_pct": max(
             0.0,
-            1.0 - final_ego_loc.distance(destination)
-            / max(1.0, destination.distance(final_ego_loc))
-        ) * 100,
+            1.0
+            - final_ego_loc.distance(destination) / max(1.0, destination.distance(final_ego_loc)),
+        )
+        * 100,
     }
 
 
@@ -287,13 +300,15 @@ def run_episode(
 # Entry point
 # ---------------------------------------------------------------------------
 
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
     parser.add_argument("--checkpoint", required=True, help="Path to .pt checkpoint file")
     parser.add_argument(
-        "--host", default="auto",
+        "--host",
+        default="auto",
         help="CARLA host — 'auto' detects Windows host IP from WSL2 gateway (default: auto)",
     )
     parser.add_argument("--port", type=int, default=2000, help="CARLA server port (default: 2000)")
@@ -348,7 +363,9 @@ def main() -> None:
         print(f"Episodes completed: {len(all_results)}")
         print(f"Avg speed:          {np.mean([r['avg_speed_kmh'] for r in all_results]):.1f} km/h")
         print(f"Total collisions:   {sum(r['collisions'] for r in all_results)}")
-        print(f"Goal reached:       {sum(r['reached_goal'] for r in all_results)} / {len(all_results)}")
+        print(
+            f"Goal reached:       {sum(r['reached_goal'] for r in all_results)} / {len(all_results)}"
+        )
 
 
 if __name__ == "__main__":

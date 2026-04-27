@@ -92,10 +92,10 @@ def run_offline_eval(
     for ep_path in tqdm(episode_files, desc="Episodes"):
         # Load scalar arrays (small) eagerly; keep images dataset open for lazy access
         with h5py.File(ep_path, "r") as f:
-            steering = f[S.STEERING][:]     # (N,) float32
-            throttle = f[S.THROTTLE][:]     # (N,)
-            brake    = f[S.BRAKE][:]        # (N,)
-            nav_cmd  = f[S.NAV_COMMAND][:] # (N,) values 1-6
+            steering = f[S.STEERING][:]  # (N,) float32
+            throttle = f[S.THROTTLE][:]  # (N,)
+            brake = f[S.BRAKE][:]  # (N,)
+            nav_cmd = f[S.NAV_COMMAND][:]  # (N,) values 1-6
             n_frames = len(steering)
 
         # Remap nav: 1-6 → 0-5 (match training)
@@ -114,8 +114,12 @@ def run_offline_eval(
             images_ds = f[S.IMAGES]  # kept open; individual [t] reads one frame
             for t in range(n_frames):
                 img = torch.from_numpy(images_ds[t]).permute(2, 0, 1).float().div(255.0)
-                img = F.interpolate(img.unsqueeze(0), size=(resize_h, resize_w),
-                                    mode="bilinear", align_corners=False)
+                img = F.interpolate(
+                    img.unsqueeze(0),
+                    size=(resize_h, resize_w),
+                    mode="bilinear",
+                    align_corners=False,
+                )
                 img = (img - IMAGENET_MEAN) / IMAGENET_STD
                 img = img.unsqueeze(1).to(dev)  # (1, 1, 3, H, W)
 
@@ -134,10 +138,10 @@ def run_offline_eval(
         all_total_loss.append(np.mean(ep_steer_ae) + np.mean(ep_accel_ae))
 
     results = {
-        "n_episodes":  len(episode_files),
-        "n_frames":    len(all_steer_ae),
-        "steer_mae":   float(np.mean(all_steer_ae)),
-        "accel_mae":   float(np.mean(all_accel_ae)),
+        "n_episodes": len(episode_files),
+        "n_frames": len(all_steer_ae),
+        "steer_mae": float(np.mean(all_steer_ae)),
+        "accel_mae": float(np.mean(all_accel_ae)),
         "steer_mae_p95": float(np.percentile(all_steer_ae, 95)),
         "accel_mae_p95": float(np.percentile(all_accel_ae, 95)),
         "avg_episode_loss": float(np.mean(all_total_loss)),
@@ -146,7 +150,9 @@ def run_offline_eval(
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
     parser.add_argument("--checkpoint", required=True, help="Path to .pt checkpoint")
     parser.add_argument("--data-dir", required=True, help="Directory with episode_*.h5 files")
     parser.add_argument("--split", default="val", choices=["val", "train"])
