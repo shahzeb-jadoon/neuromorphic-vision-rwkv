@@ -6,11 +6,9 @@ with Truncated Backpropagation Through Time (TBPTT).
 Each item is a contiguous sequence of frames from a single episode,
 suitable for recurrent model training where temporal continuity matters.
 
-Schema v3 changes:
-    - Images are 3-camera panoramic (H, W_total, 3) where W_total = 3 * W_cam.
-    - Navigation commands use RoadOption values (LEFT=1 .. LANEFOLLOW=4).
-    - Position, rotation, traffic light state available as extras.
-    - Horizontal flip augmentation swaps left/right camera panels.
+Episodes are read through src.data.schema_adapter, which maps every supported schema
+to one sample format. Images are 3-camera panoramas (H, 3 * W_cam, 3), so the horizontal
+flip augmentation also swaps the left and right camera panels.
 """
 
 from __future__ import annotations
@@ -25,7 +23,7 @@ import torch
 import torch.nn.functional as F
 from torch.utils.data import Dataset, WeightedRandomSampler
 
-from src.data import hdf5_schema as S
+from src.data import schema_adapter
 
 # ImageNet normalization constants
 IMAGENET_MEAN = torch.tensor([0.485, 0.456, 0.406]).view(3, 1, 1)
@@ -128,23 +126,6 @@ class DrivingSequenceDataset(Dataset):
 
         self.episode_files = [all_episodes[i] for i in selected_indices]
 
-        # --- Schema version gate ---
-        # Fail fast if any episode is not schema v3+.  Older schemas
-        # lack panoramic images and RoadOption nav commands, leading to
-        # cryptic KeyErrors deep in training loops.
-        _MIN_SCHEMA = 3
-        for ep_path in self.episode_files:
-            with h5py.File(ep_path, "r") as f:
-                sv = 0
-                if S.METADATA_GROUP in f:
-                    sv = int(f[S.METADATA_GROUP].attrs.get(S.META_SCHEMA_VERSION, 0))
-                if sv < _MIN_SCHEMA:
-                    raise ValueError(
-                        f"Episode {ep_path.name} has schema_version={sv} "
-                        f"(minimum required: {_MIN_SCHEMA}).  Re-collect "
-                        f"with the current ExpertCollector to produce v3 data."
-                    )
-
         # Per-worker HDF5 file handle cache (fork-safe via worker_init_fn)
         self._h5_cache: dict[int, h5py.File] = {}
 
@@ -155,16 +136,10 @@ class DrivingSequenceDataset(Dataset):
 
         for ep_idx, ep_path in enumerate(self.episode_files):
             with h5py.File(ep_path, "r") as f:
-                n_frames = f[S.IMAGES].shape[0]
-                nav_cmds = f[S.NAV_COMMAND][:]
-
-                # Truncate at collision frame to exclude post-collision
-                # garbage data (vehicle stuck/spinning)
-                if S.METADATA_GROUP in f and S.META_COLLISION_FRAME in f[S.METADATA_GROUP].attrs:
-                    collision_frame = int(f[S.METADATA_GROUP].attrs[S.META_COLLISION_FRAME])
-                    if collision_frame > 0:
-                        n_frames = min(n_frames, collision_frame)
-                        nav_cmds = nav_cmds[:n_frames]
+                schema_adapter.check_supported(f, ep_path.name)
+                # Frames after a collision (vehicle stuck or spinning) are dropped.
+                n_frames = schema_adapter.usable_frames(f)
+                nav_cmds = schema_adapter.nav_commands(f)
 
             _episode_nav_arrays.append(nav_cmds)
 
@@ -278,35 +253,24 @@ class DrivingSequenceDataset(Dataset):
         ep_idx, start = self.clips[idx]
         end = start + self.seq_len
 
-        f = self._get_h5(ep_idx)
-        images = f[S.IMAGES][start:end]  # (T, H, W_total, 3) uint8
-        steering = f[S.STEERING][start:end]
-        throttle = f[S.THROTTLE][start:end]
-        brake = f[S.BRAKE][start:end]
-        nav_cmd = f[S.NAV_COMMAND][start:end]
-        velocity = f[S.VELOCITY][start:end]
-
-        # Auxiliary loss targets
-        target_speed = f[S.TARGET_SPEED][start:end]
-        driving_mode = f[S.DRIVING_MODE][start:end]
-        position = f[S.POSITION][start:end]
+        wp_offsets = [5, 10, 15, 20]
+        w = schema_adapter.read_window(self._get_h5(ep_idx), start, end, max(wp_offsets))
 
         # Convert images: uint8 HWC → float32 CHW [0, 1]
-        images = torch.from_numpy(images.copy()).permute(0, 3, 1, 2).float() / 255.0
+        images = torch.from_numpy(w.images.copy()).permute(0, 3, 1, 2).float() / 255.0
 
-        steering = torch.from_numpy(steering.copy())
-        throttle = torch.from_numpy(throttle.copy())
-        brake = torch.from_numpy(brake.copy())
+        steering = torch.from_numpy(w.steering.copy())
+        throttle = torch.from_numpy(w.throttle.copy())
+        brake = torch.from_numpy(w.brake.copy())
         acceleration = throttle - brake
         controls = torch.stack([steering, acceleration], dim=-1)
 
-        nav_cmd = torch.from_numpy(nav_cmd.copy()).long()
         # Remap RoadOption values 1-6 → 0-5 for nn.Embedding(6, dim).
         # Schema v3 values ∈ {1..4} (LEFT..LANEFOLLOW), extended to {1..6}
         # with CHANGELANELEFT=5, CHANGELANERIGHT=6 via extrapolation or
         # future expert collections.
-        nav_cmd = nav_cmd - 1
-        velocity = torch.from_numpy(velocity.copy())
+        nav_cmd = torch.from_numpy(w.nav_command.copy()).long() - 1
+        velocity = torch.from_numpy(w.velocity.copy())
 
         # Per-frame loss weight: down-weight stationary frames.
         # Compute speed from raw velocity BEFORE z-score normalisation.
@@ -337,20 +301,14 @@ class DrivingSequenceDataset(Dataset):
         images = (images - IMAGENET_MEAN) / IMAGENET_STD
 
         # Auxiliary targets
-        target_speed_t = torch.from_numpy(target_speed.copy()) / MAX_SPEED_KMH
-        # DrivingMode enum is 1-indexed (values 1-8); remap to 0-indexed for CrossEntropy.
-        driving_mode_t = torch.from_numpy(driving_mode.copy()).long() - 1
-        position_t = torch.from_numpy(position.copy())
+        target_speed_t = torch.from_numpy(w.target_speed.copy()) / MAX_SPEED_KMH
+        # DrivingMode values 1-8 (newer modes folded by the adapter) → 0-7 for CrossEntropy.
+        driving_mode_t = torch.from_numpy(w.driving_mode.copy()).long() - 1
 
-        # Future waypoints: relative (x, y) offsets at t+5, t+10, t+15, t+20.
-        # Read a contiguous slice covering the furthest future offset, then
-        # index into it.  Clamp to episode length for frames near the end.
-        wp_offsets = [5, 10, 15, 20]
-        max_offset = max(wp_offsets)
-        ep_len = f[S.POSITION].shape[0]
-        # Read from clip start to (clip end + max_offset), clamped to ep length
-        future_end = min(end + max_offset, ep_len)
-        all_pos = torch.from_numpy(f[S.POSITION][start:future_end].copy())
+        # Future waypoints: relative (x, y) offsets at t+5, t+10, t+15, t+20,
+        # clamped to the episode end for frames near it.
+        all_pos = torch.from_numpy(w.position.copy())
+        position_t = all_pos[: self.seq_len]
         future_wps = []
         for offset in wp_offsets:
             # Indices relative to `start` in the all_pos buffer

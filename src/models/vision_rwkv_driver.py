@@ -41,7 +41,7 @@ from src.models.tokenizer import VisionTokenizer
 # Auxiliary prediction heads (Phase 2)
 # ---------------------------------------------------------------------------
 
-N_DRIVING_MODES = 8  # DrivingMode enum in privileged_expert.py
+N_DRIVING_MODES = 8  # sample-format classes; src/data/schema_adapter.py folds newer modes
 N_WAYPOINT_OFFSETS = 4  # Future position predictions (t+5, t+10, t+15, t+20)
 
 

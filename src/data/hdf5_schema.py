@@ -92,6 +92,7 @@ DRIVING_MODE_NAMES: dict[int, str] = {
     6: "PedestrianStop",
     7: "EmergencyStop",
     8: "StopSignStop",
+    9: "YieldStop",
 }
 VALID_DRIVING_MODES = set(DRIVING_MODE_NAMES)
 TRAFFIC_LIGHT_STATE_NAMES: dict[int, str] = {0: "None", 1: "Green", 2: "Yellow", 3: "Red"}
