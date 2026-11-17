@@ -64,6 +64,55 @@ EOF
 
 These files exist only on the machine that produced them. They have no second copy.
 
+### Offline evaluation: v3 baselines of record (2026-11-17)
+
+`best.pt` on the run's validation split, recorded before the v3 dataset was retired:
+219 episodes, 1,457 clips of 32 frames (stride 512, resized to 160×960), scored on
+frames 8–31 after the burn-in, 34,968 frames in all. Baselines are fitted on the
+training split's labels (880 episodes, 2,911,535 frames). Turning frames have
+|expert steering| > 0.1.
+
+```bash
+python scripts/evaluate_offline.py --checkpoint runs_fast/fastsafe_20260424_093210/checkpoints/best.pt
+```
+
+The trainer's own validation metric is reproduced exactly: steering MAE 0.054577 and
+acceleration MAE 0.201928 over the first 50 batches, frame-weighted, as logged at
+step 6,000.
+
+Pooled, with the training frame weights (stationary frames count 0.1; turning frames
+are 18.2% of the weight):
+
+| Predictor | Steering MAE | Turn steering MAE | Turn sign accuracy | Accel MAE | Steering corr. |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| `best.pt` | 0.0576 | 0.2375 | 0.506 | 0.2000 | 0.026 |
+| Always zero | 0.0547 | 0.2371 | 0.000 | 0.4303 | — |
+| Always the training mean | 0.0565 | 0.2376 | 0.453 | 0.3934 | — |
+| Per-command training mean | 0.0594 | 0.2165 | 0.681 | 0.3688 | 0.241 |
+
+Pooled, every frame equal (turning frames are 15.9% of frames):
+
+| Predictor | Steering MAE | Turn steering MAE | Turn sign accuracy | Accel MAE | Steering corr. |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| `best.pt` | 0.0526 | 0.2456 | 0.525 | 0.3686 | 0.026 |
+| Always zero | 0.0500 | 0.2455 | 0.000 | 0.4544 | — |
+| Always the training mean | 0.0518 | 0.2456 | 0.496 | 0.4414 | — |
+| Per-command training mean | 0.0596 | 0.2261 | 0.677 | 0.4058 | 0.241 |
+
+What the numbers say about `best.pt`:
+
+- Steering is no better than always predicting zero, and on turning frames its sign is
+  right about half the time. A blind per-command average turns better.
+- It ignores the navigation command: mean steering on LEFT is +0.004 (expert −0.057)
+  and on RIGHT +0.005 (expert +0.065), weighted.
+- It ignores the image layout: the camera-swap score is −0.995, so mirroring the
+  panorama leaves the steering unchanged. Its steering spread is 0.009 against the
+  expert's 0.122.
+- It did learn something about speed: acceleration MAE 0.2000, against 0.3688 for the
+  best baseline.
+
+The JSON report and the per-frame arrays are in the run's `eval/` folder.
+
 ---
 
 ## Other local runs (not reported)
