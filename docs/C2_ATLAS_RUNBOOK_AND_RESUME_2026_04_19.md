@@ -56,7 +56,7 @@ Notes:
 ### 2) Prepare environment
 
 ```bash
-cd ~/projects/neuromorphic-vision-rwkv
+cd neuromorphic-vision-rwkv
 conda activate rwkv
 mkdir -p data/atlas_cpp/logs
 ```
@@ -294,7 +294,7 @@ Use this after running:
 #### E1) Check completion matrix + validation gate status
 
 ```bash
-cd ~/projects/neuromorphic-vision-rwkv
+cd neuromorphic-vision-rwkv
 ~/miniconda3/envs/rwkv/bin/python - <<'PY'
 from pathlib import Path
 import json
@@ -330,7 +330,7 @@ Expected healthy result:
 #### E2) Verify route waypoint contract bounds from route files
 
 ```bash
-cd ~/projects/neuromorphic-vision-rwkv
+cd neuromorphic-vision-rwkv
 ~/miniconda3/envs/rwkv/bin/python - <<'PY'
 from pathlib import Path
 import json
@@ -369,7 +369,7 @@ Expected healthy result:
 #### E3) Verify route schema + command distribution sanity
 
 ```bash
-cd ~/projects/neuromorphic-vision-rwkv
+cd neuromorphic-vision-rwkv
 ~/miniconda3/envs/rwkv/bin/python - <<'PY'
 from pathlib import Path
 import json
@@ -404,7 +404,7 @@ Expected healthy result:
 #### E4) Force clean rebuild test (disable resume)
 
 ```bash
-cd ~/projects/neuromorphic-vision-rwkv
+cd neuromorphic-vision-rwkv
 ~/miniconda3/envs/rwkv/bin/python scripts/build_route_atlas_cpp.py \
   --town Town03 Town05 Town06 Town10HD \
   --input-mode topology-cache \
@@ -430,7 +430,7 @@ If a `python - <<'PY'` command fails with syntax/indentation errors, check that:
 Safe template:
 
 ```bash
-cd ~/projects/neuromorphic-vision-rwkv
+cd neuromorphic-vision-rwkv
 ~/miniconda3/envs/rwkv/bin/python - <<'PY'
 print("ok")
 PY

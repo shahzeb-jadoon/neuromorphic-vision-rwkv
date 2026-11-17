@@ -2,8 +2,7 @@
 """Manual CARLA driving with SAT overlays and lane-direction HUD.
 
 This script spawns an ego vehicle and lets you drive it manually while
-rendering the same visualization layers used by the interactive episode
-reviewer:
+rendering the same visualization layers as scripts/review_episode_interactive.py:
 
 - SAT corridor (magenta)
 - Next 5 waypoints (green) + target point/line (cyan)
