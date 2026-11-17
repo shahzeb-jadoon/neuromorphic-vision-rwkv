@@ -44,9 +44,9 @@ def main():
 
     towns = ["Town01", "Town03", "Town04", "Town05", "Town06", "Town07", "Town10HD"]
 
-    print(f"\n{'='*80}")
+    print(f"\n{'=' * 80}")
     print("CARLA Town Sign & Feature Inventory")
-    print(f"{'='*80}\n")
+    print(f"{'=' * 80}\n")
 
     summary = []
 
@@ -153,11 +153,11 @@ def main():
         print()
 
     # --- Summary Table ---
-    print(f"\n{'='*80}")
+    print(f"\n{'=' * 80}")
     print("SUMMARY TABLE")
-    print(f"{'='*80}")
+    print(f"{'=' * 80}")
     print(f"{'Town':<12} {'Stop(pole)':<12} {'Stop(road)':<12} {'Yield':<8} {'TL':<8} {'Speed':<8}")
-    print(f"{'-'*12} {'-'*12} {'-'*12} {'-'*8} {'-'*8} {'-'*8}")
+    print(f"{'-' * 12} {'-' * 12} {'-' * 12} {'-' * 8} {'-' * 8} {'-' * 8}")
     for info in summary:
         if "error" in info:
             print(f"{info['town']:<12} ERROR: {info['error']}")

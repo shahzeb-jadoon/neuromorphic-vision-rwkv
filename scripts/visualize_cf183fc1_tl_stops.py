@@ -172,14 +172,14 @@ def _parse_args() -> argparse.Namespace:
         nargs="*",
         default=[],
         help=(
-            "Additional width-scale overlays for stop zones; " "example: --width-overlays 0.75 0.65"
+            "Additional width-scale overlays for stop zones; example: --width-overlays 0.75 0.65"
         ),
     )
     parser.add_argument(
         "--show-no-stop-tls",
         action=argparse.BooleanOptionalAction,
         default=False,
-        help=("Include TLs with no near-stop frame in this episode " "(these display as F?)"),
+        help=("Include TLs with no near-stop frame in this episode (these display as F?)"),
     )
     return parser.parse_args()
 
@@ -219,13 +219,11 @@ def _resolve_episode_and_tl_ids(
 
     if episode_arg is None:
         raise SystemExit(
-            "No --episode provided and no default profile for this town. "
-            "Pass --episode explicitly."
+            "No --episode provided and no default profile for this town. Pass --episode explicitly."
         )
     if tl_ids is None or len(tl_ids) == 0:
         raise SystemExit(
-            "No --tl-ids provided and no default profile for this town. "
-            "Pass --tl-ids explicitly."
+            "No --tl-ids provided and no default profile for this town. Pass --tl-ids explicitly."
         )
 
     episode_path = _resolve_episode_path(episode_arg)

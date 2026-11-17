@@ -2116,9 +2116,7 @@ def _build_junction_combo(incoming: EdgeGeometry, outgoing: EdgeGeometry) -> Jun
         int(incoming.end_lane_id),
     )
     outgoing_lane = (int(outgoing.road_id), int(outgoing.section_id), int(outgoing.lane_id))
-    combo_id = (
-        f"j{junction_id}|n{via_node_id}|" f"in:{incoming.segment_id}|out:{outgoing.segment_id}"
-    )
+    combo_id = f"j{junction_id}|n{via_node_id}|in:{incoming.segment_id}|out:{outgoing.segment_id}"
 
     return JunctionCombo(
         combo_id=combo_id,
@@ -2599,10 +2597,7 @@ def _load_or_build_edges(
                     )
                 ) from exc
             logger.warning(
-                (
-                    "Ignoring stale/invalid topology cache %s (%s); "
-                    "falling back to live extraction"
-                ),
+                ("Ignoring stale/invalid topology cache %s (%s); falling back to live extraction"),
                 cache_path,
                 exc,
             )

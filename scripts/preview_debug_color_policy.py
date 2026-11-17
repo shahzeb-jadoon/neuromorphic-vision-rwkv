@@ -1319,11 +1319,9 @@ def run_town_preview(
 
             if tick_idx % int(max(1, round(1.0 / args.fixed_delta))) == 0:
                 veh_counts = (
-                    f"{counts.vehicles_white}/"
-                    f"{counts.vehicles_yellow}/"
-                    f"{counts.vehicles_red}"
+                    f"{counts.vehicles_white}/{counts.vehicles_yellow}/{counts.vehicles_red}"
                 )
-                ped_counts = f"{counts.peds_white}/" f"{counts.peds_yellow}/" f"{counts.peds_red}"
+                ped_counts = f"{counts.peds_white}/{counts.peds_yellow}/{counts.peds_red}"
                 print(
                     f"  t={elapsed:5.1f}s "
                     f"veh(W/Y/R)={veh_counts} "

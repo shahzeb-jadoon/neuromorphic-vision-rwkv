@@ -83,18 +83,16 @@ def analyse_episode(ep_id: str, town: str) -> None:
     N = len(wpd)
     spd = speed_mps(vel)
 
-    print(f"\n{'='*70}")
+    print(f"\n{'=' * 70}")
     print(f"EPISODE {ep_id}  [{town}]  N={N} frames")
-    print(f"{'='*70}")
+    print(f"{'=' * 70}")
     print(f"  route_completion: {rc[0]:.3f} → {rc[-1]:.3f}")
     print(
         f"  speed:            min={spd.min():.2f}  max={spd.max():.2f}  mean={spd.mean():.2f} m/s"
     )
-    print(
-        f"  wp_head_dist:     min={wpd.min():.2f}  " f"max={wpd.max():.2f}  mean={wpd.mean():.2f} m"
-    )
+    print(f"  wp_head_dist:     min={wpd.min():.2f}  max={wpd.max():.2f}  mean={wpd.mean():.2f} m")
     print(f"  wp_buffer_size:   min={wps.min()}  max={wps.max()}")
-    print(f"  gap_fill_diverged: {gfd.sum()} frames ({100*gfd.mean():.1f}%)")
+    print(f"  gap_fill_diverged: {gfd.sum()} frames ({100 * gfd.mean():.1f}%)")
 
     # --- 1. Route completion regressions ---
     rc_diff = np.diff(rc)
@@ -103,7 +101,7 @@ def analyse_episode(ep_id: str, town: str) -> None:
         print(f"\n  [REGRESSION] route_completion went BACKWARD at {len(rc_reg)} frames:")
         for f in rc_reg[:10]:
             print(
-                f"    f{f:5d}: rc {rc[f]:.4f} → {rc[f+1]:.4f}  "
+                f"    f{f:5d}: rc {rc[f]:.4f} → {rc[f + 1]:.4f}  "
                 f"mode={MODE_NAMES.get(mode[f], '?')}  spd={spd[f]:.2f}"
             )
     else:
@@ -123,7 +121,7 @@ def analyse_episode(ep_id: str, town: str) -> None:
         )
         for f in jump_up[:15]:
             print(
-                f"    f{f:5d}: {wpd[f]:.1f}m → {wpd[f+1]:.1f}m  Δ={wpd_diff[f]:+.1f}  "
+                f"    f{f:5d}: {wpd[f]:.1f}m → {wpd[f + 1]:.1f}m  Δ={wpd_diff[f]:+.1f}  "
                 f"mode={MODE_NAMES.get(mode[f], '?')}  nav={NAV_NAMES.get(nav[f], '?')}  "
                 f"spd={spd[f]:.2f}"
             )
@@ -134,7 +132,7 @@ def analyse_episode(ep_id: str, town: str) -> None:
         print(f"\n  [JUMP-DOWN >10m] wp_head_dist jumps DOWN at {len(jump_dn)} frames (catchup):")
         for f in jump_dn[:15]:
             print(
-                f"    f{f:5d}: {wpd[f]:.1f}m → {wpd[f+1]:.1f}m  Δ={wpd_diff[f]:+.1f}  "
+                f"    f{f:5d}: {wpd[f]:.1f}m → {wpd[f + 1]:.1f}m  Δ={wpd_diff[f]:+.1f}  "
                 f"mode={MODE_NAMES.get(mode[f], '?')}  nav={NAV_NAMES.get(nav[f], '?')}  "
                 f"spd={spd[f]:.2f}"
             )
@@ -166,7 +164,7 @@ def analyse_episode(ep_id: str, town: str) -> None:
                 f"wpd {wpd[f0]:.1f}→{wpd[f1]:.1f}m (+{grow:.1f}m) "
                 f"avg_spd={avg_spd:.2f}m/s  "
                 f"mode={MODE_NAMES.get(mode[f0], '?')}..{MODE_NAMES.get(mode[f1], '?')}  "
-                f"nav={NAV_NAMES.get(nav[f0],'?')}"
+                f"nav={NAV_NAMES.get(nav[f0], '?')}"
             )
     else:
         print("\n  [OK] no sustained wpd growth while moving (no frozen-buffer signature)")
@@ -239,8 +237,9 @@ def analyse_episode(ep_id: str, town: str) -> None:
         for idx, fs in enumerate(arc_starts[:10]):
             fe = arc_ends[arc_ends > fs][0] if len(arc_ends[arc_ends > fs]) else N - 1
             dur = fe - fs
+            wpd_span = f"{wpd[fs]:.1f}→{wpd[fe]:.1f}m"
             print(
-                f"    arc#{idx+1}: f{fs:5d}→f{fe:5d} ({dur}fr)  wpd: {wpd[fs]:.1f}→{wpd[fe]:.1f}m  "
+                f"    arc#{idx + 1}: f{fs:5d}→f{fe:5d} ({dur}fr)  wpd: {wpd_span}  "
                 f"mode_start={MODE_NAMES.get(mode[fs], '?')}  spd_avg={spd[fs:fe].mean():.2f}"
             )
 
@@ -248,7 +247,7 @@ def analyse_episode(ep_id: str, town: str) -> None:
     final_rc = rc[-1]
     final_mode = mode[-1]
     print(
-        f"\n  SUMMARY: final rc={final_rc:.4f}  final_mode={MODE_NAMES.get(final_mode,'?')}  "
+        f"\n  SUMMARY: final rc={final_rc:.4f}  final_mode={MODE_NAMES.get(final_mode, '?')}  "
         f"last_wpd={wpd[-1]:.1f}m  last_spd={spd[-1]:.2f}m/s"
     )
 

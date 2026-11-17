@@ -1050,9 +1050,9 @@ def test_fill_junction_gaps_bezier_goes_to_arc_buffer_not_wp_buffer() -> None:
     # No arc waypoints in _wp_buffer (they should only be in _arc_buffer).
     arc_wps = {wp for wp, _ in expert._arc_buffer}
     for wp in route_wps:
-        assert (
-            wp not in arc_wps
-        ), f"arc waypoint leaked into _wp_buffer at x={wp.transform.location.x}"
+        assert wp not in arc_wps, (
+            f"arc waypoint leaked into _wp_buffer at x={wp.transform.location.x}"
+        )
 
 
 def test_fill_junction_gaps_does_not_start_second_arc_while_one_is_active() -> None:
@@ -1074,9 +1074,9 @@ def test_fill_junction_gaps_does_not_start_second_arc_while_one_is_active() -> N
     expert._fill_junction_gaps(None)
 
     # Active arc must not have been replaced.
-    assert (
-        expert._arc_buffer[0][0] is sentinel_arc_wp
-    ), "_arc_buffer was overwritten while an arc was already active"
+    assert expert._arc_buffer[0][0] is sentinel_arc_wp, (
+        "_arc_buffer was overwritten while an arc was already active"
+    )
 
 
 def test_fill_junction_gaps_allows_rpc_retry_after_bezier_failure() -> None:

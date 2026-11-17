@@ -230,7 +230,7 @@ def main() -> None:
     print(f"Episode: {args.episode}")
     print(f"Map: {carla_map.name}")
     if skipped_anchors:
-        print("Skipped anchors out of range " f"for n_frames={n_frames}: {sorted(skipped_anchors)}")
+        print(f"Skipped anchors out of range for n_frames={n_frames}: {sorted(skipped_anchors)}")
     print(
         "Thresholds: "
         f"yaw_diff>{args.yaw_threshold:.1f}deg, "
