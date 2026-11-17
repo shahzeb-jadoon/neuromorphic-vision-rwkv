@@ -104,23 +104,23 @@ def test_streaming_write(
     avail_before = get_mem_available_mb()
     io_before = get_io_write_bytes()
 
-    print(f"\n{'='*60}")
+    print(f"\n{'=' * 60}")
     print("  Streaming HDF5 Write Test")
     print(f"  Frames: {n_frames}, Resolution: {w}x{h}x{c}")
-    print(f"  Raw frame size: {h*w*c/1024/1024:.2f} MB")
-    print(f"  Total raw data: {n_frames*h*w*c/1024/1024/1024:.2f} GB")
+    print(f"  Raw frame size: {h * w * c / 1024 / 1024:.2f} MB")
+    print(f"  Total raw data: {n_frames * h * w * c / 1024 / 1024 / 1024:.2f} GB")
     print(f"  Compression: gzip level {compression}")
     print(
         f"  Flush interval: {'never' if not flush_interval else f'every {flush_interval} frames'}"
     )
     print(f"  Output: {filepath}")
-    print(f"{'='*60}")
+    print(f"{'=' * 60}")
     print("\n  Baseline:")
     print(f"    Page cache:   {cache_before:.0f} MB")
     print(f"    MemAvailable: {avail_before:.0f} MB")
     print(f"    Python RSS:   {rss_before:.0f} MB")
     if io_before >= 0:
-        print(f"    Disk written: {io_before/1024/1024:.0f} MB")
+        print(f"    Disk written: {io_before / 1024 / 1024:.0f} MB")
 
     # Create HDF5 file exactly like _StreamingEpisodeWriter
     f = h5py.File(filepath, "w")
@@ -154,7 +154,7 @@ def test_streaming_write(
             disk_wr = (io_now - io_before) / 1024 / 1024 if io_before >= 0 else -1
             rate = (cache_now - cache_before) / elapsed if elapsed > 0 else 0
             print(
-                f"  {i+1:>8} {elapsed:>7.1f}s {cache_now:>7.0f}M {rss_now:>7.0f}M "
+                f"  {i + 1:>8} {elapsed:>7.1f}s {cache_now:>7.0f}M {rss_now:>7.0f}M "
                 f"{disk_wr:>9.0f}M {rate:>8.1f}M/s"
             )
 
@@ -245,9 +245,9 @@ def test_write_with_periodic_sync(
     gc.collect()
     cache_before = get_cache_mb()
 
-    print(f"\n{'='*60}")
+    print(f"\n{'=' * 60}")
     print(f"  Streaming Write + Periodic sync (every {sync_interval} frames)")
-    print(f"{'='*60}")
+    print(f"{'=' * 60}")
 
     f = h5py.File(filepath, "w")
     ds = f.create_dataset(
@@ -275,7 +275,9 @@ def test_write_with_periodic_sync(
             delta = cache_now - cache_before
             if cache_now > peak_cache:
                 peak_cache = cache_now
-            print(f"  {i+1:>8} {time.time()-t0:>7.1f}s {cache_now:>7.0f}M {delta:>+10.0f}M   sync")
+            print(
+                f"  {i + 1:>8} {time.time() - t0:>7.1f}s {cache_now:>7.0f}M {delta:>+10.0f}M   sync"
+            )
 
     elapsed = time.time() - t0
     cache_after = get_cache_mb()
@@ -313,9 +315,9 @@ def test_write_with_posix_fadvise(
     gc.collect()
     cache_before = get_cache_mb()
 
-    print(f"\n{'='*60}")
+    print(f"\n{'=' * 60}")
     print("  Streaming Write + posix_fadvise(DONTNEED)")
-    print(f"{'='*60}")
+    print(f"{'=' * 60}")
 
     f = h5py.File(filepath, "w")
     ds = f.create_dataset(
@@ -359,9 +361,8 @@ def test_write_with_posix_fadvise(
             delta = cache_now - cache_before
             if cache_now > peak_cache:
                 peak_cache = cache_now
-            print(
-                f"  {i+1:>8} {time.time()-t0:>7.1f}s {cache_now:>7.0f}M {delta:>+10.0f}M   fadvise"
-            )
+            elapsed = time.time() - t0
+            print(f"  {i + 1:>8} {elapsed:>7.1f}s {cache_now:>7.0f}M {delta:>+10.0f}M   fadvise")
 
     elapsed = time.time() - t0
     cache_after = get_cache_mb()
@@ -389,11 +390,11 @@ def main() -> None:
 
     m = get_meminfo()
     print("\n  System memory:")
-    print(f"    Total:     {m['MemTotal']/1024:.0f} MB")
-    print(f"    Free:      {m['MemFree']/1024:.0f} MB")
-    print(f"    Available: {m['MemAvailable']/1024:.0f} MB")
-    print(f"    Cached:    {m['Cached']/1024:.0f} MB")
-    print(f"    Buffers:   {m['Buffers']/1024:.0f} MB")
+    print(f"    Total:     {m['MemTotal'] / 1024:.0f} MB")
+    print(f"    Free:      {m['MemFree'] / 1024:.0f} MB")
+    print(f"    Available: {m['MemAvailable'] / 1024:.0f} MB")
+    print(f"    Cached:    {m['Cached'] / 1024:.0f} MB")
+    print(f"    Buffers:   {m['Buffers'] / 1024:.0f} MB")
 
     out_dir = Path("data/test_hdf5_cache")
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -420,11 +421,11 @@ def main() -> None:
     r3 = test_write_with_posix_fadvise(out_dir, n_frames=1000, advise_interval=100)
 
     # Summary
-    print(f"\n{'='*60}")
+    print(f"\n{'=' * 60}")
     print("  SUMMARY")
-    print(f"{'='*60}")
+    print(f"{'=' * 60}")
     print(f"\n  {'Test':<35} {'Cache Growth':>14} {'File Size':>10}")
-    print(f"  {'-'*35} {'-'*14} {'-'*10}")
+    print(f"  {'-' * 35} {'-' * 14} {'-' * 10}")
     print(
         f"  {'No flush (current behavior)':<35} {r1['cache_growth_mb']:>+12.0f} MB {r1['file_mb']:>8.0f} MB"  # noqa: E501
     )
@@ -437,7 +438,7 @@ def main() -> None:
 
     print(f"\n  Raw data written: {r1['raw_gb']:.2f} GB")
     print(f"  Compressed file:  {r1['file_mb']:.0f} MB")
-    print(f"  Compression ratio: {r1['raw_gb']*1024/r1['file_mb']:.2f}x")
+    print(f"  Compression ratio: {r1['raw_gb'] * 1024 / r1['file_mb']:.2f}x")
 
     if r1["cache_growth_mb"] > 500:
         print("\n  *** CONFIRMED: HDF5 writes accumulate in Linux page cache ***")
@@ -446,11 +447,11 @@ def main() -> None:
         print("  This is NOT a memory leak — it's the Linux kernel caching writes.")
         if r2["peak_cache_growth_mb"] < r1["cache_growth_mb"] * 0.5:
             print(
-                f"\n  Periodic sync REDUCES cache growth by {(1 - r2['peak_cache_growth_mb']/r1['cache_growth_mb'])*100:.0f}%"  # noqa: E501
+                f"\n  Periodic sync REDUCES cache growth by {(1 - r2['peak_cache_growth_mb'] / r1['cache_growth_mb']) * 100:.0f}%"  # noqa: E501
             )
         if r3["peak_cache_growth_mb"] < r1["cache_growth_mb"] * 0.5:
             print(
-                f"  posix_fadvise REDUCES cache growth by {(1 - r3['peak_cache_growth_mb']/r1['cache_growth_mb'])*100:.0f}%"  # noqa: E501
+                f"  posix_fadvise REDUCES cache growth by {(1 - r3['peak_cache_growth_mb'] / r1['cache_growth_mb']) * 100:.0f}%"  # noqa: E501
             )
 
     # Clean up

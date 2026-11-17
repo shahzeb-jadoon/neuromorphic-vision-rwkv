@@ -338,9 +338,9 @@ def main() -> None:
     all_results = []
     try:
         for ep in range(args.n_episodes):
-            print(f"\n{'='*60}")
+            print(f"\n{'=' * 60}")
             print(f"Episode {ep + 1} / {args.n_episodes}")
-            print(f"{'='*60}")
+            print(f"{'=' * 60}")
             result = run_episode(
                 client,
                 checkpoint=args.checkpoint,
@@ -357,15 +357,14 @@ def main() -> None:
         print("\n[main] Ctrl+C received — episode cleanup already handled above.")
 
     if all_results:
-        print(f"\n{'='*60}")
+        print(f"\n{'=' * 60}")
         print("SUMMARY")
-        print(f"{'='*60}")
+        print(f"{'=' * 60}")
         print(f"Episodes completed: {len(all_results)}")
         print(f"Avg speed:          {np.mean([r['avg_speed_kmh'] for r in all_results]):.1f} km/h")
         print(f"Total collisions:   {sum(r['collisions'] for r in all_results)}")
-        print(
-            f"Goal reached:       {sum(r['reached_goal'] for r in all_results)} / {len(all_results)}"
-        )
+        reached = sum(r["reached_goal"] for r in all_results)
+        print(f"Goal reached:       {reached} / {len(all_results)}")
 
 
 if __name__ == "__main__":

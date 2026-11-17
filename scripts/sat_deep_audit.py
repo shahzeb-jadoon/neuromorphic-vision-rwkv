@@ -160,9 +160,9 @@ def audit(data_dir: str, max_episodes: int = 100) -> None:
 
     sat_hits = both_detect + sat_only
 
-    print(f"\n{'='*70}")
+    print(f"\n{'=' * 70}")
     print("A0: OVERALL SAT vs LATERAL DETECTION")
-    print(f"{'='*70}")
+    print(f"{'=' * 70}")
     print(f"Total vehicle observations (all dirs):  {total_vehicle_obs}")
     print(f"Ahead + same direction:                 {total_ahead_same}")
     denom = max(total_ahead_same, 1)
@@ -180,9 +180,9 @@ def audit(data_dir: str, max_episodes: int = 100) -> None:
     print(f"  SAT total:            {sat_hits} ({sat_pct:.1f}%)")
     print(f"  LAT total:            {lat_total} ({lat_total_pct:.1f}%)")
 
-    print(f"\n{'='*70}")
+    print(f"\n{'=' * 70}")
     print("A1: CORRIDOR SEGMENT COUNT DISTRIBUTION")
-    print(f"{'='*70}")
+    print(f"{'=' * 70}")
     seg_arr = np.array(seg_counts)
     if len(seg_arr) > 0:
         print(f"  Mean segments: {seg_arr.mean():.1f}")
@@ -192,8 +192,8 @@ def audit(data_dir: str, max_episodes: int = 100) -> None:
         zero_ct = int((seg_arr == 0).sum())
         one_ct = int((seg_arr == 1).sum())
         seg_n = len(seg_arr)
-        print(f"  0 segments:    {zero_ct} ({zero_ct/seg_n*100:.1f}%)")
-        print(f"  1 segment:     {one_ct} ({one_ct/seg_n*100:.1f}%)")
+        print(f"  0 segments:    {zero_ct} ({zero_ct / seg_n * 100:.1f}%)")
+        print(f"  1 segment:     {one_ct} ({one_ct / seg_n * 100:.1f}%)")
         print(f"  2-5 segs:      {((seg_arr >= 2) & (seg_arr <= 5)).sum()}")
         print(f"  6-10 segs:     {((seg_arr >= 6) & (seg_arr <= 10)).sum()}")
         print(f"  11-20 segs:    {((seg_arr >= 11) & (seg_arr <= 20)).sum()}")
@@ -213,9 +213,9 @@ def audit(data_dir: str, max_episodes: int = 100) -> None:
         hs = np.array(hit_n_segs)
         print(f"    Mean: {hs.mean():.1f}, Median: {np.median(hs):.0f}")
 
-    print(f"\n{'='*70}")
+    print(f"\n{'=' * 70}")
     print("A2: LATERAL POSITION OF SAT MISSES")
-    print(f"{'='*70}")
+    print(f"{'=' * 70}")
     if miss_laterals:
         ml = np.array(miss_laterals)
         print("  Misses within |lat| < 2.5m (by definition):")
@@ -234,9 +234,9 @@ def audit(data_dir: str, max_episodes: int = 100) -> None:
         print(f"    Mean |lateral|: {np.abs(hl).mean():.2f}m")
         print(f"    Median |lateral|: {np.median(np.abs(hl)):.2f}m")
 
-    print(f"\n{'='*70}")
+    print(f"\n{'=' * 70}")
     print("A3: DISTANCE DISTRIBUTION — MISSES vs HITS")
-    print(f"{'='*70}")
+    print(f"{'=' * 70}")
     if miss_distances:
         md = np.array(miss_distances)
         print("  SAT MISSES (lat detects, SAT doesn't):")
@@ -257,9 +257,9 @@ def audit(data_dir: str, max_episodes: int = 100) -> None:
         print(f"    15-25m: {((hd >= 15) & (hd < 25)).sum()}")
         print(f"    25-50m: {((hd >= 25) & (hd < 50)).sum()}")
 
-    print(f"\n{'='*70}")
+    print(f"\n{'=' * 70}")
     print("A4: PER-TOWN SAT RATES")
-    print(f"{'='*70}")
+    print(f"{'=' * 70}")
     for town, stats in sorted(town_stats.items()):
         n = stats["ahead_same"]
         sr = stats["sat"] / max(n, 1) * 100
@@ -267,9 +267,9 @@ def audit(data_dir: str, max_episodes: int = 100) -> None:
         br = stats["both"] / max(n, 1) * 100
         print(f"  {town}: SAT={sr:.1f}% LAT={lr:.1f}% BOTH={br:.1f}% (n={n})")
 
-    print(f"\n{'='*70}")
+    print(f"\n{'=' * 70}")
     print("A5: PER-EPISODE SAT RATE DISTRIBUTION")
-    print(f"{'='*70}")
+    print(f"{'=' * 70}")
     if episode_sat_rates:
         rates = [r[1] for r in episode_sat_rates]
         ra = np.array(rates)
@@ -293,9 +293,9 @@ def audit(data_dir: str, max_episodes: int = 100) -> None:
         for name, rate, n, town in bottom[-10:]:
             print(f"    {name}: {rate:.1f}% (n={n}, {town})")
 
-    print(f"\n{'='*70}")
+    print(f"\n{'=' * 70}")
     print("A6: LONGITUDINAL POSITION OF SAT MISSES")
-    print(f"{'='*70}")
+    print(f"{'=' * 70}")
     if miss_longitudinals:
         mlong = np.array(miss_longitudinals)
         print(f"  Mean longitudinal: {mlong.mean():.1f}m")
@@ -307,9 +307,9 @@ def audit(data_dir: str, max_episodes: int = 100) -> None:
         print(f"  25-50m: {((mlong >= 25) & (mlong < 50)).sum()}")
 
     # A7: Check if miss buf_head correlates with misses
-    print(f"\n{'='*70}")
+    print(f"\n{'=' * 70}")
     print("A7: BUFFER HEAD DISTANCE AT SAT MISSES")
-    print(f"{'='*70}")
+    print(f"{'=' * 70}")
     if miss_buf_head:
         mbh = np.array(miss_buf_head)
         valid = mbh[mbh >= 0]
@@ -323,12 +323,12 @@ def audit(data_dir: str, max_episodes: int = 100) -> None:
 
     # A8: Cross-tabulate: for SAT misses at close range (<10m),
     # what are the corridor segments and lateral offsets?
-    print(f"\n{'='*70}")
+    print(f"\n{'=' * 70}")
     print("A8: CLOSE-RANGE SAT MISSES (<10m) — DETAIL")
-    print(f"{'='*70}")
+    print(f"{'=' * 70}")
     close_misses = [
-        (d, l, lo, s, b)
-        for d, l, lo, s, b in zip(
+        (d, lat, lo, s, b)
+        for d, lat, lo, s, b in zip(
             miss_distances, miss_laterals, miss_longitudinals, miss_n_segs, miss_buf_head
         )
         if d < 10

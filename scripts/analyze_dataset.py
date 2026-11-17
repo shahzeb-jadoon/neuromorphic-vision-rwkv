@@ -28,9 +28,9 @@ def analyze_dataset(data_dir: Path, save_samples: int = 0) -> None:
         print(f"No episode files found in {data_dir}")
         return
 
-    print(f"{'='*60}")
+    print(f"{'=' * 60}")
     print(f"Dataset Analysis: {data_dir.resolve()}")
-    print(f"{'='*60}")
+    print(f"{'=' * 60}")
     print()
 
     # Aggregate stats
@@ -75,9 +75,8 @@ def analyze_dataset(data_dir: Path, save_samples: int = 0) -> None:
     print(f"Episodes:     {len(episodes)}")
     print(f"Total frames: {total_frames:,} ({total_hours:.1f} hours at {fps} FPS)")
     print(f"Storage:      {size_gb:.2f} GB")
-    print(
-        f"Avg episode:  {np.mean(episode_lengths):.0f} frames ({np.mean(episode_lengths)/fps:.1f}s)"
-    )
+    avg_len = np.mean(episode_lengths)
+    print(f"Avg episode:  {avg_len:.0f} frames ({avg_len / fps:.1f}s)")
     print()
 
     # Status breakdown
