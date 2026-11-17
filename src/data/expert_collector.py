@@ -4,7 +4,7 @@ Drives a custom **PrivilegedExpert** agent through pre-planned routes
 while recording per-frame observations (3-camera panoramic, controls,
 navigation commands, ego state, nearby-actor metadata) to HDF5 files.
 
-Schema version: 3 (see ``src/data/hdf5_schema.py``).
+Schema version: 4 (see ``src/data/hdf5_schema.py``).
 
 Key differences from the v2 collector:
     - Uses ``PrivilegedExpert`` (custom PID + privileged perception)
@@ -37,7 +37,7 @@ import traceback
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import h5py
 import numpy as np
@@ -82,6 +82,7 @@ try:
         PrivilegedExpert,
     )
     from agents.navigation.global_route_planner import GlobalRoutePlanner
+    from agents.navigation.lane_graph_planner import LaneGraphPlanner
 
     CARLA_AVAILABLE = True
 except (ImportError, ModuleNotFoundError):
@@ -135,14 +136,23 @@ class EpisodeConfig:
     # on most maps.  When RSS exceeds this limit (MB), the episode is
     # stopped gracefully and the worker exits so the orchestrator can
     # restart it.  0 = disabled.
-    rss_limit_mb: int = 8192  # 8 GB default
+    rss_limit_mb: int = 10240  # 8 GB default (Changed to 10 GB)
+
+    # Route sidecar sanitizer (S1: flag-only).
+    route_sanitizer_warn_gap_m: float = 12.0
+    route_sanitizer_severe_gap_m: float = 30.0
+    route_sanitizer_max_issues: int = 64
+
+    # S2: fail-fast on persistent route-health failures.
+    route_fail_fast_enabled: bool = True
+    route_fail_fast_watchdog_streak_frames: int = 20
 
 
 @dataclass
 class EpisodeResult:
     """Result of a single episode collection."""
 
-    status: str  # "completed", "collision", "crashed", "timeout", "memory_limit"
+    status: str  # "completed", "collision", "crashed", "timeout", "memory_limit", "route_invalid"
     filename: str | None = None
     episode_hash: str | None = None
     n_frames: int = 0
@@ -157,6 +167,7 @@ class EpisodeResult:
     error_message: str | None = None
     duration_seconds: float = 0.0
     recording_path: str | None = None
+    route_path: str | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -213,6 +224,12 @@ class _StreamingEpisodeWriter:
         self._ds_nav = self._h5.create_dataset(
             S.NAV_COMMAND, shape=(max_frames,), dtype=np.int32, maxshape=(None,)
         )
+        self._ds_nav_route = self._h5.create_dataset(
+            S.NAV_COMMAND_ROUTE, shape=(max_frames,), dtype=np.int32, maxshape=(None,)
+        )
+        self._ds_nav_speed = self._h5.create_dataset(
+            S.NAV_COMMAND_SPEED, shape=(max_frames,), dtype=np.int32, maxshape=(None,)
+        )
         self._ds_pos = self._h5.create_dataset(
             S.POSITION, shape=(max_frames, 3), dtype=np.float32, maxshape=(None, 3)
         )
@@ -228,8 +245,20 @@ class _StreamingEpisodeWriter:
         self._ds_tl_dist = self._h5.create_dataset(
             S.TRAFFIC_LIGHT_DISTANCE, shape=(max_frames,), dtype=np.float32, maxshape=(None,)
         )
+        self._ds_tl_actor_id = self._h5.create_dataset(
+            S.TRAFFIC_LIGHT_ACTOR_ID, shape=(max_frames,), dtype=np.int32, maxshape=(None,)
+        )
+        self._ds_tl_stop_line = self._h5.create_dataset(
+            S.TRAFFIC_LIGHT_STOP_LINE_POSITION,
+            shape=(max_frames, 3),
+            dtype=np.float32,
+            maxshape=(None, 3),
+        )
         self._ds_ss = self._h5.create_dataset(
             S.STOP_SIGN_DISTANCE, shape=(max_frames,), dtype=np.float32, maxshape=(None,)
+        )
+        self._ds_ys = self._h5.create_dataset(
+            S.YIELD_SIGN_DISTANCE, shape=(max_frames,), dtype=np.float32, maxshape=(None,)
         )
         self._ds_ts = self._h5.create_dataset(
             S.TARGET_SPEED, shape=(max_frames,), dtype=np.float32, maxshape=(None,)
@@ -246,11 +275,113 @@ class _StreamingEpisodeWriter:
         self._ds_wpbh = self._h5.create_dataset(
             S.WP_BUFFER_HEAD_DIST, shape=(max_frames,), dtype=np.float32, maxshape=(None,)
         )
+        self._ds_wp_head_index = self._h5.create_dataset(
+            S.WP_BUFFER_HEAD_INDEX, shape=(max_frames,), dtype=np.int32, maxshape=(None,)
+        )
+        self._ds_wp_head_road_id = self._h5.create_dataset(
+            S.WP_BUFFER_HEAD_ROAD_ID, shape=(max_frames,), dtype=np.int32, maxshape=(None,)
+        )
+        self._ds_wp_head_lane_id = self._h5.create_dataset(
+            S.WP_BUFFER_HEAD_LANE_ID, shape=(max_frames,), dtype=np.int32, maxshape=(None,)
+        )
+        self._ds_arc_active = self._h5.create_dataset(
+            S.ARC_ACTIVE, shape=(max_frames,), dtype=np.int8, maxshape=(None,)
+        )
+        self._ds_arc_size = self._h5.create_dataset(
+            S.ARC_SIZE, shape=(max_frames,), dtype=np.int32, maxshape=(None,)
+        )
+        self._ds_policy_block_streak = self._h5.create_dataset(
+            S.POLICY_BLOCK_STREAK,
+            shape=(max_frames,),
+            dtype=np.int32,
+            maxshape=(None,),
+        )
+        self._ds_steer_from_arc = self._h5.create_dataset(
+            S.STEER_FROM_ARC, shape=(max_frames,), dtype=np.int8, maxshape=(None,)
+        )
         self._ds_sat = self._h5.create_dataset(
             S.SAT_DETECTIONS, shape=(max_frames,), dtype=np.int32, maxshape=(None,)
         )
         self._ds_lat = self._h5.create_dataset(
             S.LATERAL_DETECTIONS, shape=(max_frames,), dtype=np.int32, maxshape=(None,)
+        )
+        self._ds_gap_fill_rpcs = self._h5.create_dataset(
+            S.GAP_FILL_RPCS, shape=(max_frames,), dtype=np.int32, maxshape=(None,)
+        )
+        self._ds_gap_fill_diverged = self._h5.create_dataset(
+            S.GAP_FILL_DIVERGED, shape=(max_frames,), dtype=np.int32, maxshape=(None,)
+        )
+        self._ds_route_completion = self._h5.create_dataset(
+            S.ROUTE_COMPLETION, shape=(max_frames,), dtype=np.float32, maxshape=(None,)
+        )
+        self._ds_policy_reason = self._h5.create_dataset(
+            S.PLANNER_POLICY_REASON, shape=(max_frames,), dtype=np.int32, maxshape=(None,)
+        )
+        self._ds_policy_exception = self._h5.create_dataset(
+            S.PLANNER_POLICY_EXCEPTION, shape=(max_frames,), dtype=np.int32, maxshape=(None,)
+        )
+        self._ds_dist_to_next_junction = self._h5.create_dataset(
+            S.DIST_TO_NEXT_JUNCTION, shape=(max_frames,), dtype=np.float32, maxshape=(None,)
+        )
+        self._ds_pre_junction_lane_change_violation = self._h5.create_dataset(
+            S.PRE_JUNCTION_LANE_CHANGE_VIOLATION,
+            shape=(max_frames,),
+            dtype=np.int8,
+            maxshape=(None,),
+        )
+        self._ds_consecutive_lane_change_violation = self._h5.create_dataset(
+            S.CONSECUTIVE_LANE_CHANGE_VIOLATION,
+            shape=(max_frames,),
+            dtype=np.int8,
+            maxshape=(None,),
+        )
+        self._ds_straight_exit_lane_violation = self._h5.create_dataset(
+            S.STRAIGHT_EXIT_LANE_VIOLATION,
+            shape=(max_frames,),
+            dtype=np.int8,
+            maxshape=(None,),
+        )
+        self._ds_turn_lane_legality_violation = self._h5.create_dataset(
+            S.TURN_LANE_LEGALITY_VIOLATION,
+            shape=(max_frames,),
+            dtype=np.int8,
+            maxshape=(None,),
+        )
+        self._ds_roundabout_lane_change_violation = self._h5.create_dataset(
+            S.ROUNDABOUT_LANE_CHANGE_VIOLATION,
+            shape=(max_frames,),
+            dtype=np.int8,
+            maxshape=(None,),
+        )
+        self._ds_legality_wrong_way_filtered = self._h5.create_dataset(
+            S.LEGALITY_WRONG_WAY_FILTERED,
+            shape=(max_frames,),
+            dtype=np.int32,
+            maxshape=(None,),
+        )
+        self._ds_legality_do_not_enter_filtered = self._h5.create_dataset(
+            S.LEGALITY_DO_NOT_ENTER_FILTERED,
+            shape=(max_frames,),
+            dtype=np.int32,
+            maxshape=(None,),
+        )
+        self._ds_legality_turn_mismatch_filtered = self._h5.create_dataset(
+            S.LEGALITY_TURN_MISMATCH_FILTERED,
+            shape=(max_frames,),
+            dtype=np.int32,
+            maxshape=(None,),
+        )
+        self._ds_legality_continuity_kept = self._h5.create_dataset(
+            S.LEGALITY_CONTINUITY_KEPT,
+            shape=(max_frames,),
+            dtype=np.int32,
+            maxshape=(None,),
+        )
+        self._ds_route_watchdog_triggered = self._h5.create_dataset(
+            S.ROUTE_WATCHDOG_TRIGGERED,
+            shape=(max_frames,),
+            dtype=np.int8,
+            maxshape=(None,),
         )
 
         # Variable-length string datasets for actor JSON
@@ -297,19 +428,47 @@ class _StreamingEpisodeWriter:
         self._ds_throttle[i] = float(control.throttle)
         self._ds_brake[i] = float(control.brake)
         self._ds_nav[i] = info.nav_command
+        self._ds_nav_route[i] = info.nav_command_route
+        self._ds_nav_speed[i] = info.nav_command_speed
         self._ds_pos[i] = np.array(info.position, dtype=np.float32)
         self._ds_rot[i] = np.array(info.rotation, dtype=np.float32)
         self._ds_vel[i] = np.array(info.velocity, dtype=np.float32)
         self._ds_tl[i] = info.traffic_light_state
         self._ds_tl_dist[i] = info.traffic_light_distance
+        self._ds_tl_actor_id[i] = info.traffic_light_actor_id
+        self._ds_tl_stop_line[i] = np.array(info.traffic_light_stop_line_position, dtype=np.float32)
         self._ds_ss[i] = info.stop_sign_distance
+        self._ds_ys[i] = info.yield_sign_distance
         self._ds_ts[i] = info.target_speed
         self._ds_dm[i] = info.driving_mode
         self._ds_ncorr[i] = info.n_corridor_segments
         self._ds_wpbs[i] = info.wp_buffer_size
         self._ds_wpbh[i] = info.wp_buffer_head_dist
+        self._ds_wp_head_index[i] = info.wp_buffer_head_index
+        self._ds_wp_head_road_id[i] = info.wp_buffer_head_road_id
+        self._ds_wp_head_lane_id[i] = info.wp_buffer_head_lane_id
+        self._ds_arc_active[i] = info.arc_active
+        self._ds_arc_size[i] = info.arc_size
+        self._ds_policy_block_streak[i] = info.policy_block_streak
+        self._ds_steer_from_arc[i] = info.steer_from_arc
         self._ds_sat[i] = info.sat_detections
         self._ds_lat[i] = info.lateral_detections
+        self._ds_gap_fill_rpcs[i] = info.gap_fill_rpcs
+        self._ds_gap_fill_diverged[i] = info.gap_fill_diverged
+        self._ds_route_completion[i] = info.route_completion
+        self._ds_policy_reason[i] = info.planner_policy_reason
+        self._ds_policy_exception[i] = info.planner_policy_exception
+        self._ds_dist_to_next_junction[i] = info.dist_to_next_junction
+        self._ds_pre_junction_lane_change_violation[i] = info.pre_junction_lane_change_violation
+        self._ds_consecutive_lane_change_violation[i] = info.consecutive_lane_change_violation
+        self._ds_straight_exit_lane_violation[i] = info.straight_exit_lane_violation
+        self._ds_turn_lane_legality_violation[i] = info.turn_lane_legality_violation
+        self._ds_roundabout_lane_change_violation[i] = info.roundabout_lane_change_violation
+        self._ds_legality_wrong_way_filtered[i] = info.legality_wrong_way_filtered
+        self._ds_legality_do_not_enter_filtered[i] = info.legality_do_not_enter_filtered
+        self._ds_legality_turn_mismatch_filtered[i] = info.legality_turn_mismatch_filtered
+        self._ds_legality_continuity_kept[i] = info.legality_continuity_kept
+        self._ds_route_watchdog_triggered[i] = info.route_watchdog_triggered
         self._ds_nveh[i] = json.dumps(info.nearby_vehicles)
         self._ds_nped[i] = json.dumps(info.nearby_pedestrians)
 
@@ -345,18 +504,46 @@ class _StreamingEpisodeWriter:
             self._ds_throttle,
             self._ds_brake,
             self._ds_nav,
+            self._ds_nav_route,
+            self._ds_nav_speed,
             self._ds_pos,
             self._ds_rot,
             self._ds_vel,
             self._ds_tl,
+            self._ds_tl_dist,
+            self._ds_tl_actor_id,
+            self._ds_tl_stop_line,
             self._ds_ss,
             self._ds_ts,
             self._ds_dm,
             self._ds_ncorr,
             self._ds_wpbs,
             self._ds_wpbh,
+            self._ds_wp_head_index,
+            self._ds_wp_head_road_id,
+            self._ds_wp_head_lane_id,
+            self._ds_arc_active,
+            self._ds_arc_size,
+            self._ds_policy_block_streak,
+            self._ds_steer_from_arc,
             self._ds_sat,
             self._ds_lat,
+            self._ds_gap_fill_rpcs,
+            self._ds_gap_fill_diverged,
+            self._ds_route_completion,
+            self._ds_policy_reason,
+            self._ds_policy_exception,
+            self._ds_dist_to_next_junction,
+            self._ds_pre_junction_lane_change_violation,
+            self._ds_consecutive_lane_change_violation,
+            self._ds_straight_exit_lane_violation,
+            self._ds_turn_lane_legality_violation,
+            self._ds_roundabout_lane_change_violation,
+            self._ds_legality_wrong_way_filtered,
+            self._ds_legality_do_not_enter_filtered,
+            self._ds_legality_turn_mismatch_filtered,
+            self._ds_legality_continuity_kept,
+            self._ds_route_watchdog_triggered,
             self._ds_nveh,
             self._ds_nped,
         ]:
@@ -426,6 +613,8 @@ class _StreamingEpisodeWriter:
             int(RoadOption.LEFT): "Left",
             int(RoadOption.RIGHT): "Right",
             int(RoadOption.STRAIGHT): "Straight",
+            int(RoadOption.CHANGELANELEFT): "ChangeLaneLeft",
+            int(RoadOption.CHANGELANERIGHT): "ChangeLaneRight",
         }
         # Re-open briefly to read the trimmed nav dataset
         with h5py.File(self.filepath, "r") as f:
@@ -679,11 +868,11 @@ class ExpertDataCollector:
         Renders several layers so you can see:
           1. **Planned route** — green dots along the remaining route
           2. **Actual position** — orange breadcrumb at current location
-          3. **Upcoming target** — cyan sphere at the expert's steering target
+          3. **Upcoming target** — sky-blue sphere at the expert's steering target
           4. **Detection corridor** — magenta outline of the curve-aware
              lane corridor used for vehicle detection
-          5. **Nearby vehicles** — red box for lead (in-lane) vehicles,
-             yellow box for nearby but out-of-lane vehicles
+             5. **Nearby actors** — white/yellow/red risk coloring for
+                 vehicles and pedestrians, plus INDIGO stop-target markers
           6. **HUD** — driving mode, speed, target speed, lead distance
 
         All markers use ``life_time=0.3`` so they refresh each tick without
@@ -728,15 +917,15 @@ class ExpertDataCollector:
             life_time=8.0,  # persist for 8s to form a visible trail
         )
 
-        # 3. Current steering target — cyan sphere
+        # 3. Current steering target — sky-blue sphere
         if expert._wp_buffer:
             target_wp = expert._wp_buffer[0]
             t_loc = target_wp[0].transform.location
-            CYAN = carla.Color(0, 255, 255)
+            SKY = carla.Color(0, 170, 255)
             debug.draw_point(
                 carla.Location(t_loc.x, t_loc.y, t_loc.z + 1.0),
                 size=0.15,
-                color=CYAN,
+                color=SKY,
                 life_time=life,
             )
             # Line from ego to target
@@ -744,7 +933,7 @@ class ExpertDataCollector:
                 carla.Location(ego_loc.x, ego_loc.y, ego_loc.z + 0.5),
                 carla.Location(t_loc.x, t_loc.y, t_loc.z + 1.0),
                 thickness=0.04,
-                color=CYAN,
+                color=SKY,
                 life_time=life,
             )
 
@@ -786,28 +975,236 @@ class ExpertDataCollector:
                 )
 
         # 5. Nearby vehicle bounding boxes
-        #    Red    = in corridor AND within emergency braking distance
-        #    Orange = in corridor but further away
-        #    Yellow = detected but not in lane / not ahead
+        #    Red    = emergency-risk actor
+        #    Yellow = SAT-overlap/risk actor
+        #    White  = nearby non-critical actor
         RED = carla.Color(255, 0, 0)
-        V_ORANGE = carla.Color(101, 67, 33)
         YELLOW = carla.Color(255, 255, 0)
+        WHITE = carla.Color(255, 255, 255)
+        INDIGO = carla.Color(102, 0, 255)
+        stop_search_radius = 70.0
+        junction_radius = 85.0
+        carla_map = world.get_map()
+
+        def _dot2(a: np.ndarray, b: np.ndarray) -> float:
+            return float(a[0] * b[0] + a[1] * b[1])
+
+        def _local_to_world_no_mutate(tf: Any, loc: Any) -> Any:
+            yaw = math.radians(float(tf.rotation.yaw))
+            cos_y = math.cos(yaw)
+            sin_y = math.sin(yaw)
+            x = cos_y * float(loc.x) - sin_y * float(loc.y) + float(tf.location.x)
+            y = sin_y * float(loc.x) + cos_y * float(loc.y) + float(tf.location.y)
+            z = float(loc.z) + float(tf.location.z)
+            return carla.Location(x=x, y=y, z=z)
+
+        def _circular_mean_deg(values: list[float]) -> float:
+            if not values:
+                return 0.0
+            s = sum(math.sin(math.radians(v)) for v in values)
+            c = sum(math.cos(math.radians(v)) for v in values)
+            return math.degrees(math.atan2(s, c))
+
+        def _collect_same_direction_lane_band(base_wp: Any) -> list[Any]:
+            band = [base_wp]
+            seen_ids = {int(base_wp.id)}
+            base_sign = 1 if int(getattr(base_wp, "lane_id", 1)) >= 0 else -1
+
+            def _walk(side: str) -> None:
+                current = base_wp
+                while True:
+                    next_wp = (
+                        current.get_left_lane() if side == "left" else current.get_right_lane()
+                    )
+                    if next_wp is None:
+                        return
+                    if next_wp.lane_type != carla.LaneType.Driving:
+                        return
+                    next_sign = 1 if int(getattr(next_wp, "lane_id", 1)) >= 0 else -1
+                    if next_sign != base_sign:
+                        return
+                    next_id = int(next_wp.id)
+                    if next_id in seen_ids:
+                        return
+                    seen_ids.add(next_id)
+                    band.append(next_wp)
+                    current = next_wp
+
+            _walk("left")
+            _walk("right")
+            return band
+
+        def _collect_road_driving_lane_band(base_wp: Any) -> list[Any]:
+            band = [base_wp]
+            seen_lane_ids = {int(getattr(base_wp, "lane_id", 0))}
+            base_road_id = int(getattr(base_wp, "road_id", -1))
+
+            def _walk(side: str) -> None:
+                current = base_wp
+                while True:
+                    next_wp = (
+                        current.get_left_lane() if side == "left" else current.get_right_lane()
+                    )
+                    if next_wp is None:
+                        return
+                    if next_wp.lane_type != carla.LaneType.Driving:
+                        return
+                    if int(getattr(next_wp, "road_id", -2)) != base_road_id:
+                        return
+                    lane_id = int(getattr(next_wp, "lane_id", 0))
+                    if lane_id in seen_lane_ids:
+                        return
+                    seen_lane_ids.add(lane_id)
+                    band.append(next_wp)
+                    current = next_wp
+
+            _walk("left")
+            _walk("right")
+            return band
+
+        def _compute_lane_zone(
+            waypoints: list[Any],
+            z_offset: float = 0.06,
+        ) -> tuple[Any, Any, float, float] | None:
+            if not waypoints:
+                return None
+
+            locs = [wp.transform.location for wp in waypoints]
+            yaws = [float(wp.transform.rotation.yaw) for wp in waypoints]
+            lane_widths = [float(getattr(wp, "lane_width", 3.5)) for wp in waypoints]
+
+            center = carla.Location(
+                x=float(np.mean([loc.x for loc in locs])),
+                y=float(np.mean([loc.y for loc in locs])),
+                z=float(np.mean([loc.z for loc in locs])) + z_offset,
+            )
+            yaw = _circular_mean_deg(yaws)
+            lane_w = max(2.6, float(np.mean(lane_widths)) if lane_widths else 3.5)
+
+            lane_span = 0.0
+            for i in range(len(locs)):
+                for j in range(i + 1, len(locs)):
+                    lane_span = max(lane_span, float(locs[i].distance(locs[j])))
+
+            total_width = lane_w if len(locs) == 1 else lane_span + lane_w
+            depth = max(1.2, min(2.2, lane_w * 0.6))
+            rot = carla.Rotation(pitch=0.0, yaw=float(yaw), roll=0.0)
+            return center, rot, total_width, depth
+
+        def _collect_tl_waypoints(tl: Any) -> list[Any]:
+            try:
+                swps = list(tl.get_stop_waypoints())
+            except (AttributeError, RuntimeError):
+                swps = []
+            if swps:
+                return swps
+            try:
+                return list(tl.get_affected_lane_waypoints())
+            except (AttributeError, RuntimeError):
+                return []
+
+        def _collect_sign_waypoints(sign: Any, trigger_loc: Any) -> list[Any]:
+            try:
+                affected = list(sign.get_affected_lane_waypoints())
+            except (AttributeError, RuntimeError):
+                affected = []
+
+            driving = [wp for wp in affected if wp.lane_type == carla.LaneType.Driving]
+            if driving:
+                return driving
+
+            base_wp = carla_map.get_waypoint(
+                trigger_loc,
+                project_to_road=True,
+                lane_type=carla.LaneType.Driving,
+            )
+            if base_wp is None:
+                return []
+            return _collect_same_direction_lane_band(base_wp)
+
+        def _road_id_at(loc: Any) -> int | None:
+            wp = carla_map.get_waypoint(
+                loc,
+                project_to_road=True,
+                lane_type=carla.LaneType.Driving,
+            )
+            if wp is None:
+                return None
+            return int(wp.road_id)
+
+        def _ego_road_width_cap() -> tuple[float, int | None]:
+            ego_wp = carla_map.get_waypoint(
+                ego_loc,
+                project_to_road=True,
+                lane_type=carla.LaneType.Driving,
+            )
+            if ego_wp is None:
+                return 12.0, None
+
+            band = _collect_road_driving_lane_band(ego_wp)
+            if not band:
+                return max(2.6, float(getattr(ego_wp, "lane_width", 3.5))), int(ego_wp.road_id)
+
+            total_width = sum(max(0.1, float(getattr(wp, "lane_width", 3.5))) for wp in band)
+            return max(2.6, float(total_width)), int(ego_wp.road_id)
+
+        def _trigger_edge_toward_junction(
+            sign_tf: Any,
+            trigger_center: Any,
+            trigger_extent_x: float,
+        ) -> Any:
+            yaw = math.radians(float(sign_tf.rotation.yaw))
+            fwd_x = math.cos(yaw)
+            fwd_y = math.sin(yaw)
+
+            cand_plus = carla.Location(
+                x=float(trigger_center.x) + fwd_x * trigger_extent_x,
+                y=float(trigger_center.y) + fwd_y * trigger_extent_x,
+                z=float(trigger_center.z),
+            )
+            cand_minus = carla.Location(
+                x=float(trigger_center.x) - fwd_x * trigger_extent_x,
+                y=float(trigger_center.y) - fwd_y * trigger_extent_x,
+                z=float(trigger_center.z),
+            )
+
+            def _junction_score(loc: Any) -> int:
+                wp = carla_map.get_waypoint(
+                    loc,
+                    project_to_road=True,
+                    lane_type=carla.LaneType.Driving,
+                )
+                if wp is None:
+                    return 2
+                return 0 if wp.is_junction else 1
+
+            plus_score = _junction_score(cand_plus)
+            minus_score = _junction_score(cand_minus)
+            if plus_score < minus_score:
+                return cand_plus
+            if minus_score < plus_score:
+                return cand_minus
+            return cand_plus
 
         if info is not None:
-            emrg_dist = expert.config.vehicle_emergency_distance
+            speed_ms = float(getattr(info, "current_speed", 0.0)) / 3.6
+            emrg_dist = max(
+                float(expert.config.vehicle_emergency_distance),
+                speed_ms * float(expert.config.vehicle_emergency_time),
+            )
 
-            for i, v_info in enumerate(info.nearby_vehicles):
+            for v_info in info.nearby_vehicles:
                 obb_flag = v_info.get("obb_in_lane", False)
                 is_ahead_same = v_info.get("is_ahead", False) and v_info.get("same_direction", True)
 
-                color = YELLOW
+                color = WHITE
                 if obb_flag and is_ahead_same:
                     if v_info["distance"] < emrg_dist:
                         color = RED
                     else:
-                        color = V_ORANGE
+                        color = YELLOW
                 elif obb_flag:
-                    color = V_ORANGE
+                    color = YELLOW
 
                 # Draw marker at the detected vehicle's true world position
                 # when available; fallback to ego-relative reconstruction.
@@ -837,18 +1234,49 @@ class ExpertDataCollector:
                 )
 
             # 5b. Nearby pedestrian markers
-            #     Red    = in lane corridor (ahead + lateral < ped half-width)
-            #     Yellow = nearby but out of lane
-            P_RED = carla.Color(255, 50, 50)
-            P_YELLOW = carla.Color(255, 255, 100)
-            ped_half_w = expert.config.pedestrian_lane_half_width
+            #     Red    = emergency crossing risk
+            #     Yellow = in-lane / predicted crossing risk
+            #     White  = nearby non-critical
+            ped_half_w = max(
+                float(getattr(expert, "_cached_half_lane", expert.config.lane_half_width)),
+                float(expert.config.lane_half_width),
+            )
+            ped_emrg_dist = (
+                float(getattr(expert.config, "pedestrian_emergency_distance", 6.0)) + 5.0
+            )
             fwd = vehicle.get_transform().get_forward_vector()
             right = carla.Vector3D(-fwd.y, fwd.x, 0)
             for p_info in getattr(info, "nearby_pedestrians", []):
-                in_lane = p_info["is_ahead"] and abs(p_info["lateral"]) < ped_half_w
-                p_color = P_RED if in_lane else P_YELLOW
-                px = ego_loc.x + fwd.x * p_info["longitudinal"] + right.x * p_info["lateral"]
-                py = ego_loc.y + fwd.y * p_info["longitudinal"] + right.y * p_info["lateral"]
+                longitudinal = float(p_info.get("longitudinal", 0.0))
+                lateral = float(p_info.get("lateral", 0.0))
+                pred_ahead = bool(p_info.get("predicted_ahead", p_info.get("is_ahead", False)))
+                pred_lateral = float(p_info.get("predicted_lateral", lateral))
+                pred_dist = float(p_info.get("predicted_distance", p_info.get("distance", 0.0)))
+                effective_dist = min(float(p_info.get("distance", pred_dist)), pred_dist)
+
+                in_lane_now = bool(p_info.get("is_ahead", False)) and abs(lateral) < ped_half_w
+                in_lane_pred = pred_ahead and abs(pred_lateral) < ped_half_w
+                risk = in_lane_now or in_lane_pred
+
+                pred_long_sq = max(0.0, pred_dist * pred_dist - pred_lateral * pred_lateral)
+                pred_long = math.sqrt(pred_long_sq)
+                if not pred_ahead:
+                    pred_long = -pred_long
+
+                emergency_now = in_lane_now and longitudinal <= ped_emrg_dist
+                emergency_pred = in_lane_pred and pred_long <= ped_emrg_dist
+                emergency_dist = risk and effective_dist <= ped_emrg_dist
+                emergency = emergency_now or emergency_pred or emergency_dist
+
+                if emergency:
+                    p_color = RED
+                elif risk:
+                    p_color = YELLOW
+                else:
+                    p_color = WHITE
+
+                px = ego_loc.x + fwd.x * longitudinal + right.x * lateral
+                py = ego_loc.y + fwd.y * longitudinal + right.y * lateral
                 pz = ego_loc.z + 1.0
                 debug.draw_point(
                     carla.Location(px, py, pz),
@@ -858,11 +1286,377 @@ class ExpertDataCollector:
                 )
                 debug.draw_string(
                     carla.Location(px, py, pz + 0.5),
-                    f"{p_info['distance']:.0f}m",
+                    f"{effective_dist:.0f}m",
                     draw_shadow=True,
                     color=p_color,
                     life_time=life,
                 )
+
+                if in_lane_pred:
+                    pred_px = ego_loc.x + fwd.x * pred_long + right.x * pred_lateral
+                    pred_py = ego_loc.y + fwd.y * pred_long + right.y * pred_lateral
+                    pred_color = RED if emergency else YELLOW
+                    debug.draw_point(
+                        carla.Location(pred_px, pred_py, ego_loc.z + 1.0),
+                        size=0.08,
+                        color=pred_color,
+                        life_time=life,
+                    )
+
+            # 5c. Stop targets (traffic light/stop/yield) in INDIGO,
+            #     with WHITE highlight for the actively followed control.
+            actors = world.get_actors()
+            ego_tf = vehicle.get_transform()
+            ego_fwd = ego_tf.get_forward_vector()
+            ego_fwd_2d = np.array([float(ego_fwd.x), float(ego_fwd.y)], dtype=np.float64)
+            fwd_norm = np.linalg.norm(ego_fwd_2d)
+            if fwd_norm < 1e-6:
+                ego_fwd_2d = np.array([1.0, 0.0], dtype=np.float64)
+            else:
+                ego_fwd_2d /= fwd_norm
+
+            road_width_cap, _ = _ego_road_width_cap()
+            controls: list[dict[str, Any]] = []
+
+            def _ahead_longitudinal(target_loc: Any) -> float:
+                rel = np.array(
+                    [float(target_loc.x - ego_loc.x), float(target_loc.y - ego_loc.y)],
+                    dtype=np.float64,
+                )
+                return _dot2(rel, ego_fwd_2d)
+
+            for tl in actors.filter("traffic.traffic_light*"):
+                tl_loc = tl.get_transform().location
+                if tl_loc.distance(ego_loc) > stop_search_radius:
+                    continue
+
+                stop_wps = _collect_tl_waypoints(tl)
+                ahead_wps: list[tuple[Any, Any, float]] = []
+                for wp in stop_wps:
+                    loc = wp.transform.location
+                    if loc.distance(ego_loc) > stop_search_radius:
+                        continue
+                    longitudinal = _ahead_longitudinal(loc)
+                    if longitudinal <= 0.0:
+                        continue
+                    ahead_wps.append((wp, loc, longitudinal))
+                if not ahead_wps:
+                    continue
+
+                zone = _compute_lane_zone([wp for wp, _loc, _lon in ahead_wps], z_offset=0.85)
+                if zone is None:
+                    continue
+                zone_center, zone_rot, zone_width, zone_depth = zone
+                zone_width = min(zone_width, road_width_cap)
+
+                _best_wp, best_loc, best_long = min(
+                    ahead_wps,
+                    key=lambda item: float(item[1].distance(ego_loc)),
+                )
+                controls.append(
+                    {
+                        "kind": "TL",
+                        "actor_id": int(tl.id),
+                        "shape": "box",
+                        "box_center": zone_center,
+                        "box_rot": zone_rot,
+                        "box_depth": float(zone_depth),
+                        "box_width": float(zone_width),
+                        "box_height_half": 2.0,
+                        "anchor_loc": best_loc,
+                        "label_loc": carla.Location(
+                            x=float(tl_loc.x),
+                            y=float(tl_loc.y),
+                            z=float(tl_loc.z) + 2.8,
+                        ),
+                        "distance": float(best_loc.distance(ego_loc)),
+                        "longitudinal": float(best_long),
+                        "road_id": _road_id_at(best_loc),
+                    }
+                )
+
+            for sign in actors.filter("traffic.stop*"):
+                trigger = getattr(sign, "trigger_volume", None)
+                if trigger is None:
+                    continue
+
+                sign_tf = sign.get_transform()
+                trigger_loc = _local_to_world_no_mutate(sign_tf, trigger.location)
+                if trigger_loc.distance(ego_loc) > stop_search_radius:
+                    continue
+                longitudinal = _ahead_longitudinal(trigger_loc)
+                if longitudinal <= 0.0:
+                    continue
+
+                sign_wps = _collect_sign_waypoints(sign, trigger_loc)
+                zone = _compute_lane_zone(sign_wps, z_offset=0.06)
+                if zone is not None:
+                    zone_center, zone_rot, zone_width, zone_depth = zone
+                else:
+                    zone_center = carla.Location(
+                        x=float(trigger_loc.x),
+                        y=float(trigger_loc.y),
+                        z=float(trigger_loc.z) + 0.06,
+                    )
+                    zone_rot = carla.Rotation(
+                        pitch=0.0,
+                        yaw=float(sign_tf.rotation.yaw),
+                        roll=0.0,
+                    )
+                    zone_width = max(2.6, float(trigger.extent.y) * 2.0)
+                    zone_depth = max(1.2, float(trigger.extent.x) * 2.0)
+
+                zone_width = min(zone_width, road_width_cap)
+
+                sign_loc = sign_tf.location
+                controls.append(
+                    {
+                        "kind": "STOP",
+                        "actor_id": int(sign.id),
+                        "shape": "box",
+                        "box_center": zone_center,
+                        "box_rot": zone_rot,
+                        "box_depth": float(zone_depth),
+                        "box_width": float(zone_width),
+                        "box_height_half": 1.0,
+                        "anchor_loc": zone_center,
+                        "label_loc": carla.Location(
+                            x=float(sign_loc.x),
+                            y=float(sign_loc.y),
+                            z=float(sign_loc.z) + 2.4,
+                        ),
+                        "distance": float(zone_center.distance(ego_loc)),
+                        "longitudinal": float(longitudinal),
+                        "road_id": _road_id_at(zone_center),
+                    }
+                )
+
+            for sign in actors.filter("traffic.yield*"):
+                trigger = getattr(sign, "trigger_volume", None)
+                if trigger is None:
+                    continue
+
+                sign_tf = sign.get_transform()
+                trigger_loc = _local_to_world_no_mutate(sign_tf, trigger.location)
+                if trigger_loc.distance(ego_loc) > stop_search_radius:
+                    continue
+                longitudinal = _ahead_longitudinal(trigger_loc)
+                if longitudinal <= 0.0:
+                    continue
+
+                sign_wps = _collect_sign_waypoints(sign, trigger_loc)
+                zone = _compute_lane_zone(sign_wps, z_offset=0.06)
+                if zone is not None:
+                    _zone_center, zone_rot, zone_width, _zone_depth = zone
+                else:
+                    zone_rot = carla.Rotation(
+                        pitch=0.0,
+                        yaw=float(sign_tf.rotation.yaw),
+                        roll=0.0,
+                    )
+                    zone_width = max(2.6, float(trigger.extent.y) * 2.0)
+
+                zone_width = min(zone_width, road_width_cap)
+                line_center = _trigger_edge_toward_junction(
+                    sign_tf,
+                    trigger_loc,
+                    max(0.1, float(trigger.extent.x)),
+                )
+                yaw = math.radians(float(zone_rot.yaw))
+                right_x = -math.sin(yaw)
+                right_y = math.cos(yaw)
+                half_width = float(zone_width) * 0.5
+                line_z = float(line_center.z) + 0.03
+                p1 = carla.Location(
+                    x=float(line_center.x) - right_x * half_width,
+                    y=float(line_center.y) - right_y * half_width,
+                    z=line_z,
+                )
+                p2 = carla.Location(
+                    x=float(line_center.x) + right_x * half_width,
+                    y=float(line_center.y) + right_y * half_width,
+                    z=line_z,
+                )
+
+                sign_loc = sign_tf.location
+                line_longitudinal = _ahead_longitudinal(line_center)
+                controls.append(
+                    {
+                        "kind": "YIELD",
+                        "actor_id": int(sign.id),
+                        "shape": "line",
+                        "line_p1": p1,
+                        "line_p2": p2,
+                        "anchor_loc": line_center,
+                        "label_loc": carla.Location(
+                            x=float(sign_loc.x),
+                            y=float(sign_loc.y),
+                            z=float(sign_loc.z) + 2.4,
+                        ),
+                        "distance": float(line_center.distance(ego_loc)),
+                        "longitudinal": float(line_longitudinal),
+                        "road_id": _road_id_at(line_center),
+                    }
+                )
+
+            if controls:
+                active_control: dict[str, Any] | None = None
+
+                tl_following_id = int(getattr(info, "traffic_light_actor_id", -1))
+                if tl_following_id > 0:
+                    for c in controls:
+                        if c["kind"] == "TL" and int(c.get("actor_id", -1)) == tl_following_id:
+                            active_control = c
+                            break
+
+                if active_control is None:
+                    stop_following_id = getattr(expert, "_stop_sign_active", None)
+                    if stop_following_id is not None:
+                        for c in controls:
+                            if c["kind"] == "STOP" and int(c.get("actor_id", -1)) == int(
+                                stop_following_id
+                            ):
+                                active_control = c
+                                break
+
+                if active_control is None:
+                    yield_following_id = getattr(expert, "_yield_active", None)
+                    if yield_following_id is not None:
+                        for c in controls:
+                            if c["kind"] == "YIELD" and int(c.get("actor_id", -1)) == int(
+                                yield_following_id
+                            ):
+                                active_control = c
+                                break
+
+                # Show approach target before commit/activation so stop/yield
+                # visualisation appears as soon as planning starts slowing.
+                if active_control is None:
+                    stop_distance = float(getattr(info, "stop_sign_distance", -1.0))
+                    if stop_distance > 0.0:
+                        stop_controls = [
+                            c
+                            for c in controls
+                            if c["kind"] == "STOP" and float(c.get("longitudinal", -1.0)) > 0.0
+                        ]
+                        if stop_controls:
+                            active_control = min(
+                                stop_controls,
+                                key=lambda c: abs(float(c["distance"]) - stop_distance),
+                            )
+
+                if active_control is None:
+                    yield_distance = float(getattr(info, "yield_sign_distance", -1.0))
+                    if yield_distance > 0.0:
+                        yield_controls = [
+                            c
+                            for c in controls
+                            if c["kind"] == "YIELD" and float(c.get("longitudinal", -1.0)) > 0.0
+                        ]
+                        if yield_controls:
+                            active_control = min(
+                                yield_controls,
+                                key=lambda c: abs(float(c["distance"]) - yield_distance),
+                            )
+
+                if active_control is not None:
+                    if active_control["shape"] == "box":
+                        debug.draw_box(
+                            carla.BoundingBox(
+                                active_control["box_center"],
+                                carla.Vector3D(
+                                    x=float(active_control["box_depth"]) * 0.5,
+                                    y=float(active_control["box_width"]) * 0.5,
+                                    z=float(active_control["box_height_half"]),
+                                ),
+                            ),
+                            active_control["box_rot"],
+                            thickness=0.13,
+                            color=INDIGO,
+                            life_time=life,
+                        )
+                    else:
+                        debug.draw_line(
+                            active_control["line_p1"],
+                            active_control["line_p2"],
+                            thickness=0.12,
+                            color=INDIGO,
+                            life_time=life,
+                        )
+
+                    marker = active_control["label_loc"]
+                    kind = active_control["kind"]
+                    dist = float(active_control["distance"])
+                    debug.draw_point(
+                        marker,
+                        size=0.15,
+                        color=WHITE,
+                        life_time=life,
+                    )
+                    debug.draw_string(
+                        carla.Location(marker.x, marker.y, marker.z + 0.55),
+                        f"{kind} {dist:.1f}m",
+                        draw_shadow=True,
+                        color=WHITE,
+                        life_time=life,
+                    )
+                    debug.draw_line(
+                        marker,
+                        carla.Location(
+                            x=float(active_control["anchor_loc"].x),
+                            y=float(active_control["anchor_loc"].y),
+                            z=float(active_control["anchor_loc"].z) + 0.10,
+                        ),
+                        thickness=0.04,
+                        color=WHITE,
+                        life_time=life,
+                    )
+
+        # 5d. Junction bounds — draw only current or upcoming route junctions.
+        selected_junction_boxes: list[Any] = []
+        selected_junction_ids: set[int] = set()
+
+        ego_wp = carla_map.get_waypoint(
+            ego_loc,
+            project_to_road=True,
+            lane_type=carla.LaneType.Driving,
+        )
+        if ego_wp is not None and ego_wp.is_junction:
+            junction = ego_wp.get_junction()
+            if junction is not None:
+                jid = int(junction.id)
+                selected_junction_ids.add(jid)
+                selected_junction_boxes.append(junction.bounding_box)
+
+        route_sources_fn = getattr(expert, "_route_waypoint_sources", None)
+        if callable(route_sources_fn):
+            try:
+                for rwp, _ in route_sources_fn(lookahead=180):
+                    if not getattr(rwp, "is_junction", False):
+                        continue
+                    junction = rwp.get_junction()
+                    if junction is None:
+                        continue
+                    jid = int(junction.id)
+                    if jid in selected_junction_ids:
+                        continue
+                    selected_junction_ids.add(jid)
+                    selected_junction_boxes.append(junction.bounding_box)
+                    if len(selected_junction_boxes) >= 2:
+                        break
+            except (AttributeError, RuntimeError, TypeError):
+                pass
+
+        for bb in selected_junction_boxes:
+            if bb.location.distance(ego_loc) > junction_radius:
+                continue
+            debug.draw_box(
+                bb,
+                getattr(bb, "rotation", carla.Rotation()),
+                thickness=0.08,
+                color=GREEN,
+                life_time=life,
+            )
 
         # 6. HUD — frame, mode, speed, target speed
         from agents.expert.privileged_expert import DrivingMode
@@ -871,16 +1665,18 @@ class ExpertDataCollector:
         spd = info.current_speed if info is not None else 0.0
         tgt = info.target_speed if info is not None else 0.0
 
-        # Lead vehicle distance from nearby_vehicles (union check)
+        # Lead distance from the same gating logic used by runtime control.
         lead_str = "--"
-        half_w = getattr(expert, "_cached_half_lane", expert.config.lane_half_width)
         if info is not None:
-            for v_info in info.nearby_vehicles:
-                is_ahead_same = v_info["is_ahead"] and v_info["same_direction"]
-                in_lane = v_info["obb_in_lane"] or abs(v_info["lateral"]) < half_w
-                if is_ahead_same and in_lane:
-                    lead_str = f"{v_info['distance']:.0f}m"
-                    break
+            try:
+                lead_dist, _lead_speed, _lead_lat = expert._lead_vehicle_info(
+                    info.nearby_vehicles,
+                    float(info.current_speed),
+                )
+            except (AttributeError, RuntimeError, TypeError, ValueError):
+                lead_dist = None
+            if lead_dist is not None:
+                lead_str = f"{lead_dist:.0f}m"
 
         hud_text = f"F{frame_idx} | {mode_name}\n{spd:.0f}/{tgt:.0f} km/h | lead:{lead_str}"
         debug.draw_string(
@@ -961,6 +1757,9 @@ class ExpertDataCollector:
         self,
         config: EpisodeConfig,
         route_waypoints: list | None = None,
+        route_continuation_provider: Callable[[Any], list[tuple[Any, str]] | None] | None = None,
+        route_continuation_max_chains: int = 0,
+        route_continuation_preload_remaining_waypoints: int = 0,
     ) -> EpisodeResult:
         """Collect a single episode of expert driving data.
 
@@ -973,6 +1772,15 @@ class ExpertDataCollector:
             route_waypoints: Pre-computed route as
                 ``[(carla.Transform, RoadOption_str), ...]``.
                 If ``None``, a random route is generated.
+            route_continuation_provider: Optional callback invoked when
+                ``expert.done()`` becomes true. It receives the current ego
+                location and may return a new route in the same
+                ``[(carla.Transform, RoadOption_str), ...]`` format.
+            route_continuation_max_chains: Maximum number of continuation
+                routes allowed in this episode.
+            route_continuation_preload_remaining_waypoints: When >0, request
+                continuation early once the active route head reaches this many
+                or fewer remaining waypoints.
 
         Returns:
             EpisodeResult with status and metadata.
@@ -996,6 +1804,15 @@ class ExpertDataCollector:
         episode_filepath = self.output_dir / episode_filename
         writer: _StreamingEpisodeWriter | None = None
         collision_frame: int | None = None
+        route_sidecar_path: Path | None = None
+        route_sanitizer_report: dict[str, Any] | None = None
+        route_watchdog_streak = 0
+        fail_fast_reason: str | None = None
+        route_chains_applied = 0
+        continuation_preload_remaining_wp = max(
+            0,
+            int(route_continuation_preload_remaining_waypoints),
+        )
 
         try:
             assert self.world is not None
@@ -1194,21 +2011,90 @@ class ExpertDataCollector:
             collision_sensor.listen(on_collision)
 
             # --- Setup PrivilegedExpert ---
-            route_planner = GlobalRoutePlanner(carla_map, sampling_resolution=2.0)
+            planner_backend = str(config.expert_config.route_planner_backend).strip().lower()
+            if planner_backend == "lane_graph":
+                route_planner = LaneGraphPlanner(
+                    carla_map,
+                    sampling_resolution=config.expert_config.lane_graph_sampling_resolution_m,
+                    lane_change_base_cost=config.expert_config.lane_graph_lane_change_cost,
+                    late_lane_change_penalty=(
+                        config.expert_config.lane_graph_late_lane_change_penalty
+                    ),
+                    lane_change_freeze_distance_m=(
+                        config.expert_config.planner_lane_change_freeze_distance_m
+                    ),
+                    turn_threshold_deg=config.expert_config.lane_graph_turn_threshold_deg,
+                    max_search_expansions=config.expert_config.lane_graph_max_search_expansions,
+                )
+            else:
+                route_planner = GlobalRoutePlanner(carla_map, sampling_resolution=2.0)
+
             expert = PrivilegedExpert(vehicle, self.world, route_planner, config.expert_config)
+            logger.info("Expert route planner backend: %s", planner_backend)
+
+            def _set_expert_route(route_plan: list[tuple[Any, str]]) -> int:
+                route_local: list[tuple[Any, RoadOption]] = []
+                for transform, road_opt_name in route_plan:
+                    wp = carla_map.get_waypoint(transform.location)
+                    if wp is None:
+                        continue
+                    opt = self._parse_road_option(str(road_opt_name))
+                    route_local.append((wp, opt))
+
+                if not route_local:
+                    return 0
+
+                expert.set_route(route_local)
+                return len(route_local)
+
+            def _try_apply_continuation(frame_idx: int, trigger: str) -> bool:
+                nonlocal route_chains_applied, route_watchdog_streak
+
+                if route_continuation_provider is None:
+                    return False
+                if route_chains_applied >= max(0, int(route_continuation_max_chains)):
+                    return False
+
+                try:
+                    current_loc = vehicle.get_transform().location
+                    continuation_route = route_continuation_provider(current_loc)
+                except Exception as e:
+                    logger.warning("Route continuation provider failed: %s", e)
+                    return False
+
+                if not continuation_route:
+                    return False
+
+                route_len = _set_expert_route(continuation_route)
+                if route_len <= 0:
+                    return False
+
+                route_chains_applied += 1
+                route_watchdog_streak = 0
+                if trigger == "done":
+                    logger.info(
+                        "Applied route continuation #%d at frame %d (%d waypoints)",
+                        route_chains_applied,
+                        frame_idx,
+                        route_len,
+                    )
+                else:
+                    logger.info(
+                        "Applied route continuation #%d at frame %d (%d waypoints) [%s]",
+                        route_chains_applied,
+                        frame_idx,
+                        route_len,
+                        trigger,
+                    )
+                return True
 
             # Build route
             if route_waypoints:
                 # route_waypoints = [(transform, road_option_str), ...]
-                route = []
-                for transform, road_opt_name in route_waypoints:
-                    wp = carla_map.get_waypoint(transform.location)
-                    opt = self._parse_road_option(str(road_opt_name))
-                    route.append((wp, opt))
-                expert.set_route(route)
+                route_len = _set_expert_route(route_waypoints)
                 logger.info(
                     "Set custom route with %d waypoints for expert",
-                    len(route),
+                    route_len,
                 )
             else:
                 # Random destination
@@ -1236,10 +2122,55 @@ class ExpertDataCollector:
             # --- Start CARLA recorder if requested ---
             recording_path: str | None = None
             if config.record_simulation:
-                rec_name = f"episode_{int(time.time())}.log"
+                rec_name = f"episode_{episode_hash}.log"
                 recording_path = rec_name
                 self.client.start_recorder(rec_name, True)
                 logger.info("CARLA recorder started: %s", rec_name)
+
+            # Persist route geometry for deterministic diagnostics and
+            # future replay analysis.
+            route_sanitizer_report = self._route_sanitizer_report(
+                route=list(expert._route),
+                warn_gap_m=config.route_sanitizer_warn_gap_m,
+                severe_gap_m=config.route_sanitizer_severe_gap_m,
+                max_issues=config.route_sanitizer_max_issues,
+            )
+            if route_sanitizer_report["warn_transition_count"] > 0:
+                logger.warning(
+                    "Route sanitizer flagged %d transition(s) (%d severe); max gap %.2fm",
+                    route_sanitizer_report["warn_transition_count"],
+                    route_sanitizer_report["severe_transition_count"],
+                    route_sanitizer_report["max_gap_m"],
+                )
+
+            planner_diagnostics: dict[str, Any] | None = None
+            planner_diag_payload: dict[str, Any] = {}
+            for key, getter_name in (
+                ("last_plan", "get_last_plan_diagnostics"),
+                ("graph", "get_graph_diagnostics"),
+            ):
+                getter = getattr(route_planner, getter_name, None)
+                if not callable(getter):
+                    continue
+                try:
+                    value = getter()
+                except Exception:
+                    continue
+                if value:
+                    planner_diag_payload[key] = value
+            if planner_diag_payload:
+                planner_diagnostics = planner_diag_payload
+
+            route_sidecar_path = self._write_route_sidecar(
+                episode_hash=episode_hash,
+                config=config,
+                route=list(expert._route),
+                route_source=("provided" if route_waypoints else "generated"),
+                sanitizer_report=route_sanitizer_report,
+                planner_diagnostics=planner_diagnostics,
+            )
+            if route_sidecar_path is not None:
+                logger.info("Saved route sidecar: %s", route_sidecar_path.name)
 
             # --- Tick loop ---
             stuck_start: float | None = None
@@ -1283,6 +2214,9 @@ class ExpertDataCollector:
 
                 # Check if expert finished route
                 if expert.done():
+                    if _try_apply_continuation(frame_idx, "done"):
+                        continue
+
                     logger.info("Expert completed route at frame %d", frame_idx)
                     break
 
@@ -1322,6 +2256,42 @@ class ExpertDataCollector:
                 # --- Expert step ---
                 control, info = expert.run_step(dt)
                 vehicle.apply_control(control)
+
+                if int(info.route_watchdog_triggered) > 0:
+                    route_watchdog_streak += 1
+                else:
+                    route_watchdog_streak = 0
+
+                if continuation_preload_remaining_wp > 0:
+                    route_len_total = len(getattr(expert, "_route", []))
+                    head_idx = int(getattr(info, "wp_buffer_head_index", -1))
+                    remaining_route_wp = (
+                        route_len_total - head_idx - 1
+                        if route_len_total > 0 and head_idx >= 0
+                        else -1
+                    )
+                    if 0 <= remaining_route_wp <= continuation_preload_remaining_wp:
+                        _try_apply_continuation(
+                            frame_idx,
+                            (
+                                f"preload remaining_wp={remaining_route_wp}"
+                                f"<={continuation_preload_remaining_wp}"
+                            ),
+                        )
+
+                should_abort_route, reason = self._route_fail_fast_decision(
+                    config=config,
+                    route_sanitizer_report=route_sanitizer_report,
+                    route_watchdog_streak=route_watchdog_streak,
+                )
+                if should_abort_route:
+                    fail_fast_reason = reason or "route_watchdog_streak"
+                    logger.error(
+                        "Route fail-fast triggered at frame %d: %s",
+                        frame_idx,
+                        fail_fast_reason,
+                    )
+                    break
 
                 # --- Spectator follow (real-time visualization) ---
                 if config.spectator_follow:
@@ -1399,6 +2369,8 @@ class ExpertDataCollector:
             )
             if memory_limit_hit:
                 status = "memory_limit"
+            elif fail_fast_reason is not None:
+                status = "route_invalid"
             elif timed_out:
                 status = "timeout"
             elif collision_frame is not None:
@@ -1411,6 +2383,9 @@ class ExpertDataCollector:
             result.collision_other_actor = collision_other_actor[0]
             result.duration_seconds = time.time() - start_time
             result.recording_path = recording_path
+            result.route_path = route_sidecar_path.name if route_sidecar_path is not None else None
+            if fail_fast_reason is not None:
+                result.error_message = fail_fast_reason
             return result
 
         except Exception as e:
@@ -1425,6 +2400,9 @@ class ExpertDataCollector:
                     )
                     result.error_message = str(e)
                     result.duration_seconds = time.time() - start_time
+                    result.route_path = (
+                        route_sidecar_path.name if route_sidecar_path is not None else None
+                    )
                     return result
                 except Exception:
                     pass
@@ -1507,6 +2485,32 @@ class ExpertDataCollector:
     # ------------------------------------------------------------------
 
     @staticmethod
+    def _route_fail_fast_decision(
+        config: EpisodeConfig,
+        route_sanitizer_report: dict[str, Any] | None,
+        route_watchdog_streak: int,
+    ) -> tuple[bool, str | None]:
+        """Return whether to abort the episode due to persistent route invalidity."""
+        if not config.route_fail_fast_enabled:
+            return False, None
+
+        base_limit = max(1, int(config.route_fail_fast_watchdog_streak_frames))
+        if route_watchdog_streak >= base_limit:
+            return True, f"watchdog_streak_{route_watchdog_streak}"
+
+        severe_count = 0
+        if route_sanitizer_report is not None:
+            severe_count = int(route_sanitizer_report.get("severe_transition_count", 0))
+
+        severe_limit = max(1, base_limit // 4)
+        if severe_count > 0 and route_watchdog_streak >= severe_limit:
+            return True, (
+                f"severe_sanitizer_watchdog_streak_{route_watchdog_streak}_of_{severe_limit}"
+            )
+
+        return False, None
+
+    @staticmethod
     def _parse_road_option(name: str) -> RoadOption:
         """Parse a road option string to RoadOption enum."""
         mapping = {
@@ -1528,6 +2532,264 @@ class ExpertDataCollector:
             "ChangeLaneRight": RoadOption.CHANGELANERIGHT,
         }
         return mapping.get(name, RoadOption.LANEFOLLOW)
+
+    @staticmethod
+    def _route_sanitizer_report(
+        route: list[tuple[Any, RoadOption]],
+        warn_gap_m: float,
+        severe_gap_m: float,
+        max_issues: int,
+    ) -> dict[str, Any]:
+        """Flag suspicious route transitions without mutating the route.
+
+        S1 intentionally keeps collection behavior unchanged and records
+        diagnostics only.
+        """
+        if len(route) < 2:
+            return {
+                "warn_gap_m": float(warn_gap_m),
+                "severe_gap_m": float(severe_gap_m),
+                "warn_transition_count": 0,
+                "severe_transition_count": 0,
+                "max_gap_m": 0.0,
+                "issues": [],
+            }
+
+        issues: list[dict[str, Any]] = []
+        warn_count = 0
+        severe_count = 0
+        max_gap = 0.0
+
+        for idx in range(len(route) - 1):
+            wp_prev, cmd_prev = route[idx]
+            wp_next, cmd_next = route[idx + 1]
+            loc_prev = wp_prev.transform.location
+            loc_next = wp_next.transform.location
+            gap_m = float(loc_prev.distance(loc_next))
+            max_gap = max(max_gap, gap_m)
+
+            same_command = cmd_prev == cmd_next
+            road_changed = int(getattr(wp_prev, "road_id", -1)) != int(
+                getattr(wp_next, "road_id", -1)
+            )
+
+            flagged = gap_m >= warn_gap_m and (same_command or road_changed)
+            if not flagged:
+                continue
+
+            warn_count += 1
+            severity = "severe" if gap_m >= severe_gap_m else "warn"
+            if severity == "severe":
+                severe_count += 1
+
+            if len(issues) < max(1, int(max_issues)):
+                issues.append(
+                    {
+                        "from_index": idx,
+                        "to_index": idx + 1,
+                        "gap_m": round(gap_m, 3),
+                        "severity": severity,
+                        "same_command": bool(same_command),
+                        "road_option_from": str(cmd_prev.name),
+                        "road_option_to": str(cmd_next.name),
+                        "road_id_from": int(getattr(wp_prev, "road_id", -1)),
+                        "road_id_to": int(getattr(wp_next, "road_id", -1)),
+                        "lane_id_from": int(getattr(wp_prev, "lane_id", -1)),
+                        "lane_id_to": int(getattr(wp_next, "lane_id", -1)),
+                    }
+                )
+
+        return {
+            "warn_gap_m": float(warn_gap_m),
+            "severe_gap_m": float(severe_gap_m),
+            "warn_transition_count": int(warn_count),
+            "severe_transition_count": int(severe_count),
+            "max_gap_m": round(max_gap, 3),
+            "issues": issues,
+        }
+
+    @staticmethod
+    def _route_transition_link_report(route: list[tuple[Any, RoadOption]]) -> dict[str, Any]:
+        """Summarize route transitions, with explicit junction-connector links.
+
+        A key diagnostic is that roads inside junctions often act as connectors
+        between roads outside the junction; we surface that as first-class data.
+        """
+        if len(route) < 2:
+            return {
+                "transition_count": 0,
+                "max_gap_m": 0.0,
+                "link_kind_counts": {},
+                "junction_connector_transfer_count": 0,
+                "junction_connectors": [],
+                "links": [],
+            }
+
+        links: list[dict[str, Any]] = []
+        kind_counts: dict[str, int] = {}
+        max_gap_m = 0.0
+
+        for idx in range(len(route) - 1):
+            wp_from, cmd_from = route[idx]
+            wp_to, cmd_to = route[idx + 1]
+
+            from_road = int(getattr(wp_from, "road_id", -1))
+            to_road = int(getattr(wp_to, "road_id", -1))
+            from_lane = int(getattr(wp_from, "lane_id", -1))
+            to_lane = int(getattr(wp_to, "lane_id", -1))
+            from_junction = bool(getattr(wp_from, "is_junction", False))
+            to_junction = bool(getattr(wp_to, "is_junction", False))
+            gap_m = float(wp_from.transform.location.distance(wp_to.transform.location))
+            max_gap_m = max(max_gap_m, gap_m)
+
+            if from_junction and to_junction:
+                kind = "junction_internal"
+            elif (not from_junction) and to_junction:
+                kind = "into_junction_connector"
+            elif from_junction and (not to_junction):
+                kind = "out_of_junction_connector"
+            elif from_road != to_road:
+                kind = "direct_road_change"
+            elif from_lane != to_lane:
+                kind = "lane_shift"
+            else:
+                kind = "continuous"
+
+            kind_counts[kind] = kind_counts.get(kind, 0) + 1
+
+            link: dict[str, Any] = {
+                "from_index": idx,
+                "to_index": idx + 1,
+                "kind": kind,
+                "gap_m": round(gap_m, 3),
+                "road_option_from": str(cmd_from.name),
+                "road_option_to": str(cmd_to.name),
+                "road_id_from": from_road,
+                "road_id_to": to_road,
+                "lane_id_from": from_lane,
+                "lane_id_to": to_lane,
+                "is_junction_from": from_junction,
+                "is_junction_to": to_junction,
+            }
+            if from_junction or to_junction:
+                link["connector_road_id"] = from_road if from_junction else to_road
+            links.append(link)
+
+        connector_aggregate: dict[int, dict[str, Any]] = {}
+        for idx in range(1, len(route) - 1):
+            wp_prev, _ = route[idx - 1]
+            wp_mid, _ = route[idx]
+            wp_next, _ = route[idx + 1]
+
+            if not bool(getattr(wp_mid, "is_junction", False)):
+                continue
+            if bool(getattr(wp_prev, "is_junction", False)) or bool(
+                getattr(wp_next, "is_junction", False)
+            ):
+                continue
+
+            in_road = int(getattr(wp_prev, "road_id", -1))
+            out_road = int(getattr(wp_next, "road_id", -1))
+            in_lane = int(getattr(wp_prev, "lane_id", -1))
+            out_lane = int(getattr(wp_next, "lane_id", -1))
+            connector_road = int(getattr(wp_mid, "road_id", -1))
+
+            if in_road == out_road and in_lane == out_lane:
+                continue
+
+            agg = connector_aggregate.setdefault(
+                connector_road,
+                {
+                    "connector_road_id": connector_road,
+                    "transfer_count": 0,
+                    "incoming_roads": set(),
+                    "outgoing_roads": set(),
+                },
+            )
+            agg["transfer_count"] += 1
+            agg["incoming_roads"].add(in_road)
+            agg["outgoing_roads"].add(out_road)
+
+        junction_connectors: list[dict[str, Any]] = []
+        for road_id in sorted(connector_aggregate):
+            agg = connector_aggregate[road_id]
+            junction_connectors.append(
+                {
+                    "connector_road_id": int(agg["connector_road_id"]),
+                    "transfer_count": int(agg["transfer_count"]),
+                    "incoming_roads": sorted(int(r) for r in agg["incoming_roads"]),
+                    "outgoing_roads": sorted(int(r) for r in agg["outgoing_roads"]),
+                }
+            )
+
+        return {
+            "transition_count": int(len(links)),
+            "max_gap_m": round(max_gap_m, 3),
+            "link_kind_counts": kind_counts,
+            "junction_connector_transfer_count": int(
+                sum(item["transfer_count"] for item in junction_connectors)
+            ),
+            "junction_connectors": junction_connectors,
+            "links": links,
+        }
+
+    def _write_route_sidecar(
+        self,
+        episode_hash: str,
+        config: EpisodeConfig,
+        route: list[tuple[Any, RoadOption]],
+        route_source: str,
+        sanitizer_report: dict[str, Any] | None = None,
+        planner_diagnostics: dict[str, Any] | None = None,
+    ) -> Path | None:
+        """Write route waypoints used for this episode to a JSON sidecar."""
+        if not route:
+            return None
+
+        route_points: list[dict[str, Any]] = []
+        for idx, (wp, road_option) in enumerate(route):
+            tf = wp.transform
+            route_points.append(
+                {
+                    "index": idx,
+                    "x": float(tf.location.x),
+                    "y": float(tf.location.y),
+                    "z": float(tf.location.z),
+                    "pitch": float(tf.rotation.pitch),
+                    "yaw": float(tf.rotation.yaw),
+                    "roll": float(tf.rotation.roll),
+                    "road_option": str(road_option.name),
+                    "road_id": int(getattr(wp, "road_id", -1)),
+                    "lane_id": int(getattr(wp, "lane_id", -1)),
+                    "is_junction": bool(getattr(wp, "is_junction", False)),
+                }
+            )
+
+        transition_links = self._route_transition_link_report(route)
+
+        payload = {
+            "episode_hash": episode_hash,
+            "town": config.town,
+            "weather": config.weather,
+            "n_vehicles": int(config.n_vehicles),
+            "n_walkers": int(config.n_walkers),
+            "fps": int(config.fps),
+            "max_frames": int(config.max_frames),
+            "route_source": route_source,
+            "route_planner_backend": str(config.expert_config.route_planner_backend),
+            "n_waypoints": len(route_points),
+            "waypoints": route_points,
+            "route_links": transition_links,
+            "created_utc": datetime.now(timezone.utc).isoformat(),
+        }
+        if sanitizer_report is not None:
+            payload["sanitizer"] = sanitizer_report
+        if planner_diagnostics is not None:
+            payload["planner_diagnostics"] = planner_diagnostics
+
+        sidecar = self.output_dir / f"episode_{episode_hash}.route.json"
+        sidecar.write_text(json.dumps(payload, indent=2))
+        return sidecar
 
 
 class CollectionManifest:
@@ -1559,6 +2821,7 @@ class CollectionManifest:
         entry = {
             "filename": result.filename,
             "hash": result.episode_hash,
+            "episode_hash": result.episode_hash,
             "town": result.town,
             "weather": result.weather,
             "n_vehicles": result.n_vehicles,
@@ -1571,6 +2834,8 @@ class CollectionManifest:
             "collision_other_actor": result.collision_other_actor,
             "duration_seconds": result.duration_seconds,
             "timestamp": datetime.now(timezone.utc).isoformat(),
+            "recording_path": result.recording_path,
+            "route_path": result.route_path,
         }
         if result.error_message:
             entry["error"] = result.error_message

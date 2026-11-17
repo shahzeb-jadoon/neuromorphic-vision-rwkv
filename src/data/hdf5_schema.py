@@ -12,9 +12,15 @@ v2  Added dual nav labels (planner + heuristic).
 v3  3-camera panoramic, custom expert (PrivilegedExpert), GPS/position
     data, traffic light state, nearby-actor bounding info.  Dropped
     legacy dual labels in favour of a single expert-derived nav command.
+v4  Added explicit nav telemetry channels (route-raw and speed-planning
+    commands) while keeping NAV_COMMAND as the primary training label.
+v5  Added explicit wp_buffer head waypoint telemetry (route index, road id,
+    lane id) for one-glance route-head forensics.
+v6  Added arc/policy interaction telemetry channels for policy-vs-steering
+    diagnostics (arc activity, policy block streak, steering source).
 """
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 6
 
 # --- Image data ---
 # Schema v3: panoramic image stitched from 3 cameras (H, W_total, 3) uint8.
@@ -27,10 +33,16 @@ THROTTLE = "throttle"
 BRAKE = "brake"
 
 # --- Navigation ---
-# Single ground-truth nav command from the PrivilegedExpert's route.
+# Primary training label after planner-policy filtering.
 # Values match agents.navigation.local_planner.RoadOption:
 #   LEFT=1, RIGHT=2, STRAIGHT=3, LANEFOLLOW=4
 NAV_COMMAND = "nav_command"
+
+# Extra telemetry channels for diagnostics (v4):
+# NAV_COMMAND_ROUTE is the raw route-local command before policy filtering.
+# NAV_COMMAND_SPEED is the command used by speed planning after safety guards.
+NAV_COMMAND_ROUTE = "nav_command_route"
+NAV_COMMAND_SPEED = "nav_command_speed"
 
 # Valid nav command IDs for schema v3 (used by validation / analysis scripts).
 # 1-4 are from RoadOption enum; 5-6 added for lane change support.
@@ -58,7 +70,12 @@ ROTATION = "rotation"  # (N, 3)  float32  degrees (pitch, yaw, roll)
 # --- Privileged / future-proofing (new in v3) ---
 TRAFFIC_LIGHT_STATE = "traffic_light_state"  # (N,)    int32  0=None 1=G 2=Y 3=R
 TRAFFIC_LIGHT_DISTANCE = "traffic_light_distance"  # (N,)  float32  metres (-1 if none)
+TRAFFIC_LIGHT_ACTOR_ID = "traffic_light_actor_id"  # (N,) int32 TL actor id (-1 if none)
+TRAFFIC_LIGHT_STOP_LINE_POSITION = (
+    "traffic_light_stop_line_position"  # (N,3) float32 stop-line xyz (-1s if unknown)
+)
 STOP_SIGN_DISTANCE = "stop_sign_distance"  # (N,)    float32  metres (-1 if none)
+YIELD_SIGN_DISTANCE = "yield_sign_distance"  # (N,)   float32  metres (-1 if none)
 TARGET_SPEED = "target_speed"  # (N,)    float32  km/h
 DRIVING_MODE = "driving_mode"  # (N,)    int32  DrivingMode enum
 NEARBY_VEHICLES = "nearby_vehicles"  # JSON string per frame
@@ -86,8 +103,33 @@ STATIONARY = "stationary"  # (N,) bool  speed < 0.5 km/h
 N_CORRIDOR_SEGMENTS = "n_corridor_segments"  # (N,) int32
 WP_BUFFER_SIZE = "wp_buffer_size"  # (N,) int32
 WP_BUFFER_HEAD_DIST = "wp_buffer_head_dist"  # (N,) float32 metres
+WP_BUFFER_HEAD_INDEX = "wp_buffer_head_index"  # (N,) int32 route index (-1 if synthetic/unknown)
+WP_BUFFER_HEAD_ROAD_ID = "wp_buffer_head_road_id"  # (N,) int32
+WP_BUFFER_HEAD_LANE_ID = "wp_buffer_head_lane_id"  # (N,) int32
+ARC_ACTIVE = "arc_active"  # (N,) int8 1 if Bezier arc buffer active
+ARC_SIZE = "arc_size"  # (N,) int32 number of waypoints in _arc_buffer
+POLICY_BLOCK_STREAK = "policy_block_streak"  # (N,) int32 consecutive policy blocks
+STEER_FROM_ARC = "steer_from_arc"  # (N,) int8 1 if steering target came from arc
 SAT_DETECTIONS = "sat_detections"  # (N,) int32
 LATERAL_DETECTIONS = "lateral_detections"  # (N,) int32
+GAP_FILL_RPCS = "gap_fill_rpcs"  # (N,) int32 cumulative gap-fill RPC attempts
+GAP_FILL_DIVERGED = "gap_fill_diverged"  # (N,) int32 count of junction gaps that diverged
+ROUTE_COMPLETION = "route_completion"  # (N,) float32 route progress 0.0–1.0
+
+# --- Planner policy diagnostics (waypoint checklist instrumentation) ---
+PLANNER_POLICY_REASON = "planner_policy_reason"  # (N,) int32 PlannerPolicyReason enum
+PLANNER_POLICY_EXCEPTION = "planner_policy_exception"  # (N,) int32 PlannerPolicyException enum
+DIST_TO_NEXT_JUNCTION = "dist_to_next_junction"  # (N,) float32 metres (-1 if unknown)
+PRE_JUNCTION_LANE_CHANGE_VIOLATION = "pre_junction_lane_change_violation"  # (N,) int8
+CONSECUTIVE_LANE_CHANGE_VIOLATION = "consecutive_lane_change_violation"  # (N,) int8
+STRAIGHT_EXIT_LANE_VIOLATION = "straight_exit_lane_violation"  # (N,) int8
+TURN_LANE_LEGALITY_VIOLATION = "turn_lane_legality_violation"  # (N,) int8
+ROUNDABOUT_LANE_CHANGE_VIOLATION = "roundabout_lane_change_violation"  # (N,) int8
+LEGALITY_WRONG_WAY_FILTERED = "legality_wrong_way_filtered"  # (N,) int32 cumulative
+LEGALITY_DO_NOT_ENTER_FILTERED = "legality_do_not_enter_filtered"  # (N,) int32 cumulative
+LEGALITY_TURN_MISMATCH_FILTERED = "legality_turn_mismatch_filtered"  # (N,) int32 cumulative
+LEGALITY_CONTINUITY_KEPT = "legality_continuity_kept"  # (N,) int32 cumulative
+ROUTE_WATCHDOG_TRIGGERED = "route_watchdog_triggered"  # (N,) int8 frame-level watchdog trip
 
 # --- Metadata group and attribute names ---
 METADATA_GROUP = "metadata"

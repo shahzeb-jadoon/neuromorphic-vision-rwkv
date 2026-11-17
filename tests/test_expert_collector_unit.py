@@ -3,7 +3,8 @@
 Tests the non-CARLA parts: dataclasses, _detect_wsl2_host,
 _StreamingEpisodeWriter, and hash generation. CARLA is mocked where needed.
 
-Updated for schema v3: panoramic images, PrivilegedExpert, no NAV_MAP.
+Updated for schema v6: panoramic images, PrivilegedExpert, nav telemetry channels,
+explicit waypoint-head telemetry channels, and arc/policy diagnostics.
 """
 
 from __future__ import annotations
@@ -16,6 +17,7 @@ import h5py
 import numpy as np
 import pytest
 
+from agents.navigation.local_planner import RoadOption
 from src.data import hdf5_schema as S
 from src.data.expert_collector import (
     EpisodeConfig,
@@ -40,6 +42,8 @@ class TestEpisodeConfig:
         assert cfg.camera_height == 320
         assert cfg.camera_fov == 60
         assert cfg.camera_yaws == (-60.0, 0.0, 60.0)
+        assert cfg.route_fail_fast_enabled is True
+        assert cfg.route_fail_fast_watchdog_streak_frames == 20
 
     def test_override(self) -> None:
         cfg = EpisodeConfig(town="Town03", weather="WetNoon", max_frames=500)
@@ -116,8 +120,8 @@ class TestDetectWSL2Host:
 class TestHDF5Schema:
     """Tests that schema constants are consistent."""
 
-    def test_schema_version_is_v3(self) -> None:
-        assert S.SCHEMA_VERSION == 3
+    def test_schema_version_is_v6(self) -> None:
+        assert S.SCHEMA_VERSION == 6
 
     def test_required_fields_exist(self) -> None:
         for field in [
@@ -127,14 +131,37 @@ class TestHDF5Schema:
             S.BRAKE,
             S.VELOCITY,
             S.NAV_COMMAND,
+            S.NAV_COMMAND_ROUTE,
+            S.NAV_COMMAND_SPEED,
             S.POSITION,
             S.ROTATION,
             S.TRAFFIC_LIGHT_STATE,
+            S.TRAFFIC_LIGHT_DISTANCE,
+            S.TRAFFIC_LIGHT_ACTOR_ID,
+            S.TRAFFIC_LIGHT_STOP_LINE_POSITION,
             S.STOP_SIGN_DISTANCE,
             S.TARGET_SPEED,
             S.DRIVING_MODE,
+            S.GAP_FILL_RPCS,
+            S.WP_BUFFER_HEAD_INDEX,
+            S.WP_BUFFER_HEAD_ROAD_ID,
+            S.WP_BUFFER_HEAD_LANE_ID,
+            S.ARC_ACTIVE,
+            S.ARC_SIZE,
+            S.POLICY_BLOCK_STREAK,
+            S.STEER_FROM_ARC,
+            S.PLANNER_POLICY_REASON,
+            S.PLANNER_POLICY_EXCEPTION,
+            S.DIST_TO_NEXT_JUNCTION,
+            S.PRE_JUNCTION_LANE_CHANGE_VIOLATION,
+            S.CONSECUTIVE_LANE_CHANGE_VIOLATION,
+            S.STRAIGHT_EXIT_LANE_VIOLATION,
+            S.TURN_LANE_LEGALITY_VIOLATION,
+            S.LEGALITY_CONTINUITY_KEPT,
+            S.ROUTE_WATCHDOG_TRIGGERED,
             S.NEARBY_VEHICLES,
             S.NEARBY_PEDESTRIANS,
+            S.ROUNDABOUT_LANE_CHANGE_VIOLATION,
         ]:
             assert isinstance(field, str)
             assert len(field) > 0
@@ -176,12 +203,17 @@ class _FakeFrameInfo:
 
     def __init__(self, nav_command: int = 4, speed_kmh: float = 30.0):
         self.nav_command = nav_command
+        self.nav_command_route = nav_command
+        self.nav_command_speed = nav_command
         self.position = [10.0, 20.0, 0.5]
         self.rotation = [0.0, 90.0, 0.0]
         self.velocity = [speed_kmh / 3.6, 0.0, 0.0]
         self.traffic_light_state = 0
         self.traffic_light_distance = -1.0
+        self.traffic_light_actor_id = -1
+        self.traffic_light_stop_line_position = [-1.0, -1.0, -1.0]
         self.stop_sign_distance = -1.0
+        self.yield_sign_distance = -1.0
         self.target_speed = 8.33
         self.driving_mode = 0
         self.nearby_vehicles: list[dict[str, Any]] = []
@@ -189,10 +221,32 @@ class _FakeFrameInfo:
         self.n_corridor_segments = 10
         self.wp_buffer_size = 20
         self.wp_buffer_head_dist = 3.5
+        self.wp_buffer_head_index = 120
+        self.wp_buffer_head_road_id = 14
+        self.wp_buffer_head_lane_id = 2
+        self.arc_active = 0
+        self.arc_size = 0
+        self.policy_block_streak = 0
+        self.steer_from_arc = 0
         self.sat_detections = 0
         self.lateral_detections = 0
+        self.gap_fill_diverged = 0
+        self.gap_fill_rpcs = 0
         self.current_speed = speed_kmh
         self.route_completion = 0.5
+        self.planner_policy_reason = 0
+        self.planner_policy_exception = 0
+        self.dist_to_next_junction = -1.0
+        self.pre_junction_lane_change_violation = 0
+        self.consecutive_lane_change_violation = 0
+        self.straight_exit_lane_violation = 0
+        self.turn_lane_legality_violation = 0
+        self.roundabout_lane_change_violation = 0
+        self.legality_wrong_way_filtered = 0
+        self.legality_do_not_enter_filtered = 0
+        self.legality_turn_mismatch_filtered = 0
+        self.legality_continuity_kept = 0
+        self.route_watchdog_triggered = 0
 
 
 class TestStreamingEpisodeWriter:
@@ -207,7 +261,7 @@ class TestStreamingEpisodeWriter:
         return tmp_path / "episode_test1234.h5"
 
     def test_write_and_finalize(self, filepath: Path, config: EpisodeConfig) -> None:
-        """Writer creates a valid HDF5 file with all schema v3 fields."""
+        """Writer creates a valid HDF5 file with all schema v6 fields."""
         n_frames = 20
         writer = _StreamingEpisodeWriter(filepath, config, max_frames=config.max_frames)
 
@@ -225,7 +279,23 @@ class TestStreamingEpisodeWriter:
         with h5py.File(filepath, "r") as f:
             assert f[S.IMAGES].shape == (n_frames, config.camera_height, pano_w, 3)
             assert f[S.STEERING].shape == (n_frames,)
+            assert f[S.NAV_COMMAND_ROUTE].shape == (n_frames,)
+            assert f[S.NAV_COMMAND_SPEED].shape == (n_frames,)
             assert f[S.POSITION].shape == (n_frames, 3)
+            assert f[S.GAP_FILL_RPCS].shape == (n_frames,)
+            assert f[S.WP_BUFFER_HEAD_INDEX].shape == (n_frames,)
+            assert f[S.WP_BUFFER_HEAD_ROAD_ID].shape == (n_frames,)
+            assert f[S.WP_BUFFER_HEAD_LANE_ID].shape == (n_frames,)
+            assert f[S.ARC_ACTIVE].shape == (n_frames,)
+            assert f[S.ARC_SIZE].shape == (n_frames,)
+            assert f[S.POLICY_BLOCK_STREAK].shape == (n_frames,)
+            assert f[S.STEER_FROM_ARC].shape == (n_frames,)
+            assert f[S.PLANNER_POLICY_REASON].shape == (n_frames,)
+            assert f[S.PRE_JUNCTION_LANE_CHANGE_VIOLATION].shape == (n_frames,)
+            assert f[S.TURN_LANE_LEGALITY_VIOLATION].shape == (n_frames,)
+            assert f[S.LEGALITY_CONTINUITY_KEPT].shape == (n_frames,)
+            assert f[S.ROUTE_WATCHDOG_TRIGGERED].shape == (n_frames,)
+            assert f[S.ROUNDABOUT_LANE_CHANGE_VIOLATION].shape == (n_frames,)
             assert S.STATIONARY in f
             assert S.METADATA_GROUP in f
             assert f[S.METADATA_GROUP].attrs[S.META_N_FRAMES] == n_frames
@@ -285,3 +355,138 @@ class TestStreamingEpisodeWriter:
         result = writer.finalize(status="completed", collision_frame=None)
         assert result.nav_distribution["LaneFollow"] == 10
         assert result.nav_distribution["Left"] == 5
+
+
+class _FakeWaypoint:
+    def __init__(
+        self,
+        x: float,
+        y: float,
+        road_id: int,
+        lane_id: int,
+        *,
+        is_junction: bool = False,
+    ) -> None:
+        self.transform = MagicMock()
+        self.transform.location = _FakeLocation(x, y)
+        self.road_id = road_id
+        self.lane_id = lane_id
+        self.is_junction = is_junction
+
+
+class _FakeLocation:
+    def __init__(self, x: float, y: float) -> None:
+        self.x = x
+        self.y = y
+        self.z = 0.0
+
+    def distance(self, other: "_FakeLocation") -> float:
+        dx = self.x - other.x
+        dy = self.y - other.y
+        return float((dx * dx + dy * dy) ** 0.5)
+
+
+class TestRouteSanitizer:
+    def test_flags_large_same_command_transition(self) -> None:
+        wp0 = _FakeWaypoint(0.0, 0.0, 1, 1)
+        wp1 = _FakeWaypoint(35.0, 0.0, 1, 1)
+        wp2 = _FakeWaypoint(37.0, 0.0, 1, 1)
+
+        route = [
+            (wp0, RoadOption.LANEFOLLOW),
+            (wp1, RoadOption.LANEFOLLOW),
+            (wp2, RoadOption.LEFT),
+        ]
+
+        report = ExpertDataCollector._route_sanitizer_report(
+            route=route,
+            warn_gap_m=12.0,
+            severe_gap_m=30.0,
+            max_issues=10,
+        )
+
+        assert report["warn_transition_count"] == 1
+        assert report["severe_transition_count"] == 1
+        assert len(report["issues"]) == 1
+        assert report["issues"][0]["severity"] == "severe"
+
+
+class TestRouteTransitionLinkReport:
+    def test_tracks_junction_connector_transfers(self) -> None:
+        wp0 = _FakeWaypoint(0.0, 0.0, 10, 1, is_junction=False)
+        wp1 = _FakeWaypoint(2.0, 0.0, 100, 1, is_junction=True)
+        wp2 = _FakeWaypoint(4.0, 1.0, 20, 1, is_junction=False)
+
+        route = [
+            (wp0, RoadOption.LANEFOLLOW),
+            (wp1, RoadOption.LEFT),
+            (wp2, RoadOption.LANEFOLLOW),
+        ]
+
+        report = ExpertDataCollector._route_transition_link_report(route)
+
+        assert report["transition_count"] == 2
+        assert report["junction_connector_transfer_count"] == 1
+        assert len(report["junction_connectors"]) == 1
+        assert report["junction_connectors"][0]["connector_road_id"] == 100
+        assert report["junction_connectors"][0]["incoming_roads"] == [10]
+        assert report["junction_connectors"][0]["outgoing_roads"] == [20]
+
+
+class TestRouteFailFast:
+    def test_default_config_keeps_fail_fast_and_sanitizer_thresholds(self) -> None:
+        cfg = EpisodeConfig()
+
+        assert cfg.route_fail_fast_enabled is True
+        assert cfg.route_fail_fast_watchdog_streak_frames > 0
+        assert cfg.route_sanitizer_warn_gap_m > 0.0
+        assert cfg.route_sanitizer_severe_gap_m >= cfg.route_sanitizer_warn_gap_m
+
+    def test_default_config_aborts_on_severe_watchdog_streak_five(self) -> None:
+        cfg = EpisodeConfig()
+
+        abort, reason = ExpertDataCollector._route_fail_fast_decision(
+            config=cfg,
+            route_sanitizer_report={"severe_transition_count": 1},
+            route_watchdog_streak=5,
+        )
+
+        assert abort is True
+        assert reason == "severe_sanitizer_watchdog_streak_5_of_5"
+
+    def test_aborts_on_watchdog_streak_threshold(self) -> None:
+        cfg = EpisodeConfig(route_fail_fast_enabled=True, route_fail_fast_watchdog_streak_frames=8)
+
+        abort, reason = ExpertDataCollector._route_fail_fast_decision(
+            config=cfg,
+            route_sanitizer_report=None,
+            route_watchdog_streak=8,
+        )
+
+        assert abort is True
+        assert reason == "watchdog_streak_8"
+
+    def test_aborts_earlier_when_sanitizer_marked_severe(self) -> None:
+        cfg = EpisodeConfig(route_fail_fast_enabled=True, route_fail_fast_watchdog_streak_frames=20)
+        report = {"severe_transition_count": 2}
+
+        abort, reason = ExpertDataCollector._route_fail_fast_decision(
+            config=cfg,
+            route_sanitizer_report=report,
+            route_watchdog_streak=5,
+        )
+
+        assert abort is True
+        assert reason == "severe_sanitizer_watchdog_streak_5_of_5"
+
+    def test_no_abort_when_fail_fast_disabled(self) -> None:
+        cfg = EpisodeConfig(route_fail_fast_enabled=False, route_fail_fast_watchdog_streak_frames=1)
+
+        abort, reason = ExpertDataCollector._route_fail_fast_decision(
+            config=cfg,
+            route_sanitizer_report={"severe_transition_count": 99},
+            route_watchdog_streak=999,
+        )
+
+        assert abort is False
+        assert reason is None

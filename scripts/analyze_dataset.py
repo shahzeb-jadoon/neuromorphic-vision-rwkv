@@ -43,6 +43,14 @@ def analyze_dataset(data_dir: Path, save_samples: int = 0) -> None:
     steering_all = []
     throttle_all = []
     episode_lengths = []
+    policy_episodes = 0
+    policy_frames = 0
+    ev03_violations = 0
+    ev03_episodes = 0
+    ev03_frames = 0
+    ev08_violations = 0
+    ev09_violations = 0
+    ev10_violations = 0
 
     for ep_path in episodes:
         total_size_bytes += ep_path.stat().st_size
@@ -66,6 +74,22 @@ def analyze_dataset(data_dir: Path, save_samples: int = 0) -> None:
             town_counts[meta.attrs[S.META_TOWN]] += 1
             weather_counts[meta.attrs[S.META_WEATHER]] += 1
             status_counts[meta.attrs[S.META_STATUS]] += 1
+
+            policy_fields = (
+                S.PRE_JUNCTION_LANE_CHANGE_VIOLATION,
+                S.CONSECUTIVE_LANE_CHANGE_VIOLATION,
+                S.STRAIGHT_EXIT_LANE_VIOLATION,
+            )
+            if all(field in f for field in policy_fields):
+                policy_episodes += 1
+                policy_frames += n_frames
+                if S.TURN_LANE_LEGALITY_VIOLATION in f:
+                    ev03_episodes += 1
+                    ev03_frames += n_frames
+                    ev03_violations += int(np.sum(f[S.TURN_LANE_LEGALITY_VIOLATION][:] > 0))
+                ev08_violations += int(np.sum(f[S.PRE_JUNCTION_LANE_CHANGE_VIOLATION][:] > 0))
+                ev09_violations += int(np.sum(f[S.CONSECUTIVE_LANE_CHANGE_VIOLATION][:] > 0))
+                ev10_violations += int(np.sum(f[S.STRAIGHT_EXIT_LANE_VIOLATION][:] > 0))
 
     # Summary
     fps = 20  # Assumed
@@ -128,6 +152,34 @@ def analyze_dataset(data_dir: Path, save_samples: int = 0) -> None:
         f"  Throttle:  mean={all_throttle.mean():.4f}, std={all_throttle.std():.4f}, "
         f"min={all_throttle.min():.4f}, max={all_throttle.max():.4f}"
     )
+    print()
+
+    print("Waypoint policy evaluation (EV-08..EV-10):")
+    if policy_episodes == 0 or policy_frames == 0:
+        print("  Policy telemetry not present in this dataset")
+    else:
+
+        def _ev_line(label: str, count: int) -> None:
+            rate = 1000.0 * count / max(policy_frames, 1)
+            status = "PASS" if count == 0 else "FAIL"
+            print(f"  {label}: {count} violations ({rate:.2f} / 1k frames) -> {status}")
+
+        def _ev_line_cov(label: str, count: int, frames: int, episodes_with_field: int) -> None:
+            rate = 1000.0 * count / max(frames, 1)
+            status = "PASS" if count == 0 else "FAIL"
+            print(
+                f"  {label}: {count} violations ({rate:.2f} / 1k frames) -> {status} "
+                f"[{episodes_with_field}/{policy_episodes} episodes]"
+            )
+
+        print(f"  Episodes with policy telemetry: {policy_episodes}/{len(episodes)}")
+        if ev03_episodes > 0:
+            _ev_line_cov("EV-03 turn-lane legality", ev03_violations, ev03_frames, ev03_episodes)
+        else:
+            print("  EV-03 turn-lane legality: telemetry not present")
+        _ev_line("EV-08 pre-junction lane-change", ev08_violations)
+        _ev_line("EV-09 consecutive lane-change", ev09_violations)
+        _ev_line("EV-10 straight-in-exit-lane", ev10_violations)
     print()
 
     # Save random sample frames

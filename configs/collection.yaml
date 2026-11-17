@@ -35,7 +35,42 @@ expert:
   traffic_light_brake_distance: 80.0
   vehicle_hazard_distance: 25.0
   pedestrian_hazard_distance: 15.0
+  pedestrian_emergency_distance: 5.0
+  vehicle_vertical_conflict_max_m: 2.0
+  vehicle_allow_lateral_fallback: false
+  vehicle_oncoming_conflict_gate_enabled: true
+  oncoming_lead_lateral_max_m: 1.2
+  oncoming_lead_longitudinal_max_m: 12.0
+  oncoming_lead_ttc_max_s: 1.5
+  oncoming_lead_min_closing_speed_kmh: 5.0
+  route_tail_extension_enabled: true
   turn_speed_factor: 0.45
+  steering_noise_sigma: 0.05
+  # Waypoint planner policy scaffolding (Commit A)
+  planner_policy_enabled: true
+  planner_legality_filter_enabled: true
+  planner_wrong_way_max_yaw_diff_deg: 110.0
+  planner_allow_lane_id_sign_flip: false
+  planner_turn_mismatch_threshold_deg: 20.0
+  planner_turn_lane_validation_enabled: true
+  planner_lane_change_freeze_distance_m: 30.0
+  planner_lane_change_consecutive_window_m: 30.0
+  planner_mandatory_exit_window_m: 30.0
+  planner_exit_lane_leave_distance_m: 30.0
+  planner_legality_max_skip_gap_m: 30.0
+  route_watchdog_enabled: true
+  route_watchdog_wp_buffer_head_dist_m: 30.0
+  route_watchdog_min_corridor_segments: 1
+  route_watchdog_min_frames: 3
+  route_watchdog_stall_min_frames: 80
+  route_watchdog_progress_epsilon: 0.0001
+  route_watchdog_min_moving_speed_kmh: 5.0
+  route_watchdog_heading_mismatch_deg: 75.0
+  route_watchdog_tl_hold_exempt_speed_kmh: 8.0
+  planner_roundabout_commitment_enabled: true
+  planner_roundabout_context_window_m: 35.0
+  planner_roundabout_lane_change_cooldown_m: 35.0
+  gap_fill_startup_circuit_breaker_enabled: true
 
 # Towns for training data collection
 towns:
@@ -79,6 +114,21 @@ routes:
     left: 0.15
     right: 0.15
     straight: 0.10
+  campaign_turn_balance:
+    enabled: false             # Optional Commit 5: bounded campaign-level correction
+    max_adjust: 0.05           # Per-turn target correction cap (absolute fraction)
+    smoothing_alpha: 0.35      # EMA factor for deficit smoothing (0..1)
+    min_turn_samples: 20       # Wait for this many observed turn labels before correcting
+  continuation:
+    enabled: true              # R2/R3: chain routes after true exhaustion (expert.done())
+    mode: atlas_chain          # off | micro_replan | atlas_chain
+    max_chains_per_episode: 8  # hard cap for bounded runtime + diagnostics clarity
+    min_route_length: 120      # continuation route floor (waypoints)
+    max_route_length: 260      # continuation route cap (waypoints)
+    preload_remaining_waypoints: 40  # pre-load next route near end to avoid late control handoff
+    atlas_active_horizon: 4    # lazy-loaded destination anchors kept ready
+    atlas_bank_size: 24        # strict memory cap for queued atlas anchors
+    atlas_min_destination_distance_m: 60.0
   min_route_length: 100        # Minimum waypoints
   max_route_length: 500        # Maximum waypoints
 
@@ -86,7 +136,7 @@ routes:
 episode:
   max_frames: 4000             # ~200 seconds at 20 FPS
   timeout_speed: 0.1           # m/s — below this for timeout_duration → discard
-  timeout_duration: 75         # seconds stuck before timeout
+  timeout_duration: 120         # seconds stuck before timeout (increased from 75 to handle TL marginal cases)
   crash_retries: 3             # CARLA reconnection attempts
   crash_wait: 30               # seconds to wait between retries
 

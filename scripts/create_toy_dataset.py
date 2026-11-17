@@ -25,10 +25,12 @@ NAV_COMMANDS = {
     2: "Right",
     3: "Straight",
     4: "LaneFollow",
+    5: "ChangeLeft",
+    6: "ChangeRight",
 }
 
-# Target distribution for nav commands (Left, Right, Straight, LaneFollow)
-NAV_WEIGHTS = [0.15, 0.15, 0.10, 0.60]
+# Target distribution for nav commands (Left, Right, Straight, LaneFollow, ChangeLeft, ChangeRight)
+NAV_WEIGHTS = [0.15, 0.15, 0.10, 0.55, 0.025, 0.025]
 
 # Label codes, taken from the schema so toy data matches what the expert writes.
 _MODE = {name: code for code, name in S.DRIVING_MODE_NAMES.items()}
