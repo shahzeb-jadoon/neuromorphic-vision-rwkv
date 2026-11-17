@@ -98,3 +98,51 @@ Detach and give the disk back to Windows:
 wsl --unmount \\.\PHYSICALDRIVE<N>
 Set-Disk -Number <N> -IsOffline $false
 ```
+
+## Second machine (Apple silicon)
+
+An Apple silicon Mac can run tests, data audits, offline evaluation and small baselines
+while the GPU machine runs CARLA. It cannot run CARLA (no macOS build) or the Triton
+kernels; PyTorch uses the Apple GPU through MPS.
+
+### Code
+
+The Mac's clone accepts pushes straight from the GPU machine and updates its working
+tree. With SSH access to the Mac under the host alias `mac`:
+
+```bash
+# on the Mac, once
+git init ~/projects/neuromorphic-vision-rwkv
+git -C ~/projects/neuromorphic-vision-rwkv config receive.denyCurrentBranch updateInstead
+# on the GPU machine
+git remote add mac mac:projects/neuromorphic-vision-rwkv
+git push mac <branch>          # then, the first time only: git checkout <branch> on the Mac
+```
+
+Keep the Mac's working tree clean; a push that would overwrite local changes is refused.
+
+### Environment
+
+```bash
+conda env create -f environment-macos.yml        # env name: rwkv
+conda run -n rwkv pip install -e . --no-deps
+conda run -n rwkv make toy-data
+conda run -n rwkv make env-check                 # trains on "mps (Apple GPU)"
+```
+
+`requirements-lock-macos.txt` pins the same versions as `requirements-lock.txt`, minus
+CUDA and NVIDIA libraries, Triton, the CARLA client and the unused `rwkv` package.
+Re-pin with `make lock-macos` after `make lock`.
+
+### Large data
+
+Move datasets on an external drive rather than over the network. macOS needs a
+third-party driver to read ext4, and such drivers are often read-only, so write data on
+the Linux machine.
+
+### Numerical agreement between machines
+
+The same seed gives nearly, but not bit-for-bit, identical runs on the two CPU
+architectures: freshly initialised weights already differ by a few float32 units in the
+last place (about 6e-9), and a seeded forward pass differs by up to 4e-7. Compare runs
+across machines with tolerances, not exact equality.
