@@ -42,9 +42,7 @@ simulator = [
 dev = [
     "pytest>=8.0",
     "pytest-cov>=4.0",
-    "black>=24.0",
-    "flake8>=7.0",
-    "flake8-pyproject>=1.2",
+    "ruff>=0.8",
     "mypy>=1.8",
     "pre-commit>=3.6",
     "optuna>=3.6.0",
@@ -86,15 +84,13 @@ module = ["agents.*"]
 ignore_missing_imports = true
 follow_imports = "skip"
 
-[tool.black]
+[tool.ruff]
 line-length = 100
-target-version = ["py311"]
-extend-exclude = "agents/"
+target-version = "py311"
+extend-exclude = ["agents"]
 
-[tool.flake8]
-max-line-length = 100
-extend-ignore = ["E203", "W503"]
-exclude = [".git", "__pycache__", "build", "dist", "agents/"]
+[tool.ruff.lint]
+select = ["E", "F", "W"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

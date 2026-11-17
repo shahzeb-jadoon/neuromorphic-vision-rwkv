@@ -8,23 +8,18 @@ repos:
       - id: check-added-large-files
         args: ['--maxkb=500']
 
-  - repo: https://github.com/psf/black
-    rev: 24.4.2
-    hooks:
-      - id: black
-        args: ['--line-length=100']
-        language_version: python3.11
-        exclude: '^agents/'
-
-  - repo: https://github.com/pycqa/flake8
-    rev: 7.1.0
-    hooks:
-      - id: flake8
-        additional_dependencies: ['flake8-pyproject>=1.2']
-        exclude: '^agents/'
-
   - repo: local
     hooks:
+      - id: ruff
+        name: ruff
+        entry: conda run --no-capture-output -n rwkv ruff check --force-exclude
+        language: system
+        types: [python]
+      - id: ruff-format
+        name: ruff format
+        entry: conda run --no-capture-output -n rwkv ruff format --force-exclude
+        language: system
+        types: [python]
       - id: mypy
         name: mypy
         entry: conda run --no-capture-output -n rwkv mypy

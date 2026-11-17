@@ -47,17 +47,17 @@ test:  ## Run offline tests with coverage (no CARLA needed)
 test-online:  ## Run CARLA integration tests (requires live CARLA server)
 	pytest tests/ -v -m online
 
-lint:  ## Run linting (flake8)
-	flake8 src/ scripts/ tests/ agents/
+lint:  ## Lint with ruff
+	ruff check src/ scripts/ tests/
 
-format:  ## Check formatting (black)
-	black --check --line-length 100 src/ scripts/ tests/ agents/
+format:  ## Check formatting with ruff
+	ruff format --check src/ scripts/ tests/
 
-format-fix:  ## Auto-format code with black
-	black --line-length 100 src/ scripts/ tests/ agents/
+format-fix:  ## Format code with ruff
+	ruff format src/ scripts/ tests/
 
-typecheck:  ## Run type checking (mypy)
-	mypy src/ --config-file pyproject.toml
+typecheck:  ## Type-check with mypy
+	mypy --config-file=pyproject.toml scripts/ src/ tests/
 
 ci: lint format typecheck test  ## Run full CI pipeline locally
 
