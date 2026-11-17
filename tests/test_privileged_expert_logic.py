@@ -146,7 +146,9 @@ def test_plan_speed_tl_mode_not_masked_by_lower_target(monkeypatch: MonkeyPatch)
     expert._prev_target = 10.0
     fake_tl = SimpleNamespace(Green=1, Yellow=2, Red=3)
     monkeypatch.setattr(
-        "agents.expert.privileged_expert.carla", SimpleNamespace(TrafficLightState=fake_tl)
+        "agents.expert.privileged_expert.carla",
+        SimpleNamespace(TrafficLightState=fake_tl),
+        raising=False,
     )
 
     target, mode = expert._plan_speed(
@@ -174,7 +176,9 @@ def test_plan_speed_stopped_lead_uses_queue_following_under_red_tl(
     expert._prev_target = 20.0
     fake_tl = SimpleNamespace(Green=1, Yellow=2, Red=3)
     monkeypatch.setattr(
-        "agents.expert.privileged_expert.carla", SimpleNamespace(TrafficLightState=fake_tl)
+        "agents.expert.privileged_expert.carla",
+        SimpleNamespace(TrafficLightState=fake_tl),
+        raising=False,
     )
 
     target, mode = expert._plan_speed(
@@ -200,7 +204,9 @@ def test_plan_speed_fast_lead_keeps_traffic_light_authority(monkeypatch: MonkeyP
     expert._prev_target = 20.0
     fake_tl = SimpleNamespace(Green=1, Yellow=2, Red=3)
     monkeypatch.setattr(
-        "agents.expert.privileged_expert.carla", SimpleNamespace(TrafficLightState=fake_tl)
+        "agents.expert.privileged_expert.carla",
+        SimpleNamespace(TrafficLightState=fake_tl),
+        raising=False,
     )
 
     target, mode = expert._plan_speed(
@@ -226,7 +232,9 @@ def test_plan_speed_stopped_lead_in_emergency_range_overrides_tl(monkeypatch: Mo
     expert._prev_target = 30.0
     fake_tl = SimpleNamespace(Green=1, Yellow=2, Red=3)
     monkeypatch.setattr(
-        "agents.expert.privileged_expert.carla", SimpleNamespace(TrafficLightState=fake_tl)
+        "agents.expert.privileged_expert.carla",
+        SimpleNamespace(TrafficLightState=fake_tl),
+        raising=False,
     )
 
     target, mode = expert._plan_speed(
@@ -254,7 +262,9 @@ def test_plan_speed_yellow_requires_junction_clearance(monkeypatch: MonkeyPatch)
 
     fake_tl = SimpleNamespace(Green=1, Yellow=2, Red=3)
     monkeypatch.setattr(
-        "agents.expert.privileged_expert.carla", SimpleNamespace(TrafficLightState=fake_tl)
+        "agents.expert.privileged_expert.carla",
+        SimpleNamespace(TrafficLightState=fake_tl),
+        raising=False,
     )
 
     target, mode = expert._plan_speed(
@@ -282,7 +292,9 @@ def test_plan_speed_yellow_commit_respects_max_distance(monkeypatch: MonkeyPatch
 
     fake_tl = SimpleNamespace(Green=1, Yellow=2, Red=3)
     monkeypatch.setattr(
-        "agents.expert.privileged_expert.carla", SimpleNamespace(TrafficLightState=fake_tl)
+        "agents.expert.privileged_expert.carla",
+        SimpleNamespace(TrafficLightState=fake_tl),
+        raising=False,
     )
 
     target, mode = expert._plan_speed(
@@ -311,7 +323,9 @@ def test_plan_speed_full_stop_clears_yellow_commit(monkeypatch: MonkeyPatch) -> 
 
     fake_tl = SimpleNamespace(Green=1, Yellow=2, Red=3)
     monkeypatch.setattr(
-        "agents.expert.privileged_expert.carla", SimpleNamespace(TrafficLightState=fake_tl)
+        "agents.expert.privileged_expert.carla",
+        SimpleNamespace(TrafficLightState=fake_tl),
+        raising=False,
     )
 
     target, mode = expert._plan_speed(
@@ -340,7 +354,9 @@ def test_plan_speed_moving_keeps_yellow_commit(monkeypatch: MonkeyPatch) -> None
 
     fake_tl = SimpleNamespace(Green=1, Yellow=2, Red=3)
     monkeypatch.setattr(
-        "agents.expert.privileged_expert.carla", SimpleNamespace(TrafficLightState=fake_tl)
+        "agents.expert.privileged_expert.carla",
+        SimpleNamespace(TrafficLightState=fake_tl),
+        raising=False,
     )
 
     target, mode = expert._plan_speed(
@@ -473,7 +489,9 @@ def test_turning_keeps_stopped_vehicle_in_corridor_as_blocker(monkeypatch: Monke
 
     fake_tl = SimpleNamespace(Green=1, Yellow=2, Red=3)
     monkeypatch.setattr(
-        "agents.expert.privileged_expert.carla", SimpleNamespace(TrafficLightState=fake_tl)
+        "agents.expert.privileged_expert.carla",
+        SimpleNamespace(TrafficLightState=fake_tl),
+        raising=False,
     )
     setattr(expert, "_dynamic_half_lane", lambda _t: 1.75)
 
@@ -505,7 +523,9 @@ def test_turning_emergency_distance_overrides_lateral_nulling(monkeypatch: Monke
 
     fake_tl = SimpleNamespace(Green=1, Yellow=2, Red=3)
     monkeypatch.setattr(
-        "agents.expert.privileged_expert.carla", SimpleNamespace(TrafficLightState=fake_tl)
+        "agents.expert.privileged_expert.carla",
+        SimpleNamespace(TrafficLightState=fake_tl),
+        raising=False,
     )
 
     # lead_distance is inside dyn_emergency at 20 km/h, while lead_lateral is
@@ -947,6 +967,7 @@ def test_detect_pedestrians_includes_world_and_vertical_fields(monkeypatch: Monk
     monkeypatch.setattr(
         "agents.expert.privileged_expert.carla",
         SimpleNamespace(Vector3D=lambda x, y, z: SimpleNamespace(x=x, y=y, z=z)),
+        raising=False,
     )
 
     walker_loc = _Loc(6.0, 1.0, 1.2)
@@ -1834,7 +1855,9 @@ def test_route_watchdog_tl_hold_exempts_stall_signature(monkeypatch: MonkeyPatch
 
     fake_tl = SimpleNamespace(Green=1, Yellow=2, Red=3)
     monkeypatch.setattr(
-        "agents.expert.privileged_expert.carla", SimpleNamespace(TrafficLightState=fake_tl)
+        "agents.expert.privileged_expert.carla",
+        SimpleNamespace(TrafficLightState=fake_tl),
+        raising=False,
     )
 
     target, mode = expert._apply_route_continuity_watchdog(
