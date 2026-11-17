@@ -1,0 +1,99 @@
+# Environment smoke test: a tiny model trained for one epoch on the toy dataset.
+# Used by `make env-check` to prove that data loading, the forward and backward
+# passes, mixed precision, checkpointing and logging all work in an environment.
+# Toy data: 10 episodes x 100 frames; 16-frame clips with stride 16 give
+# 48 training clips, i.e. 24 optimizer steps at batch size 2.
+
+run:
+  output_root: runs/smoke
+  name_prefix: smoke
+  run_name: null
+  tags: [smoke]
+  seed: 0
+  deterministic: true
+  resume: never
+  device: auto
+
+dataset:
+  data_dir: data/toy
+  seq_len: 16
+  stride: 16
+  val_fraction: 0.2
+  batch_size: 2
+  num_workers: 0
+  pin_memory: false
+  weighted_sampling: true
+  augment_train: true
+  resize_height: 160
+  resize_width: 960
+
+model:
+  tokenizer:
+    img_height: 160
+    img_width: 960
+    in_channels: 3
+    patch_size: 16
+    embed_dim: 64
+    use_qshift: true
+  encoder:
+    embed_dim: 64
+    n_layers: 2
+    n_heads: 2
+    ffn_dim: 256
+    dropout: 0.0
+    rwkv_version: 6
+  fusion:
+    visual_dim: 64
+    nav_embed_dim: 16
+    n_nav_commands: 6
+    fused_dim: 64
+    dropout: 0.0
+  policy_head:
+    input_dim: 64
+    hidden_dims: [32]
+    n_outputs: 2
+    dropout: 0.0
+  seq_len: 16
+  burn_in: 4
+  batch_size: 2
+
+optimization:
+  epochs: 1
+  learning_rate: 1.0e-3
+  weight_decay: 1.0e-2
+  gradient_clip: 1.0
+  amp: true
+  ema_decay: 0.0
+  compile_encoder: false
+
+scheduler:
+  name: cosine
+  warmup_steps: 2
+  min_lr_ratio: 0.1
+
+loss:
+  burn_in: 4
+
+checkpoint:
+  save_every_steps: 1000
+  save_every_epochs: 1
+  keep_last_n: 1
+  monitor_metric: val/total_loss
+  monitor_mode: min
+
+logging:
+  log_every_steps: 1
+  val_every_steps: 12
+  use_tensorboard: false
+  use_wandb: false
+  plot_on_finish: false
+  val_max_batches: 3
+
+runtime_overrides:
+  enabled: false
+
+quantization:
+  export_dynamic_int8: false
+
+distillation:
+  enabled: false

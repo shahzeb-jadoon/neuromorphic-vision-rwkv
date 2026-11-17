@@ -1,114 +1,25 @@
 name: rwkv
 # -----------------------------------------------------------------------------
-# Portable conda environment for neuromorphic-vision-rwkv.
+# Reproducible environment for neuromorphic-vision-rwkv (Linux x86_64, glibc >= 2.31).
 #
-# CUDA NOTE: This file targets CUDA 12.4 (cu124). If your server has a
-# different CUDA version, change every "cu124" occurrence below to match:
-#   CUDA 11.8 → cu118   CUDA 12.1 → cu121
-#   CUDA 12.4 → cu124   CUDA 12.6 → cu126
-# Check your server CUDA version with: nvidia-smi
+# conda supplies only the interpreter and pip. Every Python package comes from
+# requirements-lock.txt (exact versions with sha256 hashes), so a single
+# installer owns site-packages. Mixing conda and pip packages previously left
+# two numpy versions overlapping in one environment.
 #
-# After creating the env, install the project itself with:
-#   pip install -e .
+# Create:   conda env create -f environment.yml          # env name: rwkv
+#           conda run -n rwkv pip install -e . --no-deps
+# Verify:   conda run -n rwkv make env-check
+# Re-pin:   edit pyproject.toml, then `make lock`
+#
+# CUDA: the lock pulls PyTorch wheels built for CUDA 12.4 (cu124), which bundle
+# their own CUDA runtime; only an NVIDIA driver is required on the host.
 # -----------------------------------------------------------------------------
 channels:
-  - defaults
+  - conda-forge
+  - nodefaults
 dependencies:
-  # ── Core Python ─────────────────────────────────────────────────────────────
   - python=3.11
   - pip
-  - setuptools
-  - wheel
-
-  # ── Key conda-managed packages ───────────────────────────────────────────────
-  - numpy-base
-  - optuna=4.6.0
-  - pandas
-  - pyyaml
-  - tqdm
-  - sqlite
-
-  # ── pip packages ─────────────────────────────────────────────────────────────
   - pip:
-      # PyTorch (CUDA 12.4 — change cu124 if server has different CUDA)
-      - --extra-index-url https://download.pytorch.org/whl/cu124
-      - torch==2.6.0+cu124
-      - torchvision==0.21.0+cu124
-      - torchaudio==2.6.0+cu124
-      - triton==3.2.0
-
-      # ── Core ML / numerics ────────────────────────────────────────────────
-      - numpy==2.3.5
-      - scipy==1.17.0
-      - scikit-learn==1.8.0
-      - einops==0.8.2
-      - h5py==3.15.1
-      - pillow==12.0.0
-
-      # ── Data / RWKV ───────────────────────────────────────────────────────
-      - rwkv==0.8.32
-      - tokenizers==0.22.2
-      - huggingface-hub==1.4.1
-      - hf-xet==1.2.0
-
-      # ── Visualisation / logging ───────────────────────────────────────────
-      - matplotlib==3.10.8
-      - tensorboard==2.20.0
-      - tensorboard-data-server==0.7.2
-      - wandb==0.25.0
-
-      # ── Config / experiment tracking ─────────────────────────────────────
-      - pyyaml==6.0.3
-      - optuna==4.6.0
-      - sqlalchemy==2.0.48
-      - alembic==1.18.4
-      - colorlog==6.10.1
-
-      # ── HTTP / networking ────────────────────────────────────────────────
-      - requests==2.32.5
-      - httpx==0.28.1
-      - httpcore==1.0.9
-      - urllib3==2.6.3
-      - certifi
-      - charset-normalizer
-      - idna
-
-      # ── Dev tools ─────────────────────────────────────────────────────────
-      - black==26.1.0
-      - flake8==7.3.0
-      - flake8-pyproject==1.2.4
-      - mypy==1.19.1
-      - mypy-extensions==1.1.0
-      - types-pyyaml==6.0.12.20250915
-      - types-requests==2.32.4.20260107
-      - types-tqdm==4.67.3.20260205
-      - pre-commit==4.5.1
-      - autoflake==2.3.3
-      - pytest==9.0.2
-      - pytest-cov==7.0.0
-      - coverage==7.13.4
-
-      # ── Utilities ─────────────────────────────────────────────────────────
-      - rich==14.3.2
-      - tqdm==4.67.3
-      - click==8.3.1
-      - typer==0.24.0
-      - pydantic==2.12.5
-      - pydantic-core==2.41.5
-      - packaging
-      - filelock
-      - fsspec
-      - networkx
-      - sympy
-      - mpmath
-      - jinja2
-      - markupsafe
-      - gitpython
-      - smmap
-      - sentry-sdk==2.53.0
-      - protobuf==6.33.5
-      - grpcio==1.78.0
-      - werkzeug==3.1.5
-
-      # ── CARLA client (only needed for data collection, harmless on server) ─
-      - carla==0.9.16
+      - -r requirements-lock.txt

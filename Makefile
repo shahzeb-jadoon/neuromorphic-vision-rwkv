@@ -1,7 +1,7 @@
 # ── Neuromorphic Vision-RWKV for Autonomous Driving ──────────────────
 # Convenience targets for common development tasks.
 
-.PHONY: test lint format typecheck ci clean analyze train tune help setup
+.PHONY: test lint format typecheck ci clean analyze train tune help setup lock env-check
 
 help:  ## Show this help message
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | \
@@ -9,10 +9,27 @@ help:  ## Show this help message
 
 # ── Setup ────────────────────────────────────────────────────────────
 
-setup:  ## Install package in dev mode + pre-commit hooks
-	pip install -e ".[dev]" --extra-index-url https://download.pytorch.org/whl/cu124
+LOCK_FLAGS := --extra dev --extra simulator \
+	--python-version 3.11 --python-platform x86_64-manylinux_2_31 \
+	--extra-index-url https://download.pytorch.org/whl/cu124 \
+	--index-strategy unsafe-best-match --generate-hashes --emit-index-url \
+	--custom-compile-command "make lock"
+
+setup:  ## Install locked dependencies, the package (editable) and pre-commit hooks
+	pip install -r requirements-lock.txt
+	pip install -e . --no-deps
 	pre-commit install
 	@echo "\n✓ Dev environment ready. Pre-commit hooks installed."
+
+lock:  ## Re-pin requirements-lock.txt from pyproject.toml (needs uv)
+	uv pip compile pyproject.toml $(LOCK_FLAGS) -o requirements-lock.txt
+
+env-check:  ## Verify the environment: imports, offline tests, GPU smoke train
+	python scripts/verify_env.py
+	pytest tests/ -q -m "not online" -p no:cacheprovider --no-cov
+	rm -rf runs/smoke
+	python scripts/train.py --config configs/smoke_toy.yaml --max-epochs 1
+	python scripts/check_smoke_run.py runs/smoke
 
 # ── Quality ──────────────────────────────────────────────────────────
 
