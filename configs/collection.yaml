@@ -45,7 +45,7 @@ expert:
   oncoming_lead_min_closing_speed_kmh: 5.0
   route_tail_extension_enabled: true
   turn_speed_factor: 0.45
-  steering_noise_sigma: 0.05
+  steering_noise_sigma: 0.0  # > 0 also writes the noise into the recorded label
   # Waypoint planner policy scaffolding (Commit A)
   planner_policy_enabled: true
   planner_legality_filter_enabled: true

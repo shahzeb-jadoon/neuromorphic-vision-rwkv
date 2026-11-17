@@ -192,8 +192,11 @@ class ExpertConfig:
     #     steering spikes on waypoint transitions; see commit history) ---
     # cross_track_gain: float = 0.3
 
-    # --- Noise injection (for training data diversity) ---
-    steering_noise_sigma: float = 1e-3  # Gaussian noise std on steering
+    # --- Noise injection ---
+    # Std of Gaussian noise added to the applied steering. The collector records the
+    # applied control as the label, so any noise also lands in the label: keep 0 until
+    # the clean target is recorded separately.
+    steering_noise_sigma: float = 0.0
 
     # --- Rate limiter ---
     max_target_drop_per_frame: float = 2.0  # km/h — prevents target jumps
