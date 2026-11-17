@@ -34,6 +34,7 @@ from src.training.config import (
     training_config_to_dict,
 )
 from src.training.plotting import plot_run_dashboard
+from src.utils.device import describe_device, select_device
 
 wandb: Any
 try:
@@ -260,13 +261,7 @@ class Trainer:
 
         seed_everything(cfg.run.seed, cfg.run.deterministic)
         self.device = self._resolve_device(cfg.run.device)
-
-        if self.device.type == "cuda":
-            gpu_name = torch.cuda.get_device_name(self.device)
-            vram_gb = torch.cuda.get_device_properties(self.device).total_memory / 1e9
-            print(f"[trainer] device: {self.device}  ({gpu_name}, {vram_gb:.1f} GB VRAM)")
-        else:
-            print(f"[trainer] device: {self.device}  (no GPU — training will be slow)")
+        print(f"[trainer] device: {describe_device(self.device)}")
 
         self.model = VisionRWKVDriver(cfg.model).to(self.device)
         if cfg.optimization.compile_encoder and self.device.type == "cuda":
@@ -311,9 +306,7 @@ class Trainer:
         self._maybe_resume()
 
     def _resolve_device(self, device: str) -> torch.device:
-        if device == "auto":
-            return torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        return torch.device(device)
+        return select_device(device)
 
     def _build_teacher_if_needed(self) -> VisionRWKVDriver | None:
         dcfg = self.cfg.distillation

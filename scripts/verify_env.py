@@ -52,7 +52,10 @@ def main() -> None:
             vram = torch.cuda.get_device_properties(0).total_memory / 1e9
             print(f"       VRAM          : {vram:.1f} GB")
         else:
-            print(f"  {warn} No CUDA — training will run on CPU only")
+            mps_ok = torch.backends.mps.is_available()
+            print(f"  {'  '} mps available  : {mps_ok}")
+            if not mps_ok:
+                print(f"  {warn} No CUDA or MPS — training will run on CPU only")
     except ImportError as e:
         print(f"  {fail} torch not installed: {e}")
     print()
@@ -111,6 +114,7 @@ def main() -> None:
     try:
         import torch
         from src.models import ModelConfig, VisionRWKVDriver
+        from src.utils.device import select_device
 
         from src.models.config import (
             RWKVEncoderConfig,
@@ -131,7 +135,7 @@ def main() -> None:
             batch_size=2,
         )
 
-        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        device = select_device("auto")
         model = VisionRWKVDriver(cfg).to(device)
 
         imgs = torch.randn(2, 4, 3, H, W, device=device)
