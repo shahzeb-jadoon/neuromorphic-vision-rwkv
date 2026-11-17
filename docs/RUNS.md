@@ -62,7 +62,8 @@ EOF
 
 ### Storage
 
-These files exist only on the machine that produced them. They have no second copy.
+The files live on the machine that produced them, with a second copy on a separate drive
+whose sha256 sums matched the table above on 2026-11-17.
 
 ### Offline evaluation: v3 baselines of record (2026-11-17)
 
@@ -112,6 +113,51 @@ What the numbers say about `best.pt`:
   best baseline.
 
 The JSON report and the per-frame arrays are in the run's `eval/` folder.
+
+### Offline evaluation on the v3 testbed cache (2026-11-18)
+
+The full v3 recording has been retired; the testbed cache described in
+[DATA_V3.md](DATA_V3.md) replaces it. The cache keeps every signal at 20 Hz, so the tables
+above still hold exactly: rebuilt from the cache, the 34,968 scored frames (steering,
+acceleration, command and weight) and the 2,911,535 training frames are identical to the
+record, and every baseline score matches it to the last digit.
+
+The cache's images are at 10 Hz, so the evaluator run on it scores a different sample:
+
+```bash
+python scripts/evaluate_offline.py --checkpoint runs_fast/fastsafe_20260424_093210/checkpoints/best.pt \
+    --data-dir <testbed cache> --out runs_fast/fastsafe_20260424_093210/eval/best_testbed_offline.json
+```
+
+Same split (219 validation and 880 training episodes) and clip settings, but a 32-frame
+clip now spans 3.2 s, giving 749 clips and 17,976 scored frames. Turning frames are a
+smaller share (15.0% of the weight, 13.3% of frames), so every MAE is lower than above.
+These numbers are the reference for models trained and evaluated on the cache. The
+trainer's metric over the first 50 batches is steering MAE 0.0511 and acceleration MAE
+0.1801.
+
+Pooled, with the training frame weights:
+
+| Predictor | Steering MAE | Turn steering MAE | Turn sign accuracy | Accel MAE | Steering corr. |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| `best.pt` | 0.0508 | 0.2311 | 0.471 | 0.1760 | 0.036 |
+| Always zero | 0.0474 | 0.2308 | 0.000 | 0.3847 | — |
+| Always the training mean | 0.0493 | 0.2313 | 0.450 | 0.3479 | — |
+| Per-command training mean | 0.0525 | 0.2119 | 0.677 | 0.3231 | 0.229 |
+
+Pooled, every frame equal:
+
+| Predictor | Steering MAE | Turn steering MAE | Turn sign accuracy | Accel MAE | Steering corr. |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| `best.pt` | 0.0479 | 0.2431 | 0.501 | 0.3196 | 0.036 |
+| Always zero | 0.0449 | 0.2432 | 0.000 | 0.4141 | — |
+| Always the training mean | 0.0469 | 0.2433 | 0.487 | 0.3973 | — |
+| Per-command training mean | 0.0543 | 0.2249 | 0.673 | 0.3610 | 0.229 |
+
+Every finding above holds on the cache: steering no better than always zero, the turn sign
+right about half the time, mean steering +0.004 on LEFT and +0.005 on RIGHT (expert −0.050
+and +0.050, weighted), camera-swap score −0.997, and acceleration MAE 0.1760 against 0.3231
+for the best baseline.
 
 ---
 
