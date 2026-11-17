@@ -123,6 +123,18 @@ class TestNormalization:
         assert acceleration.min() >= -1.0
         assert acceleration.max() <= 1.0
 
+    def test_class_targets_are_valid_indices(self, train_dataset: DrivingSequenceDataset) -> None:
+        """Every clip's nav and mode targets must index the model's embedding and logits.
+
+        Out-of-range values (e.g. a 0-indexed mode code shifted to -1) crash training
+        with a CUDA device-side assert instead of a readable error.
+        """
+        for idx in range(len(train_dataset)):
+            item = train_dataset[idx]
+            nav, mode = item["nav_command"], item["driving_mode"]
+            assert 0 <= int(nav.min()) and int(nav.max()) < 6, f"clip {idx}: nav {nav.tolist()}"
+            assert 0 <= int(mode.min()) and int(mode.max()) < 8, f"clip {idx}: mode {mode.tolist()}"
+
 
 class TestSplit:
     """Verify train/val split properties."""

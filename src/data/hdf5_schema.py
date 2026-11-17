@@ -64,6 +64,21 @@ DRIVING_MODE = "driving_mode"  # (N,)    int32  DrivingMode enum
 NEARBY_VEHICLES = "nearby_vehicles"  # JSON string per frame
 NEARBY_PEDESTRIANS = "nearby_pedestrians"  # JSON string per frame
 
+# Codes written by the expert (agents.expert.privileged_expert): DrivingMode
+# members in declaration order, and PrivilegedExpert._encode_tl.
+DRIVING_MODE_NAMES: dict[int, str] = {
+    1: "FollowLane",
+    2: "ApproachingTurn",
+    3: "Turning",
+    4: "TrafficLightStop",
+    5: "VehicleFollowing",
+    6: "PedestrianStop",
+    7: "EmergencyStop",
+    8: "StopSignStop",
+}
+VALID_DRIVING_MODES = set(DRIVING_MODE_NAMES)
+TRAFFIC_LIGHT_STATE_NAMES: dict[int, str] = {0: "None", 1: "Green", 2: "Yellow", 3: "Red"}
+
 # --- Corridor diagnostics (new in v3.1) ---
 # Lightweight per-frame metrics for verifying SAT corridor health.
 STATIONARY = "stationary"  # (N,) bool  speed < 0.5 km/h

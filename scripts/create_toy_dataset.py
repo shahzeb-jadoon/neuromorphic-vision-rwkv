@@ -30,6 +30,15 @@ NAV_COMMANDS = {
 # Target distribution for nav commands (Left, Right, Straight, LaneFollow)
 NAV_WEIGHTS = [0.15, 0.15, 0.10, 0.60]
 
+# Label codes, taken from the schema so toy data matches what the expert writes.
+_MODE = {name: code for code, name in S.DRIVING_MODE_NAMES.items()}
+_TL = {name: code for code, name in S.TRAFFIC_LIGHT_STATE_NAMES.items()}
+MODE_FOLLOW_LANE = _MODE["FollowLane"]
+MODE_TURNING = _MODE["Turning"]
+MODE_TRAFFIC_LIGHT_STOP = _MODE["TrafficLightStop"]
+TL_NONE, TL_YELLOW, TL_RED = _TL["None"], _TL["Yellow"], _TL["Red"]
+TARGET_SPEED_KMH = 30.0
+
 
 def generate_episode(
     episode_idx: int,
@@ -89,48 +98,50 @@ def generate_episode(
     brake_events = rng.choice(n_frames, size=max(1, n_frames // 20), replace=False)
     brake[brake_events] = rng.uniform(0.3, 1.0, size=len(brake_events)).astype(np.float32)
 
-    # Velocity: correlated with throttle
-    velocity = np.zeros((n_frames, 3), dtype=np.float32)
+    # Heading (radians) integrates steering; position and velocity follow it.
+    heading = np.cumsum(steering) * 0.1
+
+    # Speed (m/s): correlated with throttle and brake
+    speed_ms = np.zeros(n_frames, dtype=np.float32)
     speed = 5.0  # initial speed m/s
     for t in range(n_frames):
         speed = speed + (throttle[t] - 0.3) * 0.5 - brake[t] * 2.0
         speed = np.clip(speed, 0.0, 15.0)
-        # Forward velocity with slight lateral component from steering
-        velocity[t] = [speed, speed * steering[t] * 0.1, 0.0]
+        speed_ms[t] = speed
+
+    # Velocity: world frame (vx, vy, vz), as the expert records it
+    velocity = np.stack(
+        [speed_ms * np.cos(heading), speed_ms * np.sin(heading), np.zeros(n_frames)], axis=1
+    ).astype(np.float32)
 
     # Navigation commands: weighted random distribution (RoadOption 1–4)
     nav_command = rng.choice(list(NAV_COMMANDS.keys()), size=n_frames, p=NAV_WEIGHTS).astype(
         np.int32
     )
 
-    # Position: simulated trajectory along a road
+    # Position: integrate world-frame velocity at 20 Hz (dt = 0.05 s)
     position = np.zeros((n_frames, 3), dtype=np.float32)
-    pos_x, pos_y = 0.0, 0.0
-    for t in range(n_frames):
-        heading = np.cumsum(steering[: t + 1])[-1] * 0.1
-        pos_x += velocity[t, 0] * np.cos(heading) * 0.05
-        pos_y += velocity[t, 0] * np.sin(heading) * 0.05
-        position[t] = [pos_x, pos_y, 0.0]
+    position[:, :2] = np.cumsum(velocity[:, :2] * 0.05, axis=0)
 
-    # Rotation: yaw from steering integral
+    # Rotation: (pitch, yaw, roll) in degrees; yaw matches the trajectory heading
     rotation = np.zeros((n_frames, 3), dtype=np.float32)
-    rotation[:, 2] = np.cumsum(steering) * 5.0  # yaw in degrees
+    rotation[:, 1] = np.degrees(heading)
 
-    # Traffic light state: 0=Green, 1=Yellow, 2=Red (mostly green)
-    traffic_light_state = np.zeros(n_frames, dtype=np.int32)
+    # Traffic light state: no light nearby mostly, with yellow-then-red episodes
+    traffic_light_state = np.full(n_frames, TL_NONE, dtype=np.int32)
     red_starts = rng.choice(max(1, n_frames - 20), size=max(1, n_frames // 50), replace=False)
     for rs in red_starts:
-        traffic_light_state[rs : min(rs + 15, n_frames)] = 2  # Red
-        traffic_light_state[max(0, rs - 3) : rs] = 1  # Yellow before red
+        traffic_light_state[rs : min(rs + 15, n_frames)] = TL_RED
+        traffic_light_state[max(0, rs - 3) : rs] = TL_YELLOW
 
-    # Target speed: varies with braking/acceleration
-    target_speed = np.full(n_frames, 8.33, dtype=np.float32)  # 30 km/h default
+    # Target speed (km/h, as the expert records it): 0 while braking
+    target_speed = np.full(n_frames, TARGET_SPEED_KMH, dtype=np.float32)
     target_speed[brake > 0.1] = 0.0
 
-    # Driving mode: 0=FOLLOW_LANE mostly
-    driving_mode = np.zeros(n_frames, dtype=np.int32)
-    driving_mode[traffic_light_state == 2] = 3  # TRAFFIC_LIGHT_STOP
-    driving_mode[np.abs(steering) > 0.2] = 2  # TURNING
+    # Driving mode (1-indexed DrivingMode codes): follow lane mostly
+    driving_mode = np.full(n_frames, MODE_FOLLOW_LANE, dtype=np.int32)
+    driving_mode[traffic_light_state == TL_RED] = MODE_TRAFFIC_LIGHT_STOP
+    driving_mode[np.abs(steering) > 0.2] = MODE_TURNING
 
     # Stop sign distance: -1 means no stop sign nearby
     stop_sign_distance = np.full(n_frames, -1.0, dtype=np.float32)
