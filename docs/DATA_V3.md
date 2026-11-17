@@ -61,7 +61,10 @@ Town07 episodes were kept separately.
 - Steering labels include the expert's Gaussian steering noise (σ = 0.001), added before
   the control was applied and recorded.
 - Most completed episodes end at the frame budget, mid-route.
-- Collision episodes continue after the collision; the loader drops those frames.
+- Collision episodes end on the frame after the collision. Timed-out episodes end with the
+  vehicle standing still for 26–43 s (10th to 90th percentile) before the collector gave
+  up. Training uses neither that stop nor the 3 s before a collision
+  ([LABELS.md](LABELS.md)).
 
 ## Preserved
 

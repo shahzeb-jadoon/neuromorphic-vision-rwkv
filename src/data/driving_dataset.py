@@ -243,8 +243,8 @@ class DrivingSequenceDataset(Dataset):
         return len(self.clips)
 
     # Stationary-frame loss down-weight.
-    # Frames with speed < this threshold (m/s) get reduced loss weight
-    # to prevent the 42% stationary majority from dominating gradients.
+    # Stationary frames (horizontal speed below this, m/s) get a reduced loss weight so the
+    # easiest third of the data does not dominate; see docs/LABELS.md.
     STATIONARY_SPEED_THRESH: float = 0.14  # ~0.5 km/h
     STATIONARY_LOSS_WEIGHT: float = 0.1
 
