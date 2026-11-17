@@ -19,12 +19,17 @@ data drive under WSL2.
 conda env create -f environment.yml          # creates the env "rwkv"
 conda activate rwkv
 pip install -e . --no-deps                   # the project itself, editable
+cp .env.example .env                         # then set DATA_DIR for this machine
 pre-commit install
 make env-check                               # must end with "OK: runs/smoke/..."
 ```
 
 Use `conda env create -f environment.yml -n <name>` to build a second copy next to an
 existing one.
+
+Paths that differ between machines, such as the dataset directory, live in `.env`, which
+git ignores; `.env.example` lists the keys. Variables set in the environment take
+precedence.
 
 ## What each dependency file does
 
@@ -112,10 +117,10 @@ tree. With SSH access to the Mac under the host alias `mac`:
 
 ```bash
 # on the Mac, once
-git init ~/projects/neuromorphic-vision-rwkv
-git -C ~/projects/neuromorphic-vision-rwkv config receive.denyCurrentBranch updateInstead
-# on the GPU machine
-git remote add mac mac:projects/neuromorphic-vision-rwkv
+git init neuromorphic-vision-rwkv
+git -C neuromorphic-vision-rwkv config receive.denyCurrentBranch updateInstead
+# on the GPU machine; <path> is the clone's location on the Mac, relative to its home folder
+git remote add mac mac:<path>
 git push mac <branch>          # then, the first time only: git checkout <branch> on the Mac
 ```
 
