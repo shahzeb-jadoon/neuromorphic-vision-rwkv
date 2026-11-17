@@ -126,7 +126,6 @@ Keep the Mac's working tree clean; a push that would overwrite local changes is 
 ```bash
 conda env create -f environment-macos.yml        # env name: rwkv
 conda run -n rwkv pip install -e . --no-deps
-conda run -n rwkv make toy-data
 conda run -n rwkv make env-check                 # trains on "mps (Apple GPU)"
 ```
 

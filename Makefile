@@ -34,6 +34,7 @@ lock-macos:  ## Re-pin requirements-lock-macos.txt (Apple silicon, no CUDA/CARLA
 env-check:  ## Verify the environment: imports, offline tests, GPU smoke train
 	python scripts/verify_env.py
 	pytest tests/ -q -m "not online" -p no:cacheprovider --no-cov
+	test -d data/toy || $(MAKE) toy-data
 	rm -rf runs/smoke
 	python scripts/train.py --config configs/smoke_toy.yaml --max-epochs 1
 	python scripts/check_smoke_run.py runs/smoke
