@@ -7,8 +7,7 @@ Each item is a contiguous sequence of frames from a single episode,
 suitable for recurrent model training where temporal continuity matters.
 
 Episodes are read through src.data.schema_adapter, which maps every supported schema
-to one sample format. Images are 3-camera panoramas (H, 3 * W_cam, 3), so the horizontal
-flip augmentation also swaps the left and right camera panels.
+to one sample format. Images are 3-camera panoramas (H, 3 * W_cam, 3).
 """
 
 from __future__ import annotations
@@ -46,6 +45,26 @@ MAX_SPEED_KMH: float = 120.0
 # Future-waypoint targets: frames ahead of each frame, in the vehicle's frame.
 WAYPOINT_OFFSETS = (5, 10, 15, 20)
 
+# Nav command (0-indexed RoadOption) seen in a mirror: LEFT and RIGHT swap, as do the
+# two lane changes; STRAIGHT and LANEFOLLOW stay.
+MIRRORED_COMMAND = torch.tensor([1, 0, 2, 3, 5, 4])
+
+
+def mirror(sample: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
+    """The sample as it would be recorded in a left-right mirror image of the world.
+
+    Flipping the panorama also moves each side camera's view to the opposite panel.
+    Steering and waypoint y change sign and left and right commands swap; every other
+    field is unchanged (velocity is world-frame and only its magnitude is used).
+    """
+    return {
+        **sample,
+        "images": sample["images"].flip(-1),
+        "controls": sample["controls"] * torch.tensor([-1.0, 1.0]),
+        "nav_command": MIRRORED_COMMAND[sample["nav_command"]],
+        "future_waypoints": sample["future_waypoints"] * torch.tensor([1.0, -1.0]),
+    }
+
 
 class DrivingSequenceDataset(Dataset):
     """Dataset that returns fixed-length sequential clips from driving episodes.
@@ -60,9 +79,8 @@ class DrivingSequenceDataset(Dataset):
         split: One of "train" or "val" (default: "train").
         val_fraction: Fraction of episodes reserved for validation (default: 0.2).
         seed: Random seed for reproducible train/val split (default: 42).
-        augment: Whether to apply data augmentation (default: True for train).
-        n_cameras: Number of cameras in the panoramic image (default: 3).
-            Used by the horizontal flip augmentation to swap camera panels.
+        augment: Whether to apply colour jitter and, to half of the clips, `mirror`
+            (default: True for train).
         resize_height: Optional output height for on-the-fly resize.
         resize_width: Optional output width for on-the-fly resize.
     """
@@ -76,7 +94,6 @@ class DrivingSequenceDataset(Dataset):
         val_fraction: float = 0.2,
         seed: int = 42,
         augment: bool | None = None,
-        n_cameras: int = 3,
         resize_height: int | None = None,
         resize_width: int | None = None,
     ) -> None:
@@ -84,7 +101,6 @@ class DrivingSequenceDataset(Dataset):
         self.seq_len = seq_len
         self.stride = stride
         self.split = split
-        self.n_cameras = n_cameras
 
         if VELOCITY_STATS_VERSION == "placeholder_v0":
             warnings.warn(
@@ -287,9 +303,8 @@ class DrivingSequenceDataset(Dataset):
         # Z-score normalise velocity
         velocity = (velocity - VELOCITY_MEAN) / VELOCITY_STD.clamp(min=1e-6)
 
-        # Data augmentation BEFORE normalization (operates on [0, 1] pixel values)
         if self.augment:
-            images, controls = self._augment(images, controls)
+            images = self._jitter(images)
 
         # Optional on-the-fly resize for resolution ablation experiments.
         if self.resize_height is not None and self.resize_width is not None:
@@ -312,7 +327,7 @@ class DrivingSequenceDataset(Dataset):
             labels.ego_waypoints(w.position, w.yaw, WAYPOINT_OFFSETS)
         )  # (T, K, 2): x forward, y right, metres
 
-        return {
+        sample = {
             "images": images,
             "controls": controls,
             "nav_command": nav_cmd,
@@ -322,67 +337,22 @@ class DrivingSequenceDataset(Dataset):
             "driving_mode": driving_mode_t,
             "future_waypoints": future_waypoints,
         }
+        if self.augment and torch.rand(1).item() < 0.5:
+            sample = mirror(sample)
+        return sample
 
-    def _augment(
-        self,
-        images: torch.Tensor,
-        controls: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Apply data augmentation to a clip.
+    @staticmethod
+    def _jitter(images: torch.Tensor) -> torch.Tensor:
+        """Random brightness and contrast, the same for every frame of the clip.
 
-        Augmentations:
-            - Color jitter (brightness, contrast, saturation)
-            - Horizontal flip (with steering sign flip)
-
-        All augmentations are applied consistently across the entire clip
-        to maintain temporal coherence.
-
-        Note: Must be called BEFORE ImageNet normalization so that
-        brightness/contrast adjustments operate on real pixel values
-        in [0, 1], not z-scores.
-
-        Args:
-            images: (T, 3, H, W) float32 in [0, 1]
-            controls: (T, 2) [steering, acceleration]
-
-        Returns:
-            Augmented (images, controls) tuple.
+        Applied before ImageNet normalisation, on (T, 3, H, W) values in [0, 1].
         """
-        # Color jitter: same perturbation for entire clip
         if torch.rand(1).item() < 0.5:
-            # Brightness
-            brightness = 1.0 + (torch.rand(1).item() - 0.5) * 0.4  # [0.8, 1.2]
-            images = images * brightness
-
+            images = images * (1.0 + (torch.rand(1).item() - 0.5) * 0.4)  # [0.8, 1.2]
         if torch.rand(1).item() < 0.3:
-            # Contrast
             mean = images.mean(dim=(2, 3), keepdim=True)
-            contrast = 1.0 + (torch.rand(1).item() - 0.5) * 0.4
-            images = (images - mean) * contrast + mean
-
-        # Horizontal flip with steering sign flip.
-        # For panoramic images (n_cameras > 1), we must also swap the
-        # camera panels: [Left|Centre|Right] → [Right'|Centre'|Left']
-        # so the spatial layout stays physically consistent.
-        if torch.rand(1).item() < 0.5:
-            if self.n_cameras > 1:
-                # Split into panels, reverse order, flip each panel
-                T, C, H, W_total = images.shape
-                panel_w = W_total // self.n_cameras
-                panels = [
-                    images[:, :, :, i * panel_w : (i + 1) * panel_w] for i in range(self.n_cameras)
-                ]
-                # Reverse panel order AND horizontally flip each panel
-                panels = [p.flip(dims=[-1]) for p in reversed(panels)]
-                images = torch.cat(panels, dim=-1)
-            else:
-                images = images.flip(dims=[-1])
-            controls[:, 0] = -controls[:, 0]  # Flip steering sign
-
-        # Clamp to valid [0, 1] range after brightness/contrast adjustments
-        images = images.clamp(0.0, 1.0)
-
-        return images, controls
+            images = (images - mean) * (1.0 + (torch.rand(1).item() - 0.5) * 0.4) + mean
+        return images.clamp(0.0, 1.0)
 
     def get_split_info(self) -> dict[str, Any]:
         """Return metadata about this dataset split."""

@@ -14,7 +14,7 @@ import pytest
 import torch
 
 from src.data import labels, schema_adapter
-from src.data.driving_dataset import WAYPOINT_OFFSETS, DrivingSequenceDataset
+from src.data.driving_dataset import WAYPOINT_OFFSETS, DrivingSequenceDataset, mirror
 
 
 @pytest.fixture
@@ -187,86 +187,68 @@ class TestSplit:
 
 
 class TestAugmentation:
-    """Verify augmentation behavior."""
-
-    def test_hflip_flips_steering(self, toy_data_dir: Path) -> None:
-        """Horizontal flip should negate steering sign."""
-        ds_no_aug = DrivingSequenceDataset(
-            toy_data_dir, seq_len=16, split="train", seed=42, augment=False
-        )
-        ds_aug = DrivingSequenceDataset(
-            toy_data_dir, seq_len=16, split="train", seed=42, augment=True
-        )
-
-        # Get same clip from both — augmented may differ due to randomness
-        item_no_aug = ds_no_aug[0]
-        # Just verify the augmented dataset runs without error
-        item_aug = ds_aug[0]
-        assert item_aug["images"].shape == item_no_aug["images"].shape
+    """Augmentation keeps every label consistent with the image."""
 
     def test_val_no_augmentation(self, toy_data_dir: Path) -> None:
         """Validation split should not augment by default."""
         ds = DrivingSequenceDataset(toy_data_dir, seq_len=16, split="val", seed=42)
         assert not ds.augment
 
-    def test_panoramic_flip_correctness(self) -> None:
-        """Verify horizontal flip reverses panel order and negates steering.
+    def test_mirroring_twice_changes_nothing(self, train_dataset: DrivingSequenceDataset) -> None:
+        sample = train_dataset[0]
+        twice = mirror(mirror(sample))
+        assert twice.keys() == sample.keys()
+        assert all(torch.equal(twice[k], sample[k]) for k in sample)
 
-        Constructs a synthetic panoramic image with identifiable panels
-        (left=red, centre=green, right=blue), forces a flip via
-        monkeypatched torch.rand, and checks:
-          1. Panel order becomes [blue'|green'|red']
-          2. Each panel is individually flipped horizontally
-          3. Steering sign is negated
-        """
-        T, C, H = 4, 3, 8
-        panel_w = 16
-        n_cameras = 3
-        W_total = panel_w * n_cameras
+    def test_mirror_swaps_sides(self) -> None:
+        g = torch.Generator().manual_seed(0)
+        sample = {
+            "images": torch.rand(6, 3, 2, 6, generator=g),
+            "controls": torch.randn(6, 2, generator=g),
+            "nav_command": torch.arange(6),
+            "future_waypoints": torch.randn(6, 4, 2, generator=g),
+            "velocity": torch.randn(6, 3, generator=g),
+        }
+        m = mirror(sample)
+        assert torch.equal(m["images"], sample["images"].flip(-1))
+        assert torch.equal(m["controls"][:, 0], -sample["controls"][:, 0])
+        assert torch.equal(m["controls"][:, 1], sample["controls"][:, 1])
+        assert m["nav_command"].tolist() == [1, 0, 2, 3, 5, 4]  # LEFT<->RIGHT, lane changes
+        assert torch.equal(m["future_waypoints"][..., 0], sample["future_waypoints"][..., 0])
+        assert torch.equal(m["future_waypoints"][..., 1], -sample["future_waypoints"][..., 1])
+        assert torch.equal(m["velocity"], sample["velocity"])
 
-        # Build synthetic panels: left=red(1,0,0), centre=green(0,1,0), right=blue(0,0,1)
-        images = torch.zeros(T, C, H, W_total)
-        # Left panel [0:16] → red channel gradient (0→1 across width)
-        images[:, 0, :, :panel_w] = torch.linspace(0, 1, panel_w)
-        # Centre panel [16:32] → green channel gradient
-        images[:, 1, :, panel_w : 2 * panel_w] = torch.linspace(0, 1, panel_w)
-        # Right panel [32:48] → blue channel gradient
-        images[:, 2, :, 2 * panel_w : 3 * panel_w] = torch.linspace(0, 1, panel_w)
+    def test_mirror_moves_each_side_camera_to_the_other_panel(self) -> None:
+        panels = torch.rand(3, 3, 4, 8)  # left, centre, right camera
+        image = torch.cat(list(panels), dim=-1)[None]
+        flipped = mirror(
+            {
+                "images": image,
+                "controls": torch.zeros(1, 2),
+                "nav_command": torch.zeros(1, dtype=torch.long),
+                "future_waypoints": torch.zeros(1, 4, 2),
+            }
+        )["images"][0]
+        for camera, panel in ((0, 2), (1, 1), (2, 0)):
+            assert torch.equal(flipped[..., panel * 8 : (panel + 1) * 8], panels[camera].flip(-1))
 
-        steering = torch.tensor([0.3, -0.2, 0.5, -0.1])
-        controls = torch.stack([steering, torch.zeros(T)], dim=-1)
-
-        # Create a dataset instance just to call _augment — need n_cameras set
-        # We'll call the private method directly instead of going through __getitem__
-        import unittest.mock
-
-        # Monkeypatch torch.rand to always return 0.0 ⇒ all augmentations trigger
-        with unittest.mock.patch("torch.rand", return_value=torch.tensor([0.0])):
-            # Create a minimal object with the augment method
-            ds = object.__new__(DrivingSequenceDataset)
-            ds.n_cameras = n_cameras
-            ds.augment = True
-            aug_images, aug_controls = ds._augment(images.clone(), controls.clone())
-
-        # 1. Steering should be negated
-        torch.testing.assert_close(aug_controls[:, 0], -controls[:, 0])
-
-        # 2. Acceleration should be unchanged
-        torch.testing.assert_close(aug_controls[:, 1], controls[:, 1])
-
-        # 3. Panel order should be reversed: what was right (blue) is now in left position
-        #    The right panel had blue gradient [0→1]; after flip+reverse it should be
-        #    in position [0:16] with the gradient reversed [1→0]
-        aug_left = aug_images[:, :, :, :panel_w]
-        # The original right panel was blue (channel 2) with gradient 0→1
-        # After horizontal flip of that panel, gradient becomes 1→0
-        assert aug_left[:, 2].mean() > 0.3, "Reversed right panel should be in left position"
-        assert aug_left[:, 0].mean() < 0.1, "Left position should NOT have red (original left)"
-
-        # 4. Original left panel (red) should now be in right position
-        aug_right = aug_images[:, :, :, 2 * panel_w : 3 * panel_w]
-        assert aug_right[:, 0].mean() > 0.3, "Original left (red) panel should be in right"
-        assert aug_right[:, 2].mean() < 0.1, "Right position should NOT have blue"
+    def test_augmented_clip_is_the_clip_or_its_mirror(
+        self, toy_data_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(DrivingSequenceDataset, "_jitter", staticmethod(lambda images: images))
+        plain = DrivingSequenceDataset(toy_data_dir, seq_len=16, seed=42, augment=False)
+        augmented = DrivingSequenceDataset(toy_data_dir, seq_len=16, seed=42, augment=True)
+        torch.manual_seed(0)
+        seen = set()
+        for i in range(len(plain)):
+            original, got = plain[i], augmented[i]
+            for name, candidate in (("plain", original), ("mirrored", mirror(original))):
+                if all(torch.equal(got[k], candidate[k]) for k in original):
+                    seen.add(name)
+                    break
+            else:
+                pytest.fail(f"clip {i} is neither the clip nor its mirror")
+        assert seen == {"plain", "mirrored"}
 
 
 class TestSampler:
