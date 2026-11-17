@@ -9,6 +9,9 @@ dataset sees one format whatever wrote the file:
 - A training cache (scripts/build_testbed_cache.py) keeps the full-rate signals and one
   JPEG image every META_IMAGE_STRIDE source frames. It reads as an episode at that lower
   rate: frame k is source frame k * stride.
+
+Only an episode's usable frames (src.data.labels.usable_end) are read for training, and
+a nav command outside RoadOption 1-6 there is an error, never clamped.
 """
 
 from __future__ import annotations
@@ -21,6 +24,7 @@ import numpy as np
 from PIL import Image
 
 from src.data import hdf5_schema as S
+from src.data import labels
 
 SUPPORTED_SCHEMAS = range(3, 7)
 MODE_FOLD = {9: 8}
@@ -79,16 +83,31 @@ def _rows(f: h5py.File, name: str, start: int, end: int) -> np.ndarray:
 
 
 def usable_frames(f: h5py.File) -> int:
-    """Frame count, cut at the collision frame when the episode ended in one."""
-    n = int((f[S.IMAGES_JPEG] if is_cache(f) else f[S.IMAGES]).shape[0])
-    meta = f[S.METADATA_GROUP].attrs if S.METADATA_GROUP in f else {}
-    collision = int(meta.get(S.META_COLLISION_FRAME, 0))
-    stride = _stride(f)
-    return min(n, -(-collision // stride)) if collision > 0 else n
+    """Frames that make valid targets, at this file's rate. A golden-subset excerpt is
+    used whole: its status and end describe the source episode, not the excerpt."""
+    meta = f[S.METADATA_GROUP].attrs
+    speed = np.linalg.norm(f[S.VELOCITY][()], axis=1)
+    if S.META_GOLDEN_SOURCE_FILE in meta:
+        end = len(speed)
+    else:
+        end = labels.usable_end(
+            speed,
+            int(meta[S.META_FPS]),
+            str(meta.get(S.META_STATUS, "")),
+            int(meta.get(S.META_COLLISION_FRAME, 0)),
+        )
+    return min(_frames(f), -(-end // _stride(f)))
 
 
 def nav_commands(f: h5py.File) -> np.ndarray:
-    return _rows(f, S.NAV_COMMAND, 0, usable_frames(f))
+    """RoadOption (1-6) of every usable frame; raises on any other value."""
+    nav = _rows(f, S.NAV_COMMAND, 0, usable_frames(f))
+    bad = np.flatnonzero(~np.isin(nav, list(S.VALID_NAV_COMMANDS)))
+    if bad.size:
+        raise ValueError(
+            f"{f.filename}: nav command {nav[bad[0]]} at frame {bad[0]} is not a RoadOption 1-6"
+        )
+    return nav
 
 
 def read_window(f: h5py.File, start: int, end: int, lookahead: int, images: bool = True) -> Window:
@@ -122,7 +141,8 @@ def read_window(f: h5py.File, start: int, end: int, lookahead: int, images: bool
 
 def read_labels(f: h5py.File) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Steering, acceleration (throttle - brake) and nav command over the usable frames."""
-    n = usable_frames(f)
+    nav = nav_commands(f)
+    n = len(nav)
     steering = _rows(f, S.STEERING, 0, n)
     acceleration = _rows(f, S.THROTTLE, 0, n) - _rows(f, S.BRAKE, 0, n)
-    return steering, acceleration, _rows(f, S.NAV_COMMAND, 0, n)
+    return steering, acceleration, nav

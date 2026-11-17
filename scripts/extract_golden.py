@@ -105,8 +105,8 @@ def copy_window(src: Path, dst: Path, start: int) -> None:
         meta.attrs[S.META_N_FRAMES] = WINDOW
         if S.META_COLLISION_FRAME in meta.attrs:
             del meta.attrs[S.META_COLLISION_FRAME]
-        meta.attrs["golden_source_file"] = src.name
-        meta.attrs["golden_source_start"] = start
+        meta.attrs[S.META_GOLDEN_SOURCE_FILE] = src.name
+        meta.attrs[S.META_GOLDEN_SOURCE_START] = start
 
 
 def sha256(path: Path) -> str:

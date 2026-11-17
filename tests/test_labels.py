@@ -5,7 +5,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from src.data.labels import ego_waypoints
+from src.data.labels import ego_waypoints, usable_end
 
 OFFSETS = (5, 10, 15, 20)
 
@@ -48,3 +48,22 @@ def test_offsets_past_the_end_use_the_last_position() -> None:
     position = np.array([[0, 0, 0], [1, 0, 0], [2, 0, 0], [3, 0, 0]], dtype=np.float32)
     wp = ego_waypoints(position, np.zeros(2, np.float32), (1, 5))
     assert np.allclose(wp[..., 0], [[1, 3], [1, 2]])
+
+
+def test_clean_episodes_are_used_whole() -> None:
+    speed = np.ones(100)
+    assert usable_end(speed, 20, "completed", 0) == 100
+    speed[60:] = 0.0  # stopped at a light when the frame budget ran out
+    assert usable_end(speed, 20, "completed", 0) == 100
+
+
+def test_three_seconds_before_a_collision_are_dropped() -> None:
+    assert usable_end(np.ones(200), 20, "collision", 150) == 90
+    assert usable_end(np.ones(200), 10, "collision", 150) == 120
+    assert usable_end(np.ones(200), 20, "collision", 40) == 0
+
+
+def test_a_timeout_loses_its_final_stop() -> None:
+    speed = np.r_[np.ones(50), np.zeros(10), np.ones(30), np.full(70, 0.05)]
+    assert usable_end(speed, 20, "timeout", 0) == 90
+    assert usable_end(np.zeros(40), 20, "timeout", 0) == 0

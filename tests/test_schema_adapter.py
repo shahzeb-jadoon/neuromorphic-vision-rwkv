@@ -72,13 +72,37 @@ def test_unsupported_schema_names_the_file(tmp_path: Path, version: int) -> None
         schema_adapter.check_supported(f, path.name)
 
 
-def test_collision_frame_limits_usable_frames(tmp_path: Path) -> None:
-    path = make_episode(tmp_path, version=6, n_frames=40)
+def test_usable_frames_end_three_seconds_before_a_collision(tmp_path: Path) -> None:
+    path = make_episode(tmp_path, version=6, n_frames=100)
     with h5py.File(path, "r+") as f:
-        f[S.METADATA_GROUP].attrs[S.META_COLLISION_FRAME] = 25
+        f[S.METADATA_GROUP].attrs[S.META_COLLISION_FRAME] = 85  # 20 fps: 60 frames before
     with h5py.File(path, "r") as f:
         assert schema_adapter.usable_frames(f) == 25
         assert len(schema_adapter.nav_commands(f)) == 25
+
+
+def test_timeout_loses_its_final_stop_unless_an_excerpt(tmp_path: Path) -> None:
+    path = make_episode(tmp_path, version=6, n_frames=60)
+    with h5py.File(path, "r+") as f:
+        f[S.METADATA_GROUP].attrs[S.META_STATUS] = "timeout"
+        f[S.VELOCITY][...] = 3.0
+        f[S.VELOCITY][45:] = 0.0
+    with h5py.File(path, "r") as f:
+        assert schema_adapter.usable_frames(f) == 45
+    with h5py.File(path, "r+") as f:
+        f[S.METADATA_GROUP].attrs[S.META_GOLDEN_SOURCE_FILE] = "episode_source.h5"
+    with h5py.File(path, "r") as f:
+        assert schema_adapter.usable_frames(f) == 60
+
+
+def test_invalid_nav_command_is_rejected(tmp_path: Path) -> None:
+    path = make_episode(tmp_path, version=3)
+    with h5py.File(path, "r+") as f:
+        f[S.NAV_COMMAND][7] = 9
+    with h5py.File(path, "r") as f, pytest.raises(ValueError, match="nav command 9 at frame 7"):
+        schema_adapter.read_labels(f)
+    with pytest.raises(ValueError, match=path.name):
+        DrivingSequenceDataset(tmp_path, seq_len=16, split="val")
 
 
 def test_dataset_mixes_v3_and_v6_episodes(tmp_path: Path) -> None:
@@ -97,14 +121,14 @@ def test_dataset_mixes_v3_and_v6_episodes(tmp_path: Path) -> None:
 def test_cache_reads_as_a_lower_rate_episode(tmp_path: Path) -> None:
     from scripts.build_testbed_cache import build_episode
 
-    src = make_episode(tmp_path, version=3, n_frames=41)
+    src = make_episode(tmp_path, version=3, n_frames=101)
     with h5py.File(src, "r+") as f:
-        f[S.METADATA_GROUP].attrs[S.META_COLLISION_FRAME] = 25
+        f[S.METADATA_GROUP].attrs[S.META_COLLISION_FRAME] = 85  # usable source frames 0-24
     cache = tmp_path / "cache" / src.name
     cache.parent.mkdir()
     build_episode(src, cache, height=8, width=24, quality=95, stride=2)
     with h5py.File(src, "r") as f, h5py.File(cache, "r") as c:
-        assert schema_adapter.is_cache(c) and len(c[S.IMAGES_JPEG]) == 21
+        assert schema_adapter.is_cache(c) and len(c[S.IMAGES_JPEG]) == 51
         assert schema_adapter.usable_frames(c) == 13  # source frames 0, 2, ..., 24
         window = schema_adapter.read_window(c, 2, 6, lookahead=3)
         assert np.array_equal(window.steering, f[S.STEERING][4:12:2])

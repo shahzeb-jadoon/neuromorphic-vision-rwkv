@@ -140,6 +140,11 @@ META_CACHE_FORMAT = "cache_format"  # e.g. "jpeg-q90-960x160-stride2"
 META_IMAGE_STRIDE = "image_stride"  # source frames per cached image
 META_SOURCE_FILE = "source_file"
 
+# A golden-subset excerpt (scripts/extract_golden.py) names its source episode and the
+# first source frame it copies.
+META_GOLDEN_SOURCE_FILE = "golden_source_file"
+META_GOLDEN_SOURCE_START = "golden_source_start"
+
 # --- Metadata group and attribute names ---
 METADATA_GROUP = "metadata"
 META_TOWN = "town"
