@@ -23,7 +23,7 @@ import torch
 import torch.nn.functional as F
 from torch.utils.data import Dataset, WeightedRandomSampler
 
-from src.data import schema_adapter
+from src.data import labels, schema_adapter
 
 # ImageNet normalization constants
 IMAGENET_MEAN = torch.tensor([0.485, 0.456, 0.406]).view(3, 1, 1)
@@ -42,6 +42,9 @@ VELOCITY_STD = torch.tensor([4.864434, 3.784082, 0.128879])
 # the same scale as control_loss (~0.01–0.1) rather than 100–10,000×.
 # To recover km/h at inference: speed_pred_kmh = model_output * MAX_SPEED_KMH
 MAX_SPEED_KMH: float = 120.0
+
+# Future-waypoint targets: frames ahead of each frame, in the vehicle's frame.
+WAYPOINT_OFFSETS = (5, 10, 15, 20)
 
 
 class DrivingSequenceDataset(Dataset):
@@ -247,14 +250,14 @@ class DrivingSequenceDataset(Dataset):
                 target_speed: (seq_len,) float32  (normalised ∈ [0, 1];
                     multiply by MAX_SPEED_KMH to recover km/h)
                 driving_mode: (seq_len,) int64  (DrivingMode enum, for aux loss)
-                future_waypoints: (seq_len, 4, 2) float32  (relative x,y offsets
-                    at t+5, t+10, t+15, t+20 frames, for aux loss)
+                future_waypoints: (seq_len, 4, 2) float32  (positions at t+5, t+10,
+                    t+15, t+20 frames in the vehicle's frame at t: x forward,
+                    y right, metres; for aux loss)
         """
         ep_idx, start = self.clips[idx]
         end = start + self.seq_len
 
-        wp_offsets = [5, 10, 15, 20]
-        w = schema_adapter.read_window(self._get_h5(ep_idx), start, end, max(wp_offsets))
+        w = schema_adapter.read_window(self._get_h5(ep_idx), start, end, max(WAYPOINT_OFFSETS))
 
         # Convert images: uint8 HWC → float32 CHW [0, 1]
         images = torch.from_numpy(w.images.copy()).permute(0, 3, 1, 2).float() / 255.0
@@ -305,19 +308,9 @@ class DrivingSequenceDataset(Dataset):
         # DrivingMode values 1-8 (newer modes folded by the adapter) → 0-7 for CrossEntropy.
         driving_mode_t = torch.from_numpy(w.driving_mode.copy()).long() - 1
 
-        # Future waypoints: relative (x, y) offsets at t+5, t+10, t+15, t+20,
-        # clamped to the episode end for frames near it.
-        all_pos = torch.from_numpy(w.position.copy())
-        position_t = all_pos[: self.seq_len]
-        future_wps = []
-        for offset in wp_offsets:
-            # Indices relative to `start` in the all_pos buffer
-            future_idx = torch.arange(self.seq_len) + offset
-            future_idx = future_idx.clamp(max=all_pos.shape[0] - 1)
-            future_pos = all_pos[future_idx]
-            rel = future_pos[:, :2] - position_t[:, :2]
-            future_wps.append(rel)
-        future_waypoints = torch.stack(future_wps, dim=1)  # (T, K, 2)
+        future_waypoints = torch.from_numpy(
+            labels.ego_waypoints(w.position, w.yaw, WAYPOINT_OFFSETS)
+        )  # (T, K, 2): x forward, y right, metres
 
         return {
             "images": images,

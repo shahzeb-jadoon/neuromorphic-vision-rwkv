@@ -8,10 +8,13 @@ Run with: pytest tests/test_driving_dataset.py -v
 
 from pathlib import Path
 
+import h5py
+import numpy as np
 import pytest
 import torch
 
-from src.data.driving_dataset import DrivingSequenceDataset
+from src.data import labels, schema_adapter
+from src.data.driving_dataset import WAYPOINT_OFFSETS, DrivingSequenceDataset
 
 
 @pytest.fixture
@@ -134,6 +137,18 @@ class TestNormalization:
             nav, mode = item["nav_command"], item["driving_mode"]
             assert 0 <= int(nav.min()) and int(nav.max()) < 6, f"clip {idx}: nav {nav.tolist()}"
             assert 0 <= int(mode.min()) and int(mode.max()) < 8, f"clip {idx}: mode {mode.tolist()}"
+
+    def test_waypoints_are_in_the_vehicle_frame(
+        self, train_dataset: DrivingSequenceDataset
+    ) -> None:
+        ep_idx, start = train_dataset.clips[-1]
+        with h5py.File(train_dataset.episode_files[ep_idx], "r") as f:
+            w = schema_adapter.read_window(
+                f, start, start + train_dataset.seq_len, max(WAYPOINT_OFFSETS), images=False
+            )
+        expected = labels.ego_waypoints(w.position, w.yaw, WAYPOINT_OFFSETS)
+        got = train_dataset[len(train_dataset) - 1]["future_waypoints"]
+        assert got.dtype == torch.float32 and np.array_equal(got.numpy(), expected)
 
 
 class TestSplit:

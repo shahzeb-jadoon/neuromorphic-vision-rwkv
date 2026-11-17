@@ -72,7 +72,7 @@ class ModeHead(nn.Module):
 class WaypointHead(nn.Module):
     """Predicts future (x, y) positions from fused features. L1 loss.
 
-    Outputs K future waypoint offsets relative to current position.
+    Outputs K future positions in the vehicle's frame (x forward, y right).
     K defaults to 4 (at frame offsets t+5, t+10, t+15, t+20).
     """
 

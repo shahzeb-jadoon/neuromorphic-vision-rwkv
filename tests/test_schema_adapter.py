@@ -39,10 +39,13 @@ def test_window_equals_the_stored_fields(tmp_path: Path, version: int) -> None:
             "target_speed": f[S.TARGET_SPEED][5:21],
             "driving_mode": f[S.DRIVING_MODE][5:21],
             "position": f[S.POSITION][5:40],
+            "yaw": f[S.ROTATION][5:21, 1],
         }
+        signals_only = schema_adapter.read_window(f, 5, 21, lookahead=20, images=False)
     for name, expected in stored.items():
         got = getattr(window, name)
         assert got.dtype == expected.dtype and np.array_equal(got, expected), name
+    assert signals_only.images.size == 0 and np.array_equal(signals_only.yaw, window.yaw)
 
 
 def test_yield_stop_folds_into_stop_sign_stop(tmp_path: Path) -> None:
@@ -106,6 +109,7 @@ def test_cache_reads_as_a_lower_rate_episode(tmp_path: Path) -> None:
         window = schema_adapter.read_window(c, 2, 6, lookahead=3)
         assert np.array_equal(window.steering, f[S.STEERING][4:12:2])
         assert np.array_equal(window.position, f[S.POSITION][4:18:2])
+        assert np.array_equal(window.yaw, f[S.ROTATION][4:12:2, 1])
         source = f[S.IMAGES][4:12:2].astype(float)
         small = source.reshape(4, 8, 2, 24, 2, 3).mean(axis=(2, 4))
         assert window.images.shape == (4, 8, 24, 3)

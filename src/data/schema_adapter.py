@@ -29,7 +29,8 @@ MODE_FOLD = {9: 8}
 @dataclass(frozen=True)
 class Window:
     """Frames [start, end) of one episode. `position` continues `lookahead` frames past
-    `end`, clamped at the episode end, for future-waypoint targets."""
+    `end`, clamped at the episode end, for future-waypoint targets. `images` is empty
+    when the window was read without them."""
 
     images: np.ndarray  # (T, H, W, 3) uint8
     steering: np.ndarray  # (T,) float32
@@ -40,6 +41,7 @@ class Window:
     target_speed: np.ndarray  # (T,) float32, km/h
     driving_mode: np.ndarray  # (T,) DrivingMode 1..8
     position: np.ndarray  # (T + lookahead, 3) float32, metres, world frame
+    yaw: np.ndarray  # (T,) float32, degrees, world frame
 
 
 def schema_version(f: h5py.File) -> int:
@@ -89,21 +91,23 @@ def nav_commands(f: h5py.File) -> np.ndarray:
     return _rows(f, S.NAV_COMMAND, 0, usable_frames(f))
 
 
-def read_window(f: h5py.File, start: int, end: int, lookahead: int) -> Window:
-    if is_cache(f):
-        images = np.stack(
+def read_window(f: h5py.File, start: int, end: int, lookahead: int, images: bool = True) -> Window:
+    if not images:
+        pixels = np.empty((0, 0, 0, 3), dtype=np.uint8)
+    elif is_cache(f):
+        pixels = np.stack(
             [
                 np.asarray(Image.open(io.BytesIO(j.tobytes())).convert("RGB"))
                 for j in f[S.IMAGES_JPEG][start:end]
             ]
         )
     else:
-        images = f[S.IMAGES][start:end]
+        pixels = f[S.IMAGES][start:end]
     mode = _rows(f, S.DRIVING_MODE, start, end)
     for written, sample in MODE_FOLD.items():
         mode[mode == written] = sample
     return Window(
-        images=images,
+        images=pixels,
         steering=_rows(f, S.STEERING, start, end),
         throttle=_rows(f, S.THROTTLE, start, end),
         brake=_rows(f, S.BRAKE, start, end),
@@ -112,6 +116,7 @@ def read_window(f: h5py.File, start: int, end: int, lookahead: int) -> Window:
         target_speed=_rows(f, S.TARGET_SPEED, start, end),
         driving_mode=mode,
         position=_rows(f, S.POSITION, start, min(end + lookahead, _frames(f))),
+        yaw=_rows(f, S.ROTATION, start, end)[:, 1],
     )
 
 
