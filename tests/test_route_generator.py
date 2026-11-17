@@ -17,7 +17,9 @@ from unittest.mock import MagicMock, patch
 import numpy as np
 import pytest
 
-from src.data.route_generator import BalancedRouteGenerator, RouteConfig, carla
+carla = pytest.importorskip("carla")
+
+from src.data.route_generator import BalancedRouteGenerator, RouteConfig  # noqa: E402
 
 # ── Test RouteConfig defaults ──────────────────────────────────────────
 

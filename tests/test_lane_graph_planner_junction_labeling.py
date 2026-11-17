@@ -4,8 +4,12 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
-from agents.navigation.lane_graph_planner import LaneGraphPlanner, SegmentNode
-from agents.navigation.local_planner import RoadOption
+import pytest
+
+pytest.importorskip("carla")
+
+from agents.navigation.lane_graph_planner import LaneGraphPlanner, SegmentNode  # noqa: E402
+from agents.navigation.local_planner import RoadOption  # noqa: E402
 
 
 def _node(
