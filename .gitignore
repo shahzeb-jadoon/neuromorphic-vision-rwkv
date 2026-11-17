@@ -1,26 +1,8 @@
 # =============================================================================
-# LaTeX Build Artifacts
+# Logs
 # =============================================================================
-*.aux
-*.bbl
-*.blg
-*.fdb_latexmk
-*.fls
 *.log
 *.out
-*.synctex.gz
-*.toc
-*.lof
-*.lot
-*.idx
-*.ind
-*.ilg
-*.nav
-*.snm
-*.vrb
-*.run.xml
-*.bcf
-*-blx.bib
 
 # =============================================================================
 # Python Artifacts
@@ -85,11 +67,3 @@ Desktop.ini
 *.swo
 *.bak
 *.tmp
-
-# =============================================================================
-# Local-only Reference Files
-# =============================================================================
-docs/HARDWARE_INVENTORY.md
-docs/SETUP_LOG.md
-docs/FUTURE_CONSIDERATIONS.md
-docs/archive/
