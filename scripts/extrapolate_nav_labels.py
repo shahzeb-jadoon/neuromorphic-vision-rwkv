@@ -29,8 +29,8 @@ Detection logic
 
 Usage
 -----
-    python scripts/extrapolate_nav_labels.py --data-dir /mnt/data/carla_data/ --dry-run
-    python scripts/extrapolate_nav_labels.py --data-dir /mnt/data/carla_data/ --apply
+    python scripts/extrapolate_nav_labels.py --dry-run
+    python scripts/extrapolate_nav_labels.py --apply
 """
 
 from __future__ import annotations
@@ -41,6 +41,7 @@ from pathlib import Path
 
 import h5py
 import numpy as np
+from src.utils.settings import setting
 
 
 # ---------------------------------------------------------------------------
@@ -275,8 +276,8 @@ def main() -> None:
     parser.add_argument(
         "--data-dir",
         type=Path,
-        default=Path("/mnt/data/carla_data/"),
-        help="Directory containing episode HDF5 files.",
+        default=None,
+        help="Directory containing episode HDF5 files (default: DATA_DIR).",
     )
     parser.add_argument(
         "--apply",
@@ -300,6 +301,7 @@ def main() -> None:
     if args.apply:
         args.dry_run = False
 
+    args.data_dir = args.data_dir or Path(setting("DATA_DIR"))
     episodes = sorted(args.data_dir.glob("*.h5"))
     if args.limit > 0:
         episodes = episodes[: args.limit]

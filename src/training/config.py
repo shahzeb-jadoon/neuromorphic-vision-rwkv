@@ -31,7 +31,7 @@ class RunConfig:
 class DatasetConfig:
     """Dataset and dataloader controls."""
 
-    data_dir: str = "/mnt/data/carla_data"
+    data_dir: str = ""  # empty: DATA_DIR from .env
     seq_len: int = 32
     stride: int = 16
     val_fraction: float = 0.2

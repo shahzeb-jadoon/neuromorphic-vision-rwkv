@@ -4,7 +4,7 @@ import json
 import h5py
 import numpy as np
 
-files = sorted(glob.glob("~/projects/neuromorphic-vision-rwkv/data/test_collection/episode_*.h5"))
+files = sorted(glob.glob("data/test_collection/episode_*.h5"))
 
 for f in files:
     ep_name = f.split("/")[-1]

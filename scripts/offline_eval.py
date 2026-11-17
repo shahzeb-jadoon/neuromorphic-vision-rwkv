@@ -7,13 +7,11 @@ during training validation.
 
 Usage:
     python scripts/offline_eval.py \
-        --checkpoint runs_fast/fastsafe_20260424_093210/checkpoints/best.pt \
-        --data-dir /mnt/data/carla_data
+        --checkpoint runs_fast/fastsafe_20260424_093210/checkpoints/best.pt
 
     # Use latest.pt instead of best.pt
     python scripts/offline_eval.py \
         --checkpoint runs_fast/fastsafe_20260424_093210/checkpoints/latest.pt \
-        --data-dir /mnt/data/carla_data \
         --split val \
         --max-episodes 20
 """
@@ -31,6 +29,7 @@ from tqdm import tqdm
 from agents.learned.learned_agent import load_checkpoint
 from src.data.driving_dataset import DrivingSequenceDataset
 from src.data.driving_dataset import IMAGENET_MEAN, IMAGENET_STD
+from src.utils.settings import setting
 
 
 def run_offline_eval(
@@ -154,7 +153,7 @@ def main() -> None:
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
     parser.add_argument("--checkpoint", required=True, help="Path to .pt checkpoint")
-    parser.add_argument("--data-dir", required=True, help="Directory with episode_*.h5 files")
+    parser.add_argument("--data-dir", help="Directory with episode_*.h5 files (default: DATA_DIR)")
     parser.add_argument("--split", default="val", choices=["val", "train"])
     parser.add_argument("--max-episodes", type=int, default=None)
     parser.add_argument("--resize-h", type=int, default=160)
@@ -164,7 +163,7 @@ def main() -> None:
 
     results = run_offline_eval(
         checkpoint_path=args.checkpoint,
-        data_dir=args.data_dir,
+        data_dir=args.data_dir or setting("DATA_DIR"),
         split=args.split,
         max_episodes=args.max_episodes,
         resize_h=args.resize_h,

@@ -14,7 +14,6 @@ run:
   device: cuda
 
 dataset:
-  data_dir: /mnt/data/carla_data
   seq_len: 32
   stride: 16
   val_fraction: 0.2

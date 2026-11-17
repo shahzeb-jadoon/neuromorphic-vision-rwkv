@@ -314,7 +314,7 @@ Training runs may be interrupted by OOM, hardware issues, or power loss. The che
 ```bash
 # On the workstation:
 conda activate rwkv
-cd ~/projects/neuromorphic-vision-rwkv
+cd neuromorphic-vision-rwkv
 python -m src.training.trainer --config configs/vrwkv_base.yaml
 ```
 

@@ -9,7 +9,7 @@ Analyzes:
 5. Hours shortfall analysis
 
 Usage:
-    python scripts/analyze_overnight.py /mnt/data/carla_data
+    python scripts/analyze_overnight.py [data_dir]   # default: DATA_DIR
 """
 
 import sys
@@ -19,6 +19,7 @@ from collections import Counter, defaultdict
 
 import h5py
 import numpy as np
+from src.utils.settings import setting
 
 
 def analyze_all(data_dir: str) -> None:
@@ -301,5 +302,5 @@ def analyze_all(data_dir: str) -> None:
 
 
 if __name__ == "__main__":
-    data_dir = sys.argv[1] if len(sys.argv) > 1 else "/mnt/data/carla_data"
+    data_dir = sys.argv[1] if len(sys.argv) > 1 else setting("DATA_DIR")
     analyze_all(data_dir)

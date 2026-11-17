@@ -16,7 +16,7 @@ sha256 of every artifact. Later runs append new entries in the same format.
 | Directory | `runs_fast/fastsafe_20260424_093210/` (local only, git-ignored) |
 | Code | `f725d42` (`0130497` before a November 2026 history rewrite) — most recent commit when the run started; working-tree state was not captured |
 | Code evidence | Run started 2026-04-24 09:32 local time (UTC−4, the `-0400` offset on that day's commits), after `f725d42` at 07:17 `-0400`. The logged speed loss at step 20 (0.126) matches the km/h → [0, 1] target normalisation introduced by `f725d42`. |
-| Data | `/mnt/data/carla_data`, schema v3, 1,099 episodes, 3,624,673 frames |
+| Data | Schema v3, 1,099 episodes, 3,624,673 frames |
 | Split | episode-level, seed 42, validation fraction 0.2 (219 validation episodes) |
 | Sampling | clips of 32 frames, stride 512, resized to 160×960, weighted sampler, flip augmentation |
 | Model | `VisionRWKVDriver`, 13.43M parameters, 6 encoder layers, width 384, patch size 16 |

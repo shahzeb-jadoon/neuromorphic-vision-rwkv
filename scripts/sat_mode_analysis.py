@@ -12,6 +12,7 @@ from collections import Counter
 
 import h5py
 import numpy as np
+from src.utils.settings import setting
 
 # DrivingMode enum values (from privileged_expert.py)
 MODE_NAMES = {
@@ -192,6 +193,6 @@ def analyze(data_dir: str, max_episodes: int = 100) -> None:
 
 
 if __name__ == "__main__":
-    data_dir = sys.argv[1] if len(sys.argv) > 1 else "/mnt/data/carla_data"
+    data_dir = sys.argv[1] if len(sys.argv) > 1 else setting("DATA_DIR")
     max_ep = int(sys.argv[2]) if len(sys.argv) > 2 else 100
     analyze(data_dir, max_ep)

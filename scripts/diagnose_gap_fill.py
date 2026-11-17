@@ -26,6 +26,7 @@ import time
 from typing import Any
 
 import carla
+from src.utils.settings import setting
 
 # ---------------------------------------------------------------------------
 # Memory helpers
@@ -69,8 +70,8 @@ def get_mem_avail_mb() -> float:
 # Helper: connect to CARLA, load map
 # ---------------------------------------------------------------------------
 
-CARLA_HOST = os.environ.get("CARLA_HOST", "172.20.0.1")
-CARLA_PORT = int(os.environ.get("CARLA_PORT", 2000))
+CARLA_HOST = setting("CARLA_HOST", "localhost")
+CARLA_PORT = int(setting("CARLA_PORT", "2000"))
 
 
 def connect_carla(town: str) -> tuple:

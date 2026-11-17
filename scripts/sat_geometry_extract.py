@@ -18,6 +18,7 @@ from typing import Any
 
 import h5py
 import numpy as np
+from src.utils.settings import setting
 
 
 def sat_overlap(poly_a: np.ndarray, poly_b: np.ndarray) -> bool:
@@ -233,7 +234,7 @@ def analyze_episode(path: str, max_cases: int = 5) -> int:
 def main() -> None:
     import glob
 
-    data_dir = sys.argv[1] if len(sys.argv) > 1 else "/mnt/data/carla_data"
+    data_dir = sys.argv[1] if len(sys.argv) > 1 else setting("DATA_DIR")
     max_episodes = int(sys.argv[2]) if len(sys.argv) > 2 else 10
     max_cases = int(sys.argv[3]) if len(sys.argv) > 3 else 3
 

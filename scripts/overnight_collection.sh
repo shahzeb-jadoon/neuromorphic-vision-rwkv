@@ -15,17 +15,17 @@
 # Expected runtime: ~24-48 hours (depends on CARLA frame rate)
 # Expected storage: ~1-2 TB at 1920×320 panoramic (gzip-1)
 #
-# Monitor progress: tail -f data/collected/collection.log
+# Monitor progress: tail -f "$DATA_DIR/collection.log"
 # Resume after interruption: just re-run the script (manifest-based resume)
 # Move data to NFS and re-run to continue on larger storage.
 # ============================================================================
 
 set -uo pipefail  # Don't use -e: allow per-town failures without aborting
 
-# --- Storage location ---
-# Default: the dataset directory below
-# Override: OUTPUT_DIR=/path/to/dir bash scripts/overnight_collection.sh
-OUTPUT_DIR="${OUTPUT_DIR:-/mnt/data/carla_data}"
+# --- Storage location: DATA_DIR from .env; override with OUTPUT_DIR=/path/to/dir ---
+ENV_FILE="$(dirname "$0")/../.env"
+if [[ -f "${ENV_FILE}" ]]; then set -a; source "${ENV_FILE}"; set +a; fi
+OUTPUT_DIR="${OUTPUT_DIR:-${DATA_DIR:?set DATA_DIR in .env or pass OUTPUT_DIR}}"
 LOG_FILE="${OUTPUT_DIR}/collection.log"
 MANIFEST="${OUTPUT_DIR}/collection_manifest.json"
 

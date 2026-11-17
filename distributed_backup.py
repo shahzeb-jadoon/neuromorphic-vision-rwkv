@@ -5,9 +5,10 @@ import hashlib
 import subprocess
 import time
 import shutil
+from src.utils.settings import setting
 
 MANIFEST_FILE = "migration_state.json"
-SOURCE_DIR = "/mnt/data/carla_data"
+SOURCE_DIR = setting("DATA_DIR")
 
 
 class UIManager:
@@ -85,14 +86,14 @@ class UIManager:
             bar = "=" * length
         if percent <= 0:
             bar = " " * length
-        return f"[{bar}] {percent*100:5.1f}%"
+        return f"[{bar}] {percent * 100:5.1f}%"
 
     def _format_time(self, secs):
         if secs <= 0:
             return "N/A"
         if secs < 60:
             return f"{int(secs)}s"
-        return f"{int(secs//60)}m {int(secs%60)}s"
+        return f"{int(secs // 60)}m {int(secs % 60)}s"
 
     def draw(self):
         if not self.is_active:
@@ -327,7 +328,7 @@ def select_target_drive(required_space, filename, manifest, avg_file_size):
         else:
             print(
                 f"\n[ERROR] Not enough space on {target_base}. "
-                f"Has {free_space/(1024**3):.2f} GB, needs {required_space/(1024**3):.2f} GB."
+                f"Has {free_space / (1024**3):.2f} GB, needs {required_space / (1024**3):.2f} GB."
             )
             input("Press Enter to try again...")
 

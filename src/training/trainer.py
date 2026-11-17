@@ -35,6 +35,7 @@ from src.training.config import (
 )
 from src.training.plotting import plot_run_dashboard
 from src.utils.device import describe_device, select_device
+from src.utils.settings import setting
 
 wandb: Any
 try:
@@ -330,9 +331,10 @@ class Trainer:
         self,
     ) -> tuple[DataLoader[dict[str, torch.Tensor]], DataLoader[dict[str, torch.Tensor]]]:
         dcfg = self.cfg.dataset
+        data_dir = dcfg.data_dir or setting("DATA_DIR")
 
         train_ds = DrivingSequenceDataset(
-            data_dir=dcfg.data_dir,
+            data_dir=data_dir,
             seq_len=dcfg.seq_len,
             stride=dcfg.stride,
             split="train",
@@ -343,7 +345,7 @@ class Trainer:
             resize_width=dcfg.resize_width,
         )
         val_ds = DrivingSequenceDataset(
-            data_dir=dcfg.data_dir,
+            data_dir=data_dir,
             seq_len=dcfg.seq_len,
             stride=dcfg.stride,
             split="val",
