@@ -124,7 +124,7 @@ def analyze(data_dir: str, max_episodes: int = 100) -> None:
         hp = hc / max(total_hit, 1) * 100
         print(f"  {mode_name:20s}: MISS={mc:6d} ({mp:5.1f}%)  HIT={hc:6d} ({hp:5.1f}%)")
 
-    print(f"\n{'='*70}")
+    print(f"\n{'=' * 70}")
     print("NAV COMMAND AT SAT MISS vs HIT FRAMES")
     print("=" * 70)
     # RoadOption values: 0=VOID, 1=LEFT, 2=RIGHT, 3=STRAIGHT,
@@ -146,7 +146,7 @@ def analyze(data_dir: str, max_episodes: int = 100) -> None:
         hp = hc / max(sum(hit_modes.values()), 1) * 100
         print(f"  {nav_name:20s}: MISS={mc:6d} ({mp:5.1f}%)  HIT={hc:6d} ({hp:5.1f}%)")
 
-    print(f"\n{'='*70}")
+    print(f"\n{'=' * 70}")
     print("EPISODE SAT RATE vs CURVINESS CORRELATION")
     print("=" * 70)
     if episode_profiles:

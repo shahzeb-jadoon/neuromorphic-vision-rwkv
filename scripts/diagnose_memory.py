@@ -178,7 +178,7 @@ def format_snapshot(snap: MemorySnapshot) -> str:
         f"  Commit: {snap.committed_as_mb:.0f}/{snap.commit_limit_mb:.0f} MB"
         f" ({snap.commit_pct():.1f}%)"
         f" | Swap: {swap_used:.0f}/{snap.swap_total_mb:.0f} MB",
-        f"  Python: {len(snap.python_procs)} procs," f" total RSS={total_py_rss:.0f} MB",
+        f"  Python: {len(snap.python_procs)} procs, total RSS={total_py_rss:.0f} MB",
     ]
     for p in snap.python_procs:
         lines.append(
@@ -282,7 +282,7 @@ def run_monitor(interval: float, output_path: Path | None, duration: float | Non
             snap = take_snapshot(start)
             sample += 1
 
-            print(f"\n{'='*70}")
+            print(f"\n{'=' * 70}")
             print(f"Sample {sample}")
             print(format_snapshot(snap))
 

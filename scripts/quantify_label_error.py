@@ -211,7 +211,7 @@ def print_results(all_results: list[dict]) -> None:
         if h_name in labels and gt_name in labels:
             matrix[labels.index(h_name), labels.index(gt_name)] = count
 
-    print(f"\n{'='*70}")
+    print(f"\n{'=' * 70}")
     print(f"OVERALL: {agreed_all}/{total_all} ({overall_acc:.1%} agreement)")
     print("\nConfusion matrix (rows=heuristic, cols=ground_truth):")
     header = f"{'Heuristic↓ GT→':>16}" + "".join(f"{lbl:>12}" for lbl in labels)

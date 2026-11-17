@@ -281,7 +281,7 @@ print(f"Map preloaded: {town} on {{host}}")
         if attempt < max_retries:
             wait = base_wait * (2 ** (attempt - 1))
             logger.warning(
-                "Map preload for %s failed (attempt %d/%d, rc=%d): %s " "— retrying in %.0fs",
+                "Map preload for %s failed (attempt %d/%d, rc=%d): %s — retrying in %.0fs",
                 town,
                 attempt,
                 max_retries,
@@ -369,7 +369,7 @@ def _run_orchestrator(args: argparse.Namespace) -> None:
                 # exited.  The manifest records progress, so the next
                 # worker will skip completed episodes.
                 logger.info(
-                    "Town %s worker hit RSS limit — restarting " "(restart %d/%d)",
+                    "Town %s worker hit RSS limit — restarting (restart %d/%d)",
                     town,
                     restart + 1,
                     max_restarts,
@@ -665,8 +665,7 @@ def main() -> None:
             # --- Memory snapshot after episode ---
             if args.memory_log:
                 log_memory_snapshot(
-                    f"POST episode {episode_num} status={result.status} "
-                    f"frames={result.n_frames}"
+                    f"POST episode {episode_num} status={result.status} frames={result.n_frames}"
                 )
 
             # --- M13: tracemalloc snapshot between episodes ---
@@ -693,7 +692,7 @@ def main() -> None:
             # F3: RSS memory guard — exit worker so orchestrator restarts it
             if result.status == "memory_limit":
                 logger.warning(
-                    "RSS memory guard triggered — exiting worker for restart " "(PID %d, %s)",
+                    "RSS memory guard triggered — exiting worker for restart (PID %d, %s)",
                     os.getpid(),
                     args._subprocess_town,
                 )

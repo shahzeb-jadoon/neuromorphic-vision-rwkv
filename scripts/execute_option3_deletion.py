@@ -48,9 +48,7 @@ def main() -> None:
     print("All files belong to verified Option 3 (Tiers A, B, C, and D) candidates.\n")
 
     # The Final Confirmation Prompt
-    print(
-        f"WARNING: This script will PERMANENTLY DELETE {len(rows)} files" f" ({total_gb:.2f} GB)."
-    )
+    print(f"WARNING: This script will PERMANENTLY DELETE {len(rows)} files ({total_gb:.2f} GB).")
     print(
         "These files are the obsolete/shorter paired retries"
         " evaluated in the final storage decision."

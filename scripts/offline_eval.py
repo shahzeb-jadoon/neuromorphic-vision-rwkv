@@ -173,9 +173,9 @@ def main() -> None:
     )
 
     ckpt_name = Path(args.checkpoint).name
-    print(f"\n{'='*55}")
+    print(f"\n{'=' * 55}")
     print(f"Offline Eval — {ckpt_name}  ({args.split} split)")
-    print(f"{'='*55}")
+    print(f"{'=' * 55}")
     print(f"Episodes evaluated:  {results['n_episodes']}")
     print(f"Frames evaluated:    {results['n_frames']:,}")
     print(f"Steer  MAE (mean):   {results['steer_mae']:.4f}")
@@ -183,7 +183,7 @@ def main() -> None:
     print(f"Accel  MAE (mean):   {results['accel_mae']:.4f}")
     print(f"Accel  MAE (p95):    {results['accel_mae_p95']:.4f}")
     print(f"Avg episode loss:    {results['avg_episode_loss']:.4f}")
-    print(f"{'='*55}")
+    print(f"{'=' * 55}")
 
 
 if __name__ == "__main__":

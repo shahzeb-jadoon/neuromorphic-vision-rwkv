@@ -75,9 +75,9 @@ def deep_analysis(data_dir: str) -> None:
     print(f"  Emergency-zone misses (<10m): {very_close_miss}")
 
     if all_miss_details:
-        print(f"\n{'='*60}")
+        print(f"\n{'=' * 60}")
         print("CLOSE-RANGE MISS SAMPLES (<25m)")
-        print(f"{'='*60}")
+        print(f"{'=' * 60}")
         for ep, frame, d, lat, lng, seg, bh in sorted(all_miss_details, key=lambda x: x[2]):
             print(
                 f"  {ep} F{frame}: dist={d:.1f}m lat={lat:.2f}m "
@@ -86,9 +86,9 @@ def deep_analysis(data_dir: str) -> None:
 
     # Also check: in the episodes where SAT works (53662066),
     # what distances are the successful SAT detections at?
-    print(f"\n{'='*60}")
+    print(f"\n{'=' * 60}")
     print("SAT SUCCESS DISTANCE DISTRIBUTION (episode_53662066)")
-    print(f"{'='*60}")
+    print(f"{'=' * 60}")
     sat_path = f"{data_dir}/episode_53662066.h5"
     try:
         with h5py.File(sat_path) as f:

@@ -47,7 +47,7 @@ def main() -> None:
 
     print("Server-side memory leak test")
     print(f"Town: {args.town}, Ticks: {args.ticks}")
-    print(f"{'='*70}")
+    print(f"{'=' * 70}")
 
     client = carla.Client(args.host, args.port)
     client.set_timeout(60.0)
@@ -115,7 +115,7 @@ def main() -> None:
     t0 = time.time()
     print(f"  Baseline: RSS={rss0} MB, MemAvail={avail0} MB")
     print(f"  {'tick':>6} {'RSS':>6} {'MemAvail':>9} {'dRSS':>6} {'dAvail':>7} {'elapsed':>8}")
-    print(f"  {'-'*50}")
+    print(f"  {'-' * 50}")
 
     for i in range(args.ticks):
         world.tick()
@@ -125,7 +125,7 @@ def main() -> None:
             avail = get_mem_avail_mb()
             elapsed = time.time() - t0
             print(
-                f"  {i:6d} {rss:5d}MB {avail:8d}MB {rss-rss0:+5d}MB {avail-avail0:+6d}MB {elapsed:7.1f}s"  # noqa: E501
+                f"  {i:6d} {rss:5d}MB {avail:8d}MB {rss - rss0:+5d}MB {avail - avail0:+6d}MB {elapsed:7.1f}s"  # noqa: E501
             )
 
             if avail < 1500:
@@ -136,7 +136,7 @@ def main() -> None:
     avail_end = get_mem_avail_mb()
     elapsed = time.time() - t0
     print(
-        f"\n  Final:  RSS={rss_end} MB (+{rss_end-rss0} MB), MemAvail={avail_end} MB ({avail_end-avail0:+d} MB)"  # noqa: E501
+        f"\n  Final:  RSS={rss_end} MB (+{rss_end - rss0} MB), MemAvail={avail_end} MB ({avail_end - avail0:+d} MB)"  # noqa: E501
     )
     print(f"  Elapsed: {elapsed:.1f}s")
 

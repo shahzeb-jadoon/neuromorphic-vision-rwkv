@@ -4,11 +4,7 @@ import json
 import h5py
 import numpy as np
 
-files = sorted(
-    glob.glob(
-        "~/projects/neuromorphic-vision-rwkv/data/test_collection/episode_*.h5"
-    )
-)
+files = sorted(glob.glob("~/projects/neuromorphic-vision-rwkv/data/test_collection/episode_*.h5"))
 
 print("=" * 70)
 print("PART 1: RED LIGHT DETAIL")
@@ -119,7 +115,6 @@ for f in files:
                         and abs(v.get("lateral", 999)) < 2.5
                         and v.get("distance", 999) < 25
                     ):
-
                         pos = h["position"][frame_idx]
                         rot = h["rotation"][frame_idx]
                         print(f"\n  {ep_name} Frame {frame_idx}:")

@@ -187,20 +187,22 @@ def analyze_all(data_dir: str) -> None:
                 )
 
         if (idx + 1) % 100 == 0:
-            print(f"  Processed {idx+1}/{len(paths)} episodes...")
+            print(f"  Processed {idx + 1}/{len(paths)} episodes...")
 
     # =====================================================================
     # PRINT RESULTS
     # =====================================================================
-    print(f"\n{'='*70}")
+    print(f"\n{'=' * 70}")
     print("OVERNIGHT COLLECTION — FULL DIAGNOSTIC REPORT")
-    print(f"{'='*70}")
+    print(f"{'=' * 70}")
 
     print("\n--- Overall Stats ---")
-    print(f"  Total frames: {total_frames:,} ({total_frames/20/3600:.1f} hours)")
-    print(f"  Stationary frames: {total_stationary:,} ({100*total_stationary/total_frames:.1f}%)")
+    print(f"  Total frames: {total_frames:,} ({total_frames / 20 / 3600:.1f} hours)")
+    print(
+        f"  Stationary frames: {total_stationary:,} ({100 * total_stationary / total_frames:.1f}%)"
+    )
     active = total_frames - total_stationary
-    print(f"  Active (moving) frames: {active:,} ({active/20/3600:.1f} hours)")
+    print(f"  Active (moving) frames: {active:,} ({active / 20 / 3600:.1f} hours)")
 
     print("\n--- SAT Corridor Health ---")
     pct_s = 100 * total_sat_hits / max(total_sat_veh_frames, 1)
@@ -228,9 +230,9 @@ def analyze_all(data_dir: str) -> None:
     # =====================================================================
     # COLLISION ANALYSIS
     # =====================================================================
-    print(f"\n{'='*70}")
+    print(f"\n{'=' * 70}")
     print(f"COLLISION ANALYSIS ({len(collision_details)} episodes)")
-    print(f"{'='*70}")
+    print(f"{'=' * 70}")
 
     if collision_details:
         # Categorize collisions

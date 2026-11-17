@@ -79,8 +79,8 @@ local_corners = np.array(
 world_corners = (R @ local_corners.T).T + v_origin
 print(f"Vehicle center: {v_center}")
 print(f"Vehicle OBB: {world_corners}")
-print(f"  x: [{world_corners[:,0].min():.2f}, {world_corners[:,0].max():.2f}]")
-print(f"  y: [{world_corners[:,1].min():.2f}, {world_corners[:,1].max():.2f}]")
+print(f"  x: [{world_corners[:, 0].min():.2f}, {world_corners[:, 0].max():.2f}]")
+print(f"  y: [{world_corners[:, 1].min():.2f}, {world_corners[:, 1].max():.2f}]")
 
 overlaps = []
 for i, seg in enumerate(segments):

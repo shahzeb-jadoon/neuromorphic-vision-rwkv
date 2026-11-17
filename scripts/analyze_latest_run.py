@@ -105,7 +105,6 @@ for f in files:
                         and abs(v.get("lateral", 999)) < 2.5
                         and v.get("distance", 999) < 25
                     ):
-
                         pos = h["position"][frame_idx]
                         rot = h["rotation"][frame_idx]
                         print(f"\n  {ep_name} F{frame_idx}:")

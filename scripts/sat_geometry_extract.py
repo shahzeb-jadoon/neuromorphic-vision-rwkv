@@ -101,9 +101,9 @@ def analyze_episode(path: str, max_cases: int = 5) -> int:
                 v_center_y = ego_bb_y + fwd[1] * longi + right[1] * lat
 
                 # Print case details
-                print(f"\n{'='*70}")
+                print(f"\n{'=' * 70}")
                 print(f"SAT MISS CASE — {ep_name} frame {i}")
-                print(f"{'='*70}")
+                print(f"{'=' * 70}")
                 print(f"  Ego position:  ({ego_x:.1f}, {ego_y:.1f})")
                 print(f"  Ego yaw:       {yaw:.1f}° → fwd=({fwd[0]:.3f}, {fwd[1]:.3f})")
                 print(f"  Ego BB center: ({ego_bb_x:.1f}, {ego_bb_y:.1f})")
@@ -199,7 +199,7 @@ def analyze_episode(path: str, max_cases: int = 5) -> int:
                     if closest_seg >= 0:
                         seg = straight_segs[closest_seg]
                         sc = seg.mean(0)
-                        print(f"  Closest seg {closest_seg}:" f" center=({sc[0]:.1f}, {sc[1]:.1f})")
+                        print(f"  Closest seg {closest_seg}: center=({sc[0]:.1f}, {sc[1]:.1f})")
                         print(f"    Seg corners: {seg.tolist()}")
                         print(f"    Vehicle corners: {v_corners.tolist()}")
 
@@ -217,7 +217,7 @@ def analyze_episode(path: str, max_cases: int = 5) -> int:
                 # Simplified: just show relative positions
                 print(f"  Vehicle at ({longi:.0f}m ahead, {lat:.1f}m lateral)")
                 print(f"  First WP at {bh:.1f}m")
-                print(f"  Corridor width: ±{half_lane}m = {half_lane*2}m total")
+                print(f"  Corridor width: ±{half_lane}m = {half_lane * 2}m total")
                 v_longi_from_ego = longi + bb_offset  # from ego_loc
                 print(f"  Vehicle center at ~{v_longi_from_ego:.0f}m from ego_loc")
 

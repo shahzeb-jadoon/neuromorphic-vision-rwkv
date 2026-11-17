@@ -256,8 +256,8 @@ class TestShortCollection:
 
                     # Nav commands in valid range [1, 4] (RoadOption enum)
                     nav = f[S.NAV_COMMAND][:]
-                    assert np.all(nav >= 1) and np.all(
-                        nav <= 4
-                    ), f"Nav commands out of range: min={nav.min()}, max={nav.max()}"
+                    assert np.all(nav >= 1) and np.all(nav <= 4), (
+                        f"Nav commands out of range: min={nav.min()}, max={nav.max()}"
+                    )
         finally:
             shutil.rmtree(tmpdir, ignore_errors=True)

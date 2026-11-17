@@ -343,17 +343,17 @@ def main() -> None:
     print(f"\n{'=' * 60}")
     print(f"TOTAL: {len(episodes)} episodes, {n} frames")
     print(
-        f"  STRAIGHT:        {totals['n_straight']:>8} " f"({100 * totals['n_straight'] / n:.1f}%)"
+        f"  STRAIGHT:        {totals['n_straight']:>8} ({100 * totals['n_straight'] / n:.1f}%)"
         if n
         else ""
     )
     print(
-        f"  CHANGELANELEFT:  {totals['n_left_lc']:>8} " f"({100 * totals['n_left_lc'] / n:.1f}%)"
+        f"  CHANGELANELEFT:  {totals['n_left_lc']:>8} ({100 * totals['n_left_lc'] / n:.1f}%)"
         if n
         else ""
     )
     print(
-        f"  CHANGELANERIGHT: {totals['n_right_lc']:>8} " f"({100 * totals['n_right_lc'] / n:.1f}%)"
+        f"  CHANGELANERIGHT: {totals['n_right_lc']:>8} ({100 * totals['n_right_lc'] / n:.1f}%)"
         if n
         else ""
     )

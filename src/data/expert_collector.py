@@ -882,7 +882,7 @@ class ExpertDataCollector:
                     lead_str = f"{v_info['distance']:.0f}m"
                     break
 
-        hud_text = f"F{frame_idx} | {mode_name}\n" f"{spd:.0f}/{tgt:.0f} km/h | lead:{lead_str}"
+        hud_text = f"F{frame_idx} | {mode_name}\n{spd:.0f}/{tgt:.0f} km/h | lead:{lead_str}"
         debug.draw_string(
             carla.Location(ego_loc.x, ego_loc.y, ego_loc.z + 3.0),
             hud_text,
@@ -1253,7 +1253,7 @@ class ExpertDataCollector:
             if config.rss_limit_mb > 0:
                 rss = self._get_rss_mb()
                 logger.info(
-                    "  [RSS guard] baseline before tick loop: %d MB " "(limit %d MB)",
+                    "  [RSS guard] baseline before tick loop: %d MB (limit %d MB)",
                     rss,
                     config.rss_limit_mb,
                 )
@@ -1299,7 +1299,7 @@ class ExpertDataCollector:
                     now = time.time()
                     if now - _last_rss_log >= 30.0:
                         logger.info(
-                            "  [RSS guard] frame %d, t=%.0fs: " "%d MB (limit %d MB)",
+                            "  [RSS guard] frame %d, t=%.0fs: %d MB (limit %d MB)",
                             frame_idx + 1,
                             now - start_time,
                             rss,
@@ -1647,7 +1647,7 @@ class CollectionManifest:
 
         lines = [
             f"Episodes: {self.data['total_episodes']}",
-            f"Frames:   {self.data['total_frames']}" f" ({total_hrs:.1f} hours at 20 FPS)",
+            f"Frames:   {self.data['total_frames']} ({total_hrs:.1f} hours at 20 FPS)",
             f"Statuses: {status_counts}",
         ]
         return "\n".join(lines)

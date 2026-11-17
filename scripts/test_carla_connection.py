@@ -62,9 +62,9 @@ def main() -> None:
     else:
         host = args.host
 
-    print(f"{'='*60}")
+    print(f"{'=' * 60}")
     print("CARLA Synchronous Mode Test")
-    print(f"{'='*60}")
+    print(f"{'=' * 60}")
     print(f"Host:           {host}:{args.port}")
     print(f"Frames to run:  {args.frames}")
     print()

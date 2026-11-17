@@ -77,9 +77,9 @@ def main() -> None:
             t = vehicle.get_transform()
             bb = vehicle.bounding_box
 
-            print(f"\n{'='*70}")
+            print(f"\n{'=' * 70}")
             print(f"AFTER {settle_ticks} TICKS")
-            print(f"{'='*70}")
+            print(f"{'=' * 70}")
 
             print("  Transform:")
             print(f"    location: ({t.location.x:.4f}, {t.location.y:.4f}, {t.location.z:.4f})")
@@ -165,9 +165,9 @@ def main() -> None:
                 print(f"    Corner {i} alt: ({wx:.4f}, {wy:.4f})")
 
         # Also check a traffic manager vehicle if any exist
-        print(f"\n{'='*70}")
+        print(f"\n{'=' * 70}")
         print("CHECKING OTHER VEHICLES IN WORLD")
-        print(f"{'='*70}")
+        print(f"{'=' * 70}")
         for v in world.get_actors().filter("*vehicle*"):
             if v.id == vehicle.id:
                 continue

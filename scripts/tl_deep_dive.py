@@ -35,9 +35,9 @@ with h5py.File(f, "r") as h:
                 f"spd={speed[cs]:.0f}->{speed[ce]:.0f} km/h"
             )
             if cs > 0:
-                print(f"    Before: TL={int(tl_state[cs-1])} mode={int(dm[cs-1])}")
+                print(f"    Before: TL={int(tl_state[cs - 1])} mode={int(dm[cs - 1])}")
             if ce < n - 1:
-                print(f"    After:  TL={int(tl_state[ce+1])} mode={int(dm[ce+1])}")
+                print(f"    After:  TL={int(tl_state[ce + 1])} mode={int(dm[ce + 1])}")
 
     # All red blocks
     red_frames = np.where(tl_state == 3)[0]
@@ -55,5 +55,5 @@ with h5py.File(f, "r") as h:
     for s, e in zip(bs_, be_):
         modes = dm[s : e + 1]
         um, cm = np.unique(modes, return_counts=True)
-        ms = " ".join([f"{mn.get(int(m),str(m))}={c}" for m, c in zip(um, cm)])
-        print(f"  F{s}-{e} ({e-s+1}f): {ms}")
+        ms = " ".join([f"{mn.get(int(m), str(m))}={c}" for m, c in zip(um, cm)])
+        print(f"  F{s}-{e} ({e - s + 1}f): {ms}")

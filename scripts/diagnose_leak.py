@@ -159,10 +159,10 @@ def run_test(
     test_name: str, host: str, port: int, town: str, n_ticks: int, test_fn: Any, **kwargs: Any
 ) -> dict[str, Any]:
     """Run a single diagnostic test with RSS tracking."""
-    print(f"\n{'='*60}")
+    print(f"\n{'=' * 60}")
     print(f"TEST: {test_name}")
     print(f"Town: {town}, Ticks: {n_ticks}")
-    print(f"{'='*60}")
+    print(f"{'=' * 60}")
 
     client, world, vehicle = setup_carla(host, port, town)
 
@@ -412,7 +412,7 @@ def test_no_sensors_only_tick_count(
     mx = max(times)
     mn = min(times)
     print(
-        f"    Tick timing ({len(times)} ticks): avg={avg*1000:.1f}ms, min={mn*1000:.1f}ms, max={mx*1000:.1f}ms"  # noqa: E501
+        f"    Tick timing ({len(times)} ticks): avg={avg * 1000:.1f}ms, min={mn * 1000:.1f}ms, max={mx * 1000:.1f}ms"  # noqa: E501
     )
     measurements.append(("tick_avg_ms", avg * 1000))
     measurements.append(("tick_max_ms", mx * 1000))
@@ -1051,7 +1051,7 @@ def main() -> None:
     args = parser.parse_args()
 
     print("CARLA Memory Leak Diagnostic")
-    print(f"{'='*60}")
+    print(f"{'=' * 60}")
     print(f"Host: {args.host}:{args.port}")
     print(f"Town: {args.town}")
     print(f"Ticks per test: {args.ticks}")
@@ -1203,9 +1203,9 @@ def main() -> None:
         results.append(r)
 
     # Summary
-    print(f"\n{'='*60}")
+    print(f"\n{'=' * 60}")
     print("SUMMARY")
-    print(f"{'='*60}")
+    print(f"{'=' * 60}")
     print(f"{'Test':<45} {'Growth':>8} {'Rate':>10} {'Verdict':<20}")
     print("-" * 85)
     for r in results:

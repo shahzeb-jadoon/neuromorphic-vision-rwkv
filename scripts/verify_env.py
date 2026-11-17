@@ -27,9 +27,9 @@ def main() -> None:
     fail = "\033[31m✗\033[0m"
     warn = "\033[33m!\033[0m"
 
-    print(f"\n{'='*60}")
+    print(f"\n{'=' * 60}")
     print("  Environment Verification Report")
-    print(f"{'='*60}\n")
+    print(f"{'=' * 60}\n")
 
     # ── System ────────────────────────────────────────────────────
     print("System")

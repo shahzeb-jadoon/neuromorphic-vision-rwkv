@@ -237,9 +237,9 @@ def main() -> None:
         # We'll try spawn point 0 and verify lane info
         ego_sp = spawn_points[0]
         ego_wp = carla_map.get_waypoint(ego_sp.location)
-        print(f"\n{'='*70}")
+        print(f"\n{'=' * 70}")
         print("SPAWN POINT INFO")
-        print(f"{'='*70}")
+        print(f"{'=' * 70}")
         print(
             f"  Spawn transform: ({ego_sp.location.x:.1f}, {ego_sp.location.y:.1f}, "
             f"{ego_sp.location.z:.1f}) yaw={ego_sp.rotation.yaw:.1f}°"
@@ -346,9 +346,9 @@ def main() -> None:
         ego_loc = ego_transform.location
         ego_actual_wp = carla_map.get_waypoint(ego_loc)
 
-        print(f"\n{'='*70}")
+        print(f"\n{'=' * 70}")
         print("LANE ALIGNMENT ANALYSIS")
-        print(f"{'='*70}")
+        print(f"{'=' * 70}")
         print(f"  Ego actual position:  ({ego_loc.x:.2f}, {ego_loc.y:.2f})")
         print(
             f"  Ego nearest waypoint: ({ego_actual_wp.transform.location.x:.2f}, "
@@ -396,9 +396,9 @@ def main() -> None:
             print(f"    Corner {ci}: ({cx:.2f}, {cy:.2f})")
 
         # ── Test SAT per segment ──
-        print(f"\n{'='*70}")
+        print(f"\n{'=' * 70}")
         print("SAT OVERLAP TEST PER SEGMENT")
-        print(f"{'='*70}")
+        print(f"{'=' * 70}")
         any_hit = False
         for si, seg in enumerate(segments):
             hit = sat_overlap(seg, v_corners)
@@ -449,7 +449,7 @@ def main() -> None:
                     print(f"  |offset|: {np.linalg.norm(v_to_wp):.2f}m")
         else:
             n_hit = sum(sat_overlap(seg, v_corners) for seg in segments)
-            print("\n  SAT DETECTED VEHICLE \u2713" f" ({n_hit} segments)")
+            print(f"\n  SAT DETECTED VEHICLE \u2713 ({n_hit} segments)")
 
         # ── Compute what lateral offset the ego-heading check measures ──
         # Copy bb.location before transforming to avoid in-place mutation
@@ -464,9 +464,9 @@ def main() -> None:
         dy = lead_bb_center.y - ego_bb_center.y
         lat_from_ego = ego_right.x * dx + ego_right.y * dy
         long_from_ego = ego_fwd.x * dx + ego_fwd.y * dy
-        print(f"\n{'='*70}")
+        print(f"\n{'=' * 70}")
         print("LATERAL CHECK COMPARISON")
-        print(f"{'='*70}")
+        print(f"{'=' * 70}")
         print(f"  Ego BB center:  ({ego_bb_center.x:.2f}, {ego_bb_center.y:.2f})")
         print(f"  Lead BB center: ({lead_bb_center.x:.2f}, {lead_bb_center.y:.2f})")
         print(f"  Longitudinal:   {long_from_ego:.2f}m")
@@ -477,9 +477,9 @@ def main() -> None:
         )
 
         # ── Draw debug visuals ──
-        print(f"\n{'='*70}")
+        print(f"\n{'=' * 70}")
         print("DRAWING DEBUG VISUALIZATION")
-        print(f"{'='*70}")
+        print(f"{'=' * 70}")
         print("  GREEN  = corridor boundary")
         print("  RED    = vehicle OBB")
         print("  BLUE   = ego position marker")

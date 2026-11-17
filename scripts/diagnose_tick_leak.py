@@ -116,8 +116,8 @@ def run_tick_loop(
     t0 = time.time()
 
     print(
-        f"  Baseline: RSS={mem0.get('rss_mb',0):.0f} MB, "
-        f"AnonRSS={mem0.get('anon_mb',0):.0f} MB, "
+        f"  Baseline: RSS={mem0.get('rss_mb', 0):.0f} MB, "
+        f"AnonRSS={mem0.get('anon_mb', 0):.0f} MB, "
         f"MemAvail={avail0:.0f} MB"
     )
     print(f"  Safety abort at RSS > {rss_limit} MB or MemAvail < 1500 MB")
@@ -126,7 +126,7 @@ def run_tick_loop(
         f"  {'tick':>6} {'RSS':>7} {'AnonRSS':>8} {'MemAvl':>7} "
         f"{'dRSS':>7} {'dAvail':>8} {'RSS/s':>7} {'Avl/s':>7} {'elapsed':>8}"
     )
-    print(f"  {'-'*80}")
+    print(f"  {'-' * 80}")
 
     last_print = 0
     aborted = False
@@ -155,7 +155,7 @@ def run_tick_loop(
                 rate_r = drss / elapsed if elapsed > 0 else 0
                 rate_a = davail / elapsed if elapsed > 0 else 0
                 print(
-                    f"  {i:6d} {rss:6.0f}M {mem.get('anon_mb',0):7.0f}M "
+                    f"  {i:6d} {rss:6.0f}M {mem.get('anon_mb', 0):7.0f}M "
                     f"{avail:6.0f}M {drss:+6.0f}M {-davail:+7.0f}M "
                     f"{rate_r:+6.1f} {rate_a:+6.1f} {elapsed:7.1f}s"
                 )
@@ -171,7 +171,7 @@ def run_tick_loop(
                 rate_r = drss / elapsed if elapsed > 0 else 0
                 rate_a = davail / elapsed if elapsed > 0 else 0
                 print(
-                    f"  {i:6d} {rss:6.0f}M {mem.get('anon_mb',0):7.0f}M "
+                    f"  {i:6d} {rss:6.0f}M {mem.get('anon_mb', 0):7.0f}M "
                     f"{avail:6.0f}M {drss:+6.0f}M {-davail:+7.0f}M "
                     f"{rate_r:+6.1f} {rate_a:+6.1f} {elapsed:7.1f}s"
                 )
@@ -189,7 +189,7 @@ def run_tick_loop(
                 rate_r = drss / elapsed if elapsed > 0 else 0
                 rate_a = davail / elapsed if elapsed > 0 else 0
                 print(
-                    f"  {i:6d} {rss:6.0f}M {mem.get('anon_mb',0):7.0f}M "
+                    f"  {i:6d} {rss:6.0f}M {mem.get('anon_mb', 0):7.0f}M "
                     f"{avail:6.0f}M {drss:+6.0f}M {-davail:+7.0f}M "
                     f"{rate_r:+6.1f} {rate_a:+6.1f} {elapsed:7.1f}s"
                 )
@@ -209,10 +209,10 @@ def run_tick_loop(
     avail_rate = davail / elapsed if elapsed > 0 else 0
 
     print(f"\n  === RESULTS: {label} ===")
-    print(f"  Ticks:    {tick_done}/{ticks} {'(ABORTED: '+abort_reason+')' if aborted else ''}")
+    print(f"  Ticks:    {tick_done}/{ticks} {'(ABORTED: ' + abort_reason + ')' if aborted else ''}")
     print(f"  Elapsed:  {elapsed:.1f}s")
     print(
-        f"  RSS:      {mem0.get('rss_mb',0):.0f} -> {rss_end:.0f} MB  "
+        f"  RSS:      {mem0.get('rss_mb', 0):.0f} -> {rss_end:.0f} MB  "
         f"(d{drss:+.0f} MB, {rss_rate:+.1f} MB/s)"
     )
     print(
@@ -303,9 +303,9 @@ def teardown(
 
 def test_tick(client: Any, world: Any, town: str, ticks: int, rss_limit: int) -> dict[str, Any]:
     """T1: Bare world.tick(), no sensors, no NPCs."""
-    print(f"\n{'='*70}")
+    print(f"\n{'=' * 70}")
     print(f"T1: tick-only | {town} | {ticks} ticks")
-    print(f"{'='*70}")
+    print(f"{'=' * 70}")
     world, vehicle, settings = setup(client, world, town)
     r = run_tick_loop(world, ticks, rss_limit, per_tick_fn=None, label=f"T1:tick-only/{town}")
     teardown(world, vehicle, settings)
@@ -314,9 +314,9 @@ def test_tick(client: Any, world: Any, town: str, ticks: int, rss_limit: int) ->
 
 def test_cam1(client: Any, world: Any, town: str, ticks: int, rss_limit: int) -> dict[str, Any]:
     """T2: world.tick() + 1 RGB camera listening (discard data)."""
-    print(f"\n{'='*70}")
+    print(f"\n{'=' * 70}")
     print(f"T2: tick + 1 camera | {town} | {ticks} ticks")
-    print(f"{'='*70}")
+    print(f"{'=' * 70}")
     world, vehicle, settings = setup(client, world, town)
 
     cam_bp = world.get_blueprint_library().find("sensor.camera.rgb")
@@ -344,9 +344,9 @@ def test_cam1(client: Any, world: Any, town: str, ticks: int, rss_limit: int) ->
 
 def test_cam3(client: Any, world: Any, town: str, ticks: int, rss_limit: int) -> dict[str, Any]:
     """T3: world.tick() + 3 RGB cameras listening (discard data)."""
-    print(f"\n{'='*70}")
+    print(f"\n{'=' * 70}")
     print(f"T3: tick + 3 cameras | {town} | {ticks} ticks")
-    print(f"{'='*70}")
+    print(f"{'=' * 70}")
     world, vehicle, settings = setup(client, world, town)
 
     cam_bp = world.get_blueprint_library().find("sensor.camera.rgb")
@@ -380,9 +380,9 @@ def test_cam3(client: Any, world: Any, town: str, ticks: int, rss_limit: int) ->
 
 def test_npcs(client: Any, world: Any, town: str, ticks: int, rss_limit: int) -> dict[str, Any]:
     """T4: world.tick() + 20 NPC vehicles with TrafficManager."""
-    print(f"\n{'='*70}")
+    print(f"\n{'=' * 70}")
     print(f"T4: tick + 20 NPCs + TM | {town} | {ticks} ticks")
-    print(f"{'='*70}")
+    print(f"{'=' * 70}")
     world, vehicle, settings = setup(client, world, town)
 
     bp_lib = world.get_blueprint_library()
@@ -417,9 +417,9 @@ def test_get_actors(
 ) -> dict[str, Any]:
     """T5: world.tick() + world.get_actors() x4 per frame.
     Tests if repeated get_actors() causes server-side caching."""
-    print(f"\n{'='*70}")
+    print(f"\n{'=' * 70}")
     print(f"T5: tick + get_actors()x4/frame | {town} | {ticks} ticks")
-    print(f"{'='*70}")
+    print(f"{'=' * 70}")
     world, vehicle, settings = setup(client, world, town)
 
     def per_tick(w: Any, i: int) -> None:
@@ -443,9 +443,9 @@ def test_get_waypoints(
 ) -> dict[str, Any]:
     """T6: world.tick() + map.get_waypoint() per frame.
     Tests if repeated waypoint generation causes server caching."""
-    print(f"\n{'='*70}")
+    print(f"\n{'=' * 70}")
     print(f"T6: tick + get_waypoint()x5/frame | {town} | {ticks} ticks")
-    print(f"{'='*70}")
+    print(f"{'=' * 70}")
     world, vehicle, settings = setup(client, world, town)
     carla_map = world.get_map()
 
@@ -472,9 +472,9 @@ def test_get_waypoints(
 def test_full(client: Any, world: Any, town: str, ticks: int, rss_limit: int) -> dict[str, Any]:
     """T7: Cameras + NPCs + get_actors + get_waypoint.
     Full data-collection-like scenario."""
-    print(f"\n{'='*70}")
+    print(f"\n{'=' * 70}")
     print(f"T7: cameras + NPCs + get_actors + waypoints | {town} | {ticks} ticks")
-    print(f"{'='*70}")
+    print(f"{'=' * 70}")
     world, vehicle, settings = setup(client, world, town)
 
     # 3 cameras
@@ -542,9 +542,9 @@ def test_expert(client: Any, world: Any, town: str, ticks: int, rss_limit: int) 
     """T8: world.tick() + PrivilegedExpert.run_step() per frame.
     No cameras, no NPCs. Just the expert agent logic.
     RESULT: OOM killed on Town03 before first 100-tick line."""
-    print(f"\n{'='*70}")
+    print(f"\n{'=' * 70}")
     print(f"T8: tick + PrivilegedExpert | {town} | {ticks} ticks")
-    print(f"{'='*70}")
+    print(f"{'=' * 70}")
 
     from agents.expert.privileged_expert import PrivilegedExpert, ExpertConfig
     from agents.navigation.global_route_planner import GlobalRoutePlanner
@@ -582,9 +582,9 @@ def test_expert_init_only(
 ) -> dict[str, Any]:
     """T8a: Import + init PrivilegedExpert + set_destination, but
     do NOT call run_step(). Tests if just having the expert alive leaks."""
-    print(f"\n{'='*70}")
+    print(f"\n{'=' * 70}")
     print(f"T8a: tick + expert init only (no run_step) | {town} | {ticks} ticks")
-    print(f"{'='*70}")
+    print(f"{'=' * 70}")
 
     from agents.expert.privileged_expert import PrivilegedExpert, ExpertConfig
     from agents.navigation.global_route_planner import GlobalRoutePlanner
@@ -615,11 +615,11 @@ def test_tl_scan(client: Any, world: Any, town: str, ticks: int, rss_limit: int)
     """T8b: tick + traffic-light scan per frame.
     Calls get_actors().filter('*traffic_light*') + get_affected_lane_waypoints()
     exactly like _check_traffic_light does."""
-    print(f"\n{'='*70}")
+    print(f"\n{'=' * 70}")
     print(
         f"T8b: tick + TL scan (get_actors + get_affected_lane_waypoints) | {town} | {ticks} ticks"
     )
-    print(f"{'='*70}")
+    print(f"{'=' * 70}")
 
     world, vehicle, settings = setup(client, world, town)
     carla_map = world.get_map()
@@ -654,9 +654,9 @@ def test_tl_no_awp(
     """T8c: tick + traffic-light scan WITHOUT get_affected_lane_waypoints.
     Calls get_actors().filter('*traffic_light*') + get_transform() only.
     If T8b leaks but T8c is clean, the leak is in get_affected_lane_waypoints."""
-    print(f"\n{'='*70}")
+    print(f"\n{'=' * 70}")
     print(f"T8c: tick + TL scan (get_actors only, NO AWP) | {town} | {ticks} ticks")
-    print(f"{'='*70}")
+    print(f"{'=' * 70}")
 
     world, vehicle, settings = setup(client, world, town)
     tl_count = [0]
@@ -684,9 +684,9 @@ def test_detect_vehicles(
     """T8d: tick + vehicle detection logic per frame.
     Calls get_actors().filter('*vehicle*') + get_transform + get_velocity
     + OBB computation, like _detect_vehicles does."""
-    print(f"\n{'='*70}")
+    print(f"\n{'=' * 70}")
     print(f"T8d: tick + vehicle detection (OBB) | {town} | {ticks} ticks")
-    print(f"{'='*70}")
+    print(f"{'=' * 70}")
 
     import numpy as np
 
@@ -732,9 +732,9 @@ def test_stop_signs(
 ) -> dict[str, Any]:
     """T8e: tick + stop sign scan per frame.
     Calls get_actors().filter('*stop*') + get_transform + get_waypoint."""
-    print(f"\n{'='*70}")
+    print(f"\n{'=' * 70}")
     print(f"T8e: tick + stop sign scan | {town} | {ticks} ticks")
-    print(f"{'='*70}")
+    print(f"{'=' * 70}")
 
     world, vehicle, settings = setup(client, world, town)
     carla_map = world.get_map()
@@ -766,9 +766,9 @@ def test_expert_npcs(
 ) -> dict[str, Any]:
     """T9: world.tick() + PrivilegedExpert + 50 NPCs + 30 walkers.
     No cameras. This is the heaviest non-camera scenario."""
-    print(f"\n{'='*70}")
+    print(f"\n{'=' * 70}")
     print(f"T9: tick + Expert + 50 NPCs + 30 walkers | {town} | {ticks} ticks")
-    print(f"{'='*70}")
+    print(f"{'=' * 70}")
 
     from agents.expert.privileged_expert import PrivilegedExpert, ExpertConfig
     from agents.navigation.global_route_planner import GlobalRoutePlanner
@@ -853,9 +853,9 @@ def test_cam_queue(
 ) -> dict[str, Any]:
     """T10: 3 cameras with queue.Queue + np.frombuffer + reshape + copy.
     Tests if the image processing path (vs just listen/discard) leaks."""
-    print(f"\n{'='*70}")
+    print(f"\n{'=' * 70}")
     print(f"T10: tick + 3 cameras (queue + frombuffer) | {town} | {ticks} ticks")
-    print(f"{'='*70}")
+    print(f"{'=' * 70}")
 
     import queue as queue_mod
     import numpy as np
@@ -919,9 +919,9 @@ def test_expert_fine(
     """T11: expert.run_step() with PER-TICK monitoring.
     Monitors RSS + MemAvail at EVERY tick for fine-grained leak detection.
     Aborts if MemAvail < 4000 MB (aggressive) to avoid OOM kill."""
-    print(f"\n{'='*70}")
+    print(f"\n{'=' * 70}")
     print(f"T11: expert.run_step() FINE-GRAINED | {town} | {ticks} ticks")
-    print(f"{'='*70}")
+    print(f"{'=' * 70}")
 
     from agents.expert.privileged_expert import PrivilegedExpert, ExpertConfig
     from agents.navigation.global_route_planner import GlobalRoutePlanner
@@ -945,17 +945,16 @@ def test_expert_fine(
     avail0 = get_mem_avail_mb()
     t0 = time.time()
     print(
-        f"  Baseline: RSS={mem0.get('rss_mb',0):.0f} MB, "
-        f"AnonRSS={mem0.get('anon_mb',0):.0f} MB, "
+        f"  Baseline: RSS={mem0.get('rss_mb', 0):.0f} MB, "
+        f"AnonRSS={mem0.get('anon_mb', 0):.0f} MB, "
         f"MemAvail={avail0:.0f} MB"
     )
     print("  Aggressive abort at MemAvail < 4000 MB")
     print()
     print(
-        f"  {'tick':>4} {'RSS':>6} {'Anon':>6} {'Avail':>7} "
-        f"{'dRSS':>6} {'dAvl':>7} {'elapsed':>8}"
+        f"  {'tick':>4} {'RSS':>6} {'Anon':>6} {'Avail':>7} {'dRSS':>6} {'dAvl':>7} {'elapsed':>8}"
     )
-    print(f"  {'-'*55}")
+    print(f"  {'-' * 55}")
 
     aborted = False
     tick_done = 0
@@ -1007,12 +1006,12 @@ def test_expert_fine(
     print(f"  Ticks:    {tick_done}/{ticks}")
     print(f"  Elapsed:  {elapsed:.1f}s")
     print(
-        f"  RSS:      {mem0.get('rss_mb',0):.0f} -> {mem_end.get('rss_mb',0):.0f} MB "
-        f" (d{drss:+.0f} MB, {drss/elapsed:+.1f} MB/s)"
+        f"  RSS:      {mem0.get('rss_mb', 0):.0f} -> {mem_end.get('rss_mb', 0):.0f} MB "
+        f" (d{drss:+.0f} MB, {drss / elapsed:+.1f} MB/s)"
     )
     print(
         f"  MemAvail: {avail0:.0f} -> {avail_end:.0f} MB "
-        f" (drained {-davail:+.0f} MB, {davail/elapsed:+.1f} MB/s)"
+        f" (drained {-davail:+.0f} MB, {davail / elapsed:+.1f} MB/s)"
     )
     print(f"  Verdict:  {verdict}")
 
@@ -1032,9 +1031,9 @@ def test_expert_drive(
     """T12: tick + constant throttle (ego drives) + same CARLA queries
     that the expert makes, but WITHOUT the expert object.
     Tests if vehicle movement + queries causes the leak."""
-    print(f"\n{'='*70}")
+    print(f"\n{'=' * 70}")
     print(f"T12: tick + drive + queries (no expert) | {town} | {ticks} ticks")
-    print(f"{'='*70}")
+    print(f"{'=' * 70}")
 
     world, vehicle, settings = setup(client, world, town)
     carla_map = world.get_map()
@@ -1082,9 +1081,9 @@ def test_expert_nodetect(
     apply_control, but _check_traffic_light, _check_stop_signs,
     _detect_vehicles, _detect_pedestrians are no-ops.
     Isolates: is the leak in route/control or in detection?"""
-    print(f"\n{'='*70}")
+    print(f"\n{'=' * 70}")
     print(f"T13: expert (detection disabled) | {town} | {ticks} ticks")
-    print(f"{'='*70}")
+    print(f"{'=' * 70}")
 
     from agents.expert.privileged_expert import PrivilegedExpert, ExpertConfig
     from agents.navigation.global_route_planner import GlobalRoutePlanner
@@ -1134,9 +1133,9 @@ def test_expert_noctrl(
     """T14: Expert run_step() computes everything but vehicle.apply_control()
     is NOT called. Vehicle sits still.
     Isolates: does the vehicle need to be MOVING for the leak?"""
-    print(f"\n{'='*70}")
+    print(f"\n{'=' * 70}")
     print(f"T14: expert (no apply_control) | {town} | {ticks} ticks")
-    print(f"{'='*70}")
+    print(f"{'=' * 70}")
 
     from agents.expert.privileged_expert import PrivilegedExpert, ExpertConfig
     from agents.navigation.global_route_planner import GlobalRoutePlanner
@@ -1176,9 +1175,9 @@ def test_drive_only(
     """T15: tick + vehicle.apply_control(throttle=0.4) per frame.
     No expert, no queries, no NPCs. Just the ego vehicle driving.
     Isolates: does pure ego driving cause the leak?"""
-    print(f"\n{'='*70}")
+    print(f"\n{'=' * 70}")
     print(f"T15: tick + pure ego driving (apply_control only) | {town} | {ticks} ticks")
-    print(f"{'='*70}")
+    print(f"{'=' * 70}")
 
     world, vehicle, settings = setup(client, world, town)
 
@@ -1201,9 +1200,9 @@ def test_drive_route(
     """T16: expert + apply_control but _fill_junction_gaps disabled.
     Vehicle follows the route but without gap filling.
     If this is CLEAN but T13 OOMs, the leak is in _fill_junction_gaps."""
-    print(f"\n{'='*70}")
+    print(f"\n{'=' * 70}")
     print(f"T16: expert + drive (NO junction gap fill) | {town} | {ticks} ticks")
-    print(f"{'='*70}")
+    print(f"{'=' * 70}")
 
     from agents.expert.privileged_expert import PrivilegedExpert, ExpertConfig
     from agents.navigation.global_route_planner import GlobalRoutePlanner
@@ -1252,9 +1251,9 @@ def test_drive_route_noext(
     AND route-end extension in _fill_buffer disabled.
     If T16 still OOMs but T17 is clean, the leak is in _fill_buffer's
     route-end extension (the `last_wp.next(2.0)` while loop)."""
-    print(f"\n{'='*70}")
+    print(f"\n{'=' * 70}")
     print(f"T17: expert + drive (NO gap fill, NO route extension) | {town} | {ticks} ticks")
-    print(f"{'='*70}")
+    print(f"{'=' * 70}")
 
     from agents.expert.privileged_expert import PrivilegedExpert, ExpertConfig
     from agents.navigation.global_route_planner import GlobalRoutePlanner
@@ -1361,7 +1360,7 @@ def main() -> None:
         f"Ticks: {args.ticks} | RSS limit: {args.rss_limit} MB"
     )
     print(f"PID: {os.getpid()}")
-    print(f"{'='*70}")
+    print(f"{'=' * 70}")
 
     client = carla.Client(args.host, args.port)
     client.set_timeout(60.0)
@@ -1376,9 +1375,9 @@ def main() -> None:
     test_fn = TEST_MAP[args.test]
     result = test_fn(client, world, args.town, args.ticks, args.rss_limit)
 
-    print(f"\n{'='*70}")
+    print(f"\n{'=' * 70}")
     print(f"DONE -- {result['verdict']}")
-    print(f"{'='*70}")
+    print(f"{'=' * 70}")
 
 
 if __name__ == "__main__":

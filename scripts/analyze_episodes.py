@@ -4,11 +4,7 @@ import json
 import h5py
 import numpy as np
 
-files = sorted(
-    glob.glob(
-        "~/projects/neuromorphic-vision-rwkv/data/test_collection/episode_*.h5"
-    )
-)
+files = sorted(glob.glob("~/projects/neuromorphic-vision-rwkv/data/test_collection/episode_*.h5"))
 
 for f in files:
     ep_name = f.split("/")[-1]
@@ -23,7 +19,7 @@ for f in files:
         red_frames = np.where(tl_state == 3)[0]
         yellow_frames = np.where(tl_state == 2)[0]
 
-        print(f"\n{'='*60}")
+        print(f"\n{'=' * 60}")
         print(f"Episode: {ep_name} ({n} frames)")
         print(f"  Red light frames: {len(red_frames)}")
         print(f"  Yellow light frames: {len(yellow_frames)}")

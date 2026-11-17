@@ -48,9 +48,9 @@ def speed_from_velocity(vx: float, vy: float, vz: float) -> float:
 def analyze_episode(filepath: str, window: int = 40) -> None:
     """Print detailed per-frame analysis around the failure point."""
     path = Path(filepath)
-    print(f"\n{'='*72}")
+    print(f"\n{'=' * 72}")
     print(f"  {path.name}")
-    print(f"{'='*72}")
+    print(f"{'=' * 72}")
 
     with h5py.File(filepath, "r") as f:
         meta = f["metadata"]
@@ -105,7 +105,7 @@ def analyze_episode(filepath: str, window: int = 40) -> None:
     end = min(len(velocity), event_frame + 5)  # a few frames after
 
     print(f"  Event: {event_label} at frame {event_frame}")
-    print(f"  Showing frames {start}–{end-1}")
+    print(f"  Showing frames {start}–{end - 1}")
     print()
 
     # ── Overview: mode distribution ──
@@ -137,8 +137,8 @@ def analyze_episode(filepath: str, window: int = 40) -> None:
         f"{'Nav':>10s}  {'Lead':>8s}  {'Lead info'}"
     )
     print(
-        f"  {'─'*6}  {'─'*6}  {'─'*6}  {'─'*5}  {'─'*5}  {'─'*6}  "
-        f"{'─'*14}  {'─'*6}  {'─'*10}  {'─'*8}  {'─'*30}"
+        f"  {'─' * 6}  {'─' * 6}  {'─' * 6}  {'─' * 5}  {'─' * 5}  {'─' * 6}  "
+        f"{'─' * 14}  {'─' * 6}  {'─' * 10}  {'─' * 8}  {'─' * 30}"
     )
 
     for i in range(start, end):
@@ -181,7 +181,7 @@ def analyze_episode(filepath: str, window: int = 40) -> None:
 
     # ── Summary of what happened ──
     print()
-    print(f"  {'─'*72}")
+    print(f"  {'─' * 72}")
 
     if status == "collision":
         # Analyze the approach

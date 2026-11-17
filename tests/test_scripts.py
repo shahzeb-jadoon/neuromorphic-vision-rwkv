@@ -178,6 +178,6 @@ class TestAnalyzeDataset:
         )
         output = result.stdout.lower()
         # Should mention episodes, frames, or similar stats
-        assert (
-            "episode" in output or "frame" in output
-        ), f"Expected statistics in output, got:\n{result.stdout[:500]}"
+        assert "episode" in output or "frame" in output, (
+            f"Expected statistics in output, got:\n{result.stdout[:500]}"
+        )

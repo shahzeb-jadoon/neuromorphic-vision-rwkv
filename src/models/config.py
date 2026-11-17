@@ -123,6 +123,6 @@ class ModelConfig:
             f"Fusion fused_dim ({self.fusion.fused_dim}) must match "
             f"policy_head input_dim ({self.policy_head.input_dim})"
         )
-        assert (
-            self.burn_in < self.seq_len
-        ), f"burn_in ({self.burn_in}) must be less than seq_len ({self.seq_len})"
+        assert self.burn_in < self.seq_len, (
+            f"burn_in ({self.burn_in}) must be less than seq_len ({self.seq_len})"
+        )
