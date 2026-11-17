@@ -78,3 +78,11 @@ def read_window(f: h5py.File, start: int, end: int, lookahead: int) -> Window:
         driving_mode=mode,
         position=f[S.POSITION][start:future_end],
     )
+
+
+def read_labels(f: h5py.File) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Steering, acceleration (throttle - brake) and nav command over the usable frames."""
+    n = usable_frames(f)
+    steering = np.asarray(f[S.STEERING][:n])
+    acceleration = np.asarray(f[S.THROTTLE][:n]) - np.asarray(f[S.BRAKE][:n])
+    return steering, acceleration, np.asarray(f[S.NAV_COMMAND][:n])
