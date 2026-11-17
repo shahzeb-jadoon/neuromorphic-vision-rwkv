@@ -7,7 +7,7 @@ name = "neuromorphic-vision-rwkv"
 version = "0.1.0"
 description = "Vision-RWKV based autonomous driving agent with neuromorphic alignment"
 readme = "README.md"
-license = {text = "All Rights Reserved"}
+license = {text = "Apache-2.0"}
 requires-python = ">=3.11"
 authors = [
     {name = "Shahzeb Jadoon"},

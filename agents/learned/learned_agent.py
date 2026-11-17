@@ -19,7 +19,8 @@ Control translation (documented in src/models/policy_head.py):
     throttle = max(0, accel)
     brake    = max(0, -accel)
 
-Copyright (c) 2025–2026, Shahzeb Jadoon.  All Rights Reserved.
+Copyright (c) 2025–2026 Shahzeb Jadoon.  Licensed under the Apache License 2.0
+(see LICENSE).
 """
 
 from __future__ import annotations

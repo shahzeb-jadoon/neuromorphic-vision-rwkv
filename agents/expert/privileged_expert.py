@@ -21,9 +21,9 @@ Reference implementations studied:
     - TransFuser autopilot.py (Chitta et al., 2022)
     - Learning by Cheating expert (Chen et al., 2020)
 
-Copyright (c) 2025–2026, Shahzeb Jadoon.  All Rights Reserved.
-See LICENSE in the project root for terms.  The ``agents/navigation/``
-module is vendored from CARLA and retains its original MIT license.
+Copyright (c) 2025–2026 Shahzeb Jadoon.  Licensed under the Apache License 2.0
+(see LICENSE).  The ``agents/navigation/`` module is vendored from CARLA and
+retains its original MIT license.
 """
 
 from __future__ import annotations
