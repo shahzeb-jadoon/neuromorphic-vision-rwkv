@@ -18,6 +18,15 @@ import pytest
 from scripts.create_toy_dataset import generate_episode, save_episode_hdf5
 
 _TOY_DIR = Path("data/test_fixtures")
+_GOLDEN_DIR = Path("data/golden")
+
+
+@pytest.fixture(scope="session")
+def golden_dir() -> Path:
+    """Real episode windows from scripts/extract_golden.py; skips the test without them."""
+    if not (_GOLDEN_DIR / "index.json").exists():
+        pytest.skip("golden subset not present in data/golden")
+    return _GOLDEN_DIR
 
 
 @pytest.fixture(scope="session")

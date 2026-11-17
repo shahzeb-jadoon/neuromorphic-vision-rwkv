@@ -1,7 +1,7 @@
 # ── Neuromorphic Vision-RWKV for Autonomous Driving ──────────────────
 # Convenience targets for common development tasks.
 
-.PHONY: test lint format typecheck ci clean analyze train tune help setup lock lock-macos env-check smoke
+.PHONY: test gold lint format typecheck ci clean analyze train tune help setup lock lock-macos env-check smoke
 
 help:  ## Show this help message
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | \
@@ -33,7 +33,7 @@ lock-macos:  ## Re-pin requirements-lock-macos.txt (Apple silicon, no CUDA/CARLA
 
 env-check:  ## Verify the environment: imports, offline tests, GPU smoke train
 	python scripts/verify_env.py
-	pytest tests/ -q -m "not online" -p no:cacheprovider --no-cov
+	pytest tests/ -q -m "not online and not gold" -p no:cacheprovider --no-cov
 	$(MAKE) smoke
 
 smoke:  ## One-epoch training on the toy dataset, then a health check of the run
@@ -45,7 +45,10 @@ smoke:  ## One-epoch training on the toy dataset, then a health check of the run
 # ── Quality ──────────────────────────────────────────────────────────
 
 test:  ## Run offline tests with coverage (no CARLA needed)
-	pytest tests/ -v -m "not online" --cov=src/ --cov-report=term-missing --cov-config=pyproject.toml
+	pytest tests/ -v -m "not online and not gold" --cov=src/ --cov-report=term-missing --cov-config=pyproject.toml
+
+gold:  ## Run the tests on real recorded windows (needs data/golden)
+	pytest tests/ -v -m gold --no-cov
 
 test-online:  ## Run CARLA integration tests (requires live CARLA server)
 	pytest tests/ -v -m online
