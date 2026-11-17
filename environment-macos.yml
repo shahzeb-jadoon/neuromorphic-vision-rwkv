@@ -1,0 +1,22 @@
+name: rwkv
+# -----------------------------------------------------------------------------
+# Environment for Apple silicon Macs (macOS arm64), used as a second worker for
+# tests, data audits, offline evaluation and small baselines.
+#
+# Same layout as environment.yml: conda supplies Python 3.11 and pip, pip
+# installs requirements-lock-macos.txt. The pins match requirements-lock.txt
+# minus what has no macOS build: CUDA libraries, Triton and the CARLA client.
+# PyTorch runs on the Apple GPU through the MPS backend.
+#
+# Create:   conda env create -f environment-macos.yml    # env name: rwkv
+#           conda run -n rwkv pip install -e . --no-deps
+# Re-pin:   `make lock-macos` (run on any machine with uv)
+# -----------------------------------------------------------------------------
+channels:
+  - conda-forge
+  - nodefaults
+dependencies:
+  - python=3.11
+  - pip
+  - pip:
+      - -r requirements-lock-macos.txt

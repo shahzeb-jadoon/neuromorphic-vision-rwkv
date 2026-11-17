@@ -24,6 +24,13 @@ setup:  ## Install locked dependencies, the package (editable) and pre-commit ho
 lock:  ## Re-pin requirements-lock.txt from pyproject.toml (needs uv)
 	uv pip compile pyproject.toml $(LOCK_FLAGS) -o requirements-lock.txt
 
+LOCK_MACOS_FLAGS := --extra dev \
+	--python-version 3.11 --python-platform aarch64-apple-darwin \
+	--generate-hashes --custom-compile-command "make lock-macos"
+
+lock-macos:  ## Re-pin requirements-lock-macos.txt (Apple silicon, no CUDA/CARLA)
+	uv pip compile pyproject.toml $(LOCK_MACOS_FLAGS) -o requirements-lock-macos.txt
+
 env-check:  ## Verify the environment: imports, offline tests, GPU smoke train
 	python scripts/verify_env.py
 	pytest tests/ -q -m "not online" -p no:cacheprovider --no-cov
