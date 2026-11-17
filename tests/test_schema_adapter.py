@@ -89,3 +89,35 @@ def test_dataset_mixes_v3_and_v6_episodes(tmp_path: Path) -> None:
             files |= set(ds.episode_files)
             modes |= {int(m) for i in range(len(ds)) for m in ds[i]["driving_mode"]}
     assert len(files) == 2 and max(modes) < N_DRIVING_MODES
+
+
+def test_cache_reads_as_a_lower_rate_episode(tmp_path: Path) -> None:
+    from scripts.build_testbed_cache import build_episode
+
+    src = make_episode(tmp_path, version=3, n_frames=41)
+    with h5py.File(src, "r+") as f:
+        f[S.METADATA_GROUP].attrs[S.META_COLLISION_FRAME] = 25
+    cache = tmp_path / "cache" / src.name
+    cache.parent.mkdir()
+    build_episode(src, cache, height=8, width=24, quality=95, stride=2)
+    with h5py.File(src, "r") as f, h5py.File(cache, "r") as c:
+        assert schema_adapter.is_cache(c) and len(c[S.IMAGES_JPEG]) == 21
+        assert schema_adapter.usable_frames(c) == 13  # source frames 0, 2, ..., 24
+        window = schema_adapter.read_window(c, 2, 6, lookahead=3)
+        assert np.array_equal(window.steering, f[S.STEERING][4:12:2])
+        assert np.array_equal(window.position, f[S.POSITION][4:18:2])
+        source = f[S.IMAGES][4:12:2].astype(float)
+        small = source.reshape(4, 8, 2, 24, 2, 3).mean(axis=(2, 4))
+        assert window.images.shape == (4, 8, 24, 3)
+        assert np.abs(window.images - small).mean() < 6
+
+
+def test_dataset_loads_a_cache(tmp_path: Path) -> None:
+    from scripts.build_testbed_cache import build_episode
+
+    (tmp_path / "cache").mkdir()
+    for idx in range(3):
+        src = make_episode(tmp_path, version=3, idx=idx, n_frames=60)
+        build_episode(src, tmp_path / "cache" / src.name, height=8, width=24, quality=90, stride=2)
+    with DrivingSequenceDataset(tmp_path / "cache", seq_len=16, stride=8, split="train") as ds:
+        assert ds[0]["images"].shape == (16, 3, 8, 24)

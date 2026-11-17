@@ -132,6 +132,14 @@ LEGALITY_TURN_MISMATCH_FILTERED = "legality_turn_mismatch_filtered"  # (N,) int3
 LEGALITY_CONTINUITY_KEPT = "legality_continuity_kept"  # (N,) int32 cumulative
 ROUTE_WATCHDOG_TRIGGERED = "route_watchdog_triggered"  # (N,) int8 frame-level watchdog trip
 
+# --- Training caches (scripts/build_testbed_cache.py) ---
+# A cache keeps every signal of its source episode at full rate and one JPEG image every
+# META_IMAGE_STRIDE source frames; src.data.schema_adapter reads it as a lower-rate episode.
+IMAGES_JPEG = "images_jpeg"  # (N_images,) vlen uint8, one JPEG per image frame
+META_CACHE_FORMAT = "cache_format"  # e.g. "jpeg-q90-960x160-stride2"
+META_IMAGE_STRIDE = "image_stride"  # source frames per cached image
+META_SOURCE_FILE = "source_file"
+
 # --- Metadata group and attribute names ---
 METADATA_GROUP = "metadata"
 META_TOWN = "town"
