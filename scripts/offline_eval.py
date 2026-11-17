@@ -135,7 +135,7 @@ def run_offline_eval(
 
         all_steer_ae.extend(ep_steer_ae)
         all_accel_ae.extend(ep_accel_ae)
-        all_total_loss.append(np.mean(ep_steer_ae) + np.mean(ep_accel_ae))
+        all_total_loss.append(float(np.mean(ep_steer_ae) + np.mean(ep_accel_ae)))
 
     results = {
         "n_episodes": len(episode_files),
