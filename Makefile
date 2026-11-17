@@ -1,7 +1,7 @@
 # ── Neuromorphic Vision-RWKV for Autonomous Driving ──────────────────
 # Convenience targets for common development tasks.
 
-.PHONY: test lint format typecheck ci clean analyze train tune help setup lock env-check
+.PHONY: test lint format typecheck ci clean analyze train tune help setup lock lock-macos env-check smoke
 
 help:  ## Show this help message
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | \
@@ -34,6 +34,9 @@ lock-macos:  ## Re-pin requirements-lock-macos.txt (Apple silicon, no CUDA/CARLA
 env-check:  ## Verify the environment: imports, offline tests, GPU smoke train
 	python scripts/verify_env.py
 	pytest tests/ -q -m "not online" -p no:cacheprovider --no-cov
+	$(MAKE) smoke
+
+smoke:  ## One-epoch training on the toy dataset, then a health check of the run
 	test -d data/toy || $(MAKE) toy-data
 	rm -rf runs/smoke
 	python scripts/train.py --config configs/smoke_toy.yaml --max-epochs 1
