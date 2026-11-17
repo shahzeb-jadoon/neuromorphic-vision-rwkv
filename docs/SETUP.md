@@ -104,6 +104,32 @@ wsl --unmount \\.\PHYSICALDRIVE<N>
 Set-Disk -Number <N> -IsOffline $false
 ```
 
+### Format a drive as ext4
+
+Formatting erases everything on the partition. Before retiring a dataset, run
+`scripts/verify_preserved.py` and keep its report. Attach the disk without mounting a
+partition (Administrator PowerShell):
+
+```powershell
+wsl --unmount \\.\PHYSICALDRIVE<N>
+Set-Disk -Number <N> -IsOffline $true
+wsl --mount \\.\PHYSICALDRIVE<N> --bare
+```
+
+In WSL, identify the partition by its size before formatting it; `-m 0` reserves no space
+for root, which a data-only drive does not need:
+
+```bash
+lsblk -o NAME,SIZE,FSTYPE,LABEL
+sudo mkfs.ext4 -L <label> -m 0 /dev/sdX1
+```
+
+Then detach with `wsl --unmount`, attach it as above, and give your user the files:
+
+```bash
+sudo chown -R "$(id -u):$(id -g)" /mnt/wsl/PHYSICALDRIVE<N>p1
+```
+
 ## Second machine (Apple silicon)
 
 An Apple silicon Mac can run tests, data audits, offline evaluation and small baselines
