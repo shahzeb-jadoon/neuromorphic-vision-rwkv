@@ -69,6 +69,8 @@ def main() -> None:
         ("optuna", "optuna"),
         ("einops", "einops"),
         ("scipy", "scipy"),
+        ("networkx", "networkx"),
+        ("zstandard", "zstandard"),
     ]
     all_ok = True
     for import_name, pip_name in critical:
@@ -163,6 +165,7 @@ def main() -> None:
     else:
         print(f"  {fail}  Some checks failed — see above")
     print("=" * 60 + "\n")
+    sys.exit(0 if all_ok else 1)
 
 
 if __name__ == "__main__":
