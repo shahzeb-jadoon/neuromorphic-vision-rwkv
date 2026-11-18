@@ -53,7 +53,8 @@ class OptimizationConfig:
     learning_rate: float = 1e-4
     weight_decay: float = 1e-2
     gradient_clip: float = 1.0
-    amp: bool = True
+    amp: bool = True  # bf16 autocast on CUDA; other devices train in fp32
+    max_nonfinite_steps: int = 10  # abort after this many skipped steps in a row
     ema_decay: float = 0.0  # 0 disables EMA
     compile_encoder: bool = False  # torch.compile the RWKV encoder (mode='default')
 

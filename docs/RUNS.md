@@ -200,6 +200,18 @@ which STRAIGHT was 2% of frames rather than 23%.
 
 ---
 
+## Training numerics since Phase 2
+
+The April run's loss scale collapsed under fp16 and left every later gradient at zero
+(above). Training now uses bf16 autocast on CUDA, which has the range of fp32 and needs no
+loss scaling; other devices train in fp32. A step whose loss or gradient is not finite is
+skipped, leaving the weights, optimizer, schedule and EMA as they were, and is logged as
+`nonfinite_step` in `logs/events.csv` with the loss terms or parameter at fault and its clips
+(`episode file:start frame`). After `optimization.max_nonfinite_steps` (10) skipped steps in a
+row the run saves a crash checkpoint and stops.
+
+---
+
 ## Other local runs (not reported)
 
 Short smoke tests and aborted attempts from 22–24 April 2026. None of their numbers are

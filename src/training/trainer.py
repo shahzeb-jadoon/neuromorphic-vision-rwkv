@@ -12,7 +12,7 @@ import warnings
 from dataclasses import asdict
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from tqdm import tqdm
 
@@ -20,7 +20,7 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 import yaml
-from torch.nn.utils import clip_grad_norm_
+from torch.nn.utils import clip_grads_with_norm_, get_total_norm
 from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
 
@@ -113,6 +113,10 @@ def build_loader(dcfg: DatasetConfig, seed: int, split: str) -> DataLoader[dict[
         worker_init_fn=driving_worker_init_fn,
         drop_last=train,
     )
+
+
+class NonFiniteTraining(RuntimeError):
+    """Too many training steps in a row had a non-finite loss or gradient."""
 
 
 class CSVRunLogger:
@@ -322,10 +326,8 @@ class Trainer:
         total_steps = max(1, cfg.optimization.epochs * len(self.train_loader))
         self.scheduler = self._build_scheduler(total_steps)
 
-        self.scaler = torch.amp.GradScaler(
-            "cuda" if self.device.type == "cuda" else "cpu",
-            enabled=cfg.optimization.amp and self.device.type == "cuda",
-        )
+        self.use_bf16 = cfg.optimization.amp and self.device.type == "cuda"
+        self.nonfinite_in_a_row = 0
 
         self.ema: ModelEMA | None = None
         if cfg.optimization.ema_decay > 0.0:
@@ -409,8 +411,6 @@ class Trainer:
         self.optimizer.load_state_dict(payload["optimizer"])
         if "scheduler" in payload:
             self.scheduler.load_state_dict(payload["scheduler"])
-        if "scaler" in payload and self.scaler.is_enabled():
-            self.scaler.load_state_dict(payload["scaler"])
         if self.ema is not None and "ema" in payload:
             self.ema.load_state_dict(payload["ema"])
 
@@ -472,6 +472,9 @@ class Trainer:
             )
 
         save_training_config(self.cfg, self.run_dir / "config_resolved.yaml")
+
+    def _autocast(self) -> torch.amp.autocast:
+        return torch.amp.autocast("cuda", dtype=torch.bfloat16, enabled=self.use_bf16)
 
     def _masked_mean(self, values: torch.Tensor, frame_weight: torch.Tensor) -> torch.Tensor:
         denom = frame_weight.sum().clamp(min=1e-6)
@@ -551,6 +554,56 @@ class Trainer:
         }
         return total_loss, metrics
 
+    def _train_step(self, batch: dict[str, torch.Tensor]) -> dict[str, float] | None:
+        """One optimizer step on `batch`; None if it was skipped for a non-finite value.
+
+        A skipped step leaves the weights, optimizer, schedule and EMA as they were.
+        """
+        self.optimizer.zero_grad(set_to_none=True)
+        with self._autocast():
+            total_loss, metrics = self._compute_losses(batch)
+
+        bad_losses = [name for name, value in metrics.items() if not math.isfinite(value)]
+        if bad_losses:
+            self._skip_step(batch, ", ".join(bad_losses))
+            return None
+
+        total_loss.backward()
+        grads = [p.grad for p in self.model.parameters() if p.grad is not None]
+        grad_norm = get_total_norm(grads)
+        if not grad_norm.isfinite():
+            named = self.model.named_parameters()
+            bad = (n for n, p in named if p.grad is not None and not p.grad.isfinite().all())
+            self._skip_step(batch, f"gradient of {next(bad, 'the model')}")
+            return None
+        clip_grads_with_norm_(
+            self.model.parameters(), self.cfg.optimization.gradient_clip, grad_norm
+        )
+
+        self.nonfinite_in_a_row = 0
+        self.optimizer.step()
+        self.scheduler.step()
+        if self.ema is not None:
+            self.ema.update(self.model)
+        return metrics | {"lr": self._current_lr(), "grad_norm": float(grad_norm)}
+
+    def _skip_step(self, batch: dict[str, torch.Tensor], problem: str) -> None:
+        """Log a non-finite step with the clips that caused it; abort if they keep coming."""
+        files = cast(DrivingSequenceDataset, self.train_loader.dataset).episode_files
+        clips = " ".join(f"{files[ep].name}:{start}" for ep, start in batch["clip"].tolist())
+        self.logger.log_event(
+            step=self.global_step,
+            epoch=self.current_epoch,
+            event_type="nonfinite_step",
+            detail=problem,
+            value=clips,
+        )
+        tqdm.write(f"  [skip] step {self.global_step}: non-finite {problem} in {clips}")
+        self.nonfinite_in_a_row += 1
+        limit = self.cfg.optimization.max_nonfinite_steps
+        if self.nonfinite_in_a_row >= limit:
+            raise NonFiniteTraining(f"{limit} steps in a row were not finite, last: {problem}")
+
     def _current_lr(self) -> float:
         return float(self.optimizer.param_groups[0]["lr"])
 
@@ -559,7 +612,6 @@ class Trainer:
             "model": self.model.state_dict(),
             "optimizer": self.optimizer.state_dict(),
             "scheduler": self.scheduler.state_dict(),
-            "scaler": self.scaler.state_dict(),
             "epoch": self.current_epoch,
             "batch_in_epoch": self.resume_batch_in_epoch,
             "global_step": self.global_step,
@@ -618,7 +670,8 @@ class Trainer:
         max_batches = int(self.cfg.logging.val_max_batches)
         with torch.no_grad():
             for batch in self.val_loader:
-                _, metrics = self._compute_losses(batch)
+                with self._autocast():
+                    _, metrics = self._compute_losses(batch)
                 for key, value in metrics.items():
                     agg[key] += value
                 n_batches += 1
@@ -667,47 +720,26 @@ class Trainer:
                     self.resume_batch_in_epoch = batch_idx + 1
                     self._poll_runtime_overrides()
 
-                    self.optimizer.zero_grad(set_to_none=True)
-
                     t_step_start = time.time()
-                    with torch.amp.autocast(
-                        device_type=self.device.type,
-                        enabled=self.scaler.is_enabled(),
-                    ):
-                        total_loss, metrics = self._compute_losses(batch)
-
-                    self.scaler.scale(total_loss).backward()
-                    self.scaler.unscale_(self.optimizer)
-                    grad_norm = float(
-                        clip_grad_norm_(
-                            self.model.parameters(), self.cfg.optimization.gradient_clip
-                        ).item()
-                    )
-                    self.scaler.step(self.optimizer)
-                    self.scaler.update()
-                    self.scheduler.step()
+                    metrics = self._train_step(batch)
                     step_secs = time.time() - t_step_start
 
-                    if self.ema is not None:
-                        self.ema.update(self.model)
+                    if metrics is not None:
+                        steps_done = self.global_step - (resume_epoch * steps_per_epoch)
+                        eta_secs = step_secs * (total_steps - steps_done)
+                        postfix: dict[str, str] = {
+                            "tr_loss": f"{metrics['total_loss']:.3f}",
+                            "lr": f"{metrics['lr']:.1e}",
+                            "gnorm": f"{metrics['grad_norm']:.2f}",
+                            "sps": f"{1.0 / step_secs:.1f}",
+                            "eta": f"{eta_secs / 60:.0f}m",
+                        }
+                        if self._last_val_loss is not None:
+                            postfix["val_loss"] = f"{self._last_val_loss:.3f}"
+                        pbar.set_postfix(postfix)
 
-                    metrics["lr"] = self._current_lr()
-                    metrics["grad_norm"] = grad_norm
-
-                    steps_done = self.global_step - (resume_epoch * steps_per_epoch)
-                    eta_secs = step_secs * (total_steps - steps_done)
-                    postfix: dict[str, str] = {
-                        "tr_loss": f"{metrics['total_loss']:.3f}",
-                        "lr": f"{metrics['lr']:.1e}",
-                        "gnorm": f"{grad_norm:.2f}",
-                        "sps": f"{1.0 / step_secs:.1f}",
-                        "eta": f"{eta_secs / 60:.0f}m",
-                    }
-                    if self._last_val_loss is not None:
-                        postfix["val_loss"] = f"{self._last_val_loss:.3f}"
-                    pbar.set_postfix(postfix)
-
-                    if self.global_step % max(1, self.cfg.logging.log_every_steps) == 0:
+                    logging_step = self.global_step % max(1, self.cfg.logging.log_every_steps) == 0
+                    if metrics is not None and logging_step:
                         metrics |= loader_rss_mib(self.train_loader)
                         self.logger.log_metrics(
                             "train", self.global_step, self.current_epoch, metrics

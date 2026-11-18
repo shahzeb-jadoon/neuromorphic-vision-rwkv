@@ -331,6 +331,7 @@ class DrivingSequenceDataset(Dataset):
                 target_point: (seq_len, 2) float32  (the path 30 m ahead in the vehicle's
                     frame: x forward, y right, metres; a route input)
                 situation: (seq_len, 11) bool  (labels.SITUATIONS that hold; several can)
+                clip: (2,) int64  (episode index and start frame, to trace a bad batch)
         """
         ep_idx, start = key if isinstance(key, tuple) else self.clips[key]
         if not 0 <= start <= self.episode_frames[ep_idx] - self.seq_len:
@@ -398,6 +399,7 @@ class DrivingSequenceDataset(Dataset):
             "waypoint_mask": waypoint_mask,
             "target_point": torch.from_numpy(self.target_points[ep_idx][start:end]),
             "situation": torch.from_numpy(self.situations[ep_idx][start:end]),
+            "clip": torch.tensor([ep_idx, start]),
         }
         if self.augment and torch.rand(1).item() < 0.5:
             sample = mirror(sample)

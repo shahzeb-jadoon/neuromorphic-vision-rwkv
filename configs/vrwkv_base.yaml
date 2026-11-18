@@ -60,6 +60,7 @@ optimization:
   weight_decay: 1.0e-2
   gradient_clip: 1.0
   amp: true
+  max_nonfinite_steps: 10
   ema_decay: 0.0
 
 scheduler:
