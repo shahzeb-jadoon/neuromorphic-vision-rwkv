@@ -162,10 +162,11 @@ for the best baseline.
 ### Offline evaluation with the Phase 1 labels (2026-11-18)
 
 Phase 1 changed what is scored ([LABELS.md](LABELS.md)): the 3 s before a collision and
-the final stop of a timed-out episode are no longer used, and commands are derived from the
-path and the junction outlines. Same split and clip settings as above, now 711 clips and
-17,064 scored frames. These numbers are the reference for Phase 2. The trainer's metric over
-the first 50 batches is steering MAE 0.0517 and acceleration MAE 0.1984.
+the final stop of a timed-out episode are no longer used, red-light stops in the wrong place
+weigh 0, and commands are derived from the path and the junction outlines. Same split and
+clip settings as above, now 711 clips and 17,064 scored frames. These numbers are the
+reference for Phase 2. The trainer's metric over the first 50 batches is steering MAE 0.0522
+and acceleration MAE 0.1966.
 
 ```bash
 python scripts/evaluate_offline.py --checkpoint runs_fast/fastsafe_20260424_093210/checkpoints/best.pt \
@@ -176,10 +177,10 @@ Pooled, with the training frame weights:
 
 | Predictor | Steering MAE | Turn steering MAE | Turn sign accuracy | Accel MAE | Steering corr. |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| `best.pt` | 0.0509 | 0.2295 | 0.492 | 0.1999 | 0.029 |
-| Always zero | 0.0474 | 0.2293 | 0.000 | 0.3844 | — |
-| Always the training mean | 0.0495 | 0.2298 | 0.450 | 0.3248 | — |
-| Per-command training mean | 0.0529 | 0.2037 | 0.702 | 0.2914 | 0.264 |
+| `best.pt` | 0.0516 | 0.2295 | 0.491 | 0.1990 | 0.029 |
+| Always zero | 0.0481 | 0.2293 | 0.000 | 0.3860 | — |
+| Always the training mean | 0.0502 | 0.2299 | 0.449 | 0.3200 | — |
+| Per-command training mean | 0.0531 | 0.2037 | 0.702 | 0.2870 | 0.264 |
 
 Pooled, every frame equal:
 
@@ -187,14 +188,14 @@ Pooled, every frame equal:
 | --- | ---: | ---: | ---: | ---: | ---: |
 | `best.pt` | 0.0480 | 0.2388 | 0.513 | 0.3281 | 0.029 |
 | Always zero | 0.0450 | 0.2392 | 0.000 | 0.4103 | — |
-| Always the training mean | 0.0471 | 0.2394 | 0.482 | 0.3791 | — |
-| Per-command training mean | 0.0548 | 0.2134 | 0.712 | 0.3313 | 0.264 |
+| Always the training mean | 0.0471 | 0.2394 | 0.482 | 0.3760 | — |
+| Per-command training mean | 0.0548 | 0.2133 | 0.712 | 0.3297 | 0.264 |
 
 The junction commands carry more steering information than the recorded ones: the
 per-command baseline gets the turn sign right on 70.2% of weighted turning frames (67.7% with
 the recorded commands), and its steering correlates 0.264 with the expert's (0.229).
 `best.pt` still steers no better than always zero (camera-swap score −0.998). Its
-acceleration MAE rises from 0.1760 to 0.1999: it was trained on the recorded commands, under
+acceleration MAE rises from 0.1760 to 0.1990: it was trained on the recorded commands, under
 which STRAIGHT was 2% of frames rather than 23%.
 
 ---

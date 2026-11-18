@@ -19,8 +19,8 @@ A 20 Hz recording and its 10 Hz training cache therefore give identical targets.
 | `waypoint_mask` | False where a waypoint lies past the end of the recording, so is clamped to its last position: such waypoints are left out of the waypoint loss, while the frame's other targets stay. In v3 these are the last 2 s of the 684 completed episodes, which stop at the frame budget mid-drive: 13,680 frames (0.8%) |
 | `target_speed` | The expert's target speed divided by 120 km/h |
 | `driving_mode` | The expert's mode 1–8 minus one; the v6 YieldStop is folded into StopSignStop |
-| `situation` | Which of ten situations hold, several at once: junctions, turning, red lights, stop signs and the expert's reasons for slowing ([below](#situations)) |
-| `loss_weight` | 0.1 for a stationary frame, otherwise 1 (below) |
+| `situation` | Which of eleven situations hold, several at once: junctions, turning, red lights, stop signs, and vehicles and pedestrians in the path ([below](#situations)) |
+| `loss_weight` | 0 for a frame kept out of the loss ([below](#frames-kept-out-of-the-loss)), 0.1 for a stationary frame, otherwise 1 |
 
 ## Frames used
 
@@ -38,6 +38,23 @@ Clips are taken only from an episode's usable frames:
 
 On the v3 dataset these rules drop 5.3% of frames: 183,966 stuck frames and 9,021 around
 collisions.
+
+## Frames kept out of the loss
+
+The expert sometimes stops for a red light in the wrong place (`misplaced_stops` in
+`labels.py`). A stop of 2 s or more that begins at a red or yellow light within 30 m, with
+no vehicle in the path, is measured from the stop line of its lane, taken from CARLA's maps.
+A correct stop leaves the vehicle's centre within 3 m of the line, as 85.7% of these stops
+in v3 do. A stop more than 4 m past the line stands over it, mostly inside the junction: the
+expert noticed the light late, a median 0.7 s before standing against 5.0 s normally, and
+braked hard. Town01's stops sit closest to the line (median 1.5 m past), so its stops past
+4 m are the least clear-cut.
+More than 6 m before the line, with nothing in the path, the expert misjudged where the
+line is, at a few places in Town04, Town06 and Town10HD.
+
+Such a stop and the 5 s before it keep their frames, so clips still show them and a
+stateful model still sees them, but their loss weight is 0, so no target is learned from
+them. The v3 testbed has 75 stops past the line and 47 short of it: 30,583 frames (1.78%).
 
 ## Navigation commands
 
@@ -58,8 +75,9 @@ and the v7 schema adds them. Bends between junctions are LANEFOLLOW: the target 
 shows them.
 
 Junction outlines come from CARLA's maps (`scripts/export_junctions.py`, 123 junctions in
-the six v3 towns) and are stored as `junctions.json` beside the episodes; reading labels
-without it is an error. At driving time the agent derives its command the same way from the
+the six v3 towns) and are stored as `junctions.json` beside the episodes, with the stop lines
+of the towns' traffic lights (357, from each light's stop waypoints); reading labels without
+it is an error. At driving time the agent derives its command the same way from the
 planned route, whose junction waypoints CARLA marks.
 
 On the v3 testbed the derived commands agree with the recorded LEFT and RIGHT on 88% of
@@ -77,8 +95,9 @@ from the recorded route, and at driving time from the planned one. Mirroring fli
 ## Situations
 
 Several can hold at once (`SITUATIONS` in `labels.py`). Junction and turning situations come
-from the path, red lights and stop signs from the recorded telemetry, and the last three
-from the expert's own mode, the only record v3 has of its reasons.
+from the path, red lights and stop signs from the recorded telemetry, and vehicles and
+pedestrians from the road users the expert recorded around it each frame. Each cause comes as
+a pair, moving and standing, and a "stopped" situation holds only while standing.
 
 | Situation | True when | v3 frames |
 | --- | --- | ---: |
@@ -89,14 +108,23 @@ from the expert's own mode, the only record v3 has of its reasons.
 | stopped at red light | standing (under 0.5 km/h) with a red or yellow light within 30 m | 27.8% |
 | approaching stop sign | moving, with a stop sign within 30 m | 1.6% |
 | stopped at stop sign | standing with a stop sign within 30 m | 0.9% |
-| following vehicle | the expert follows a lead vehicle | 10.0% |
-| stopped for pedestrian | the expert stops for a pedestrian | 0.4% |
-| emergency stop | the expert's emergency stop: braking for, or standing behind, an obstacle in its path, mostly a stopped vehicle | 10.1% |
+| following vehicle | moving, with a vehicle in the path within 25 m, bumper to bumper | 8.2% |
+| stopped for vehicle | standing with a vehicle in the path within 25 m | 12.1% |
+| yielding to pedestrian | moving, with a pedestrian in the path within 15 m | 0.1% |
+| stopped for pedestrian | standing with a pedestrian in the path within 15 m | 0.3% |
+
+A vehicle is in the path when its box overlaps the expert's corridor along the route, or its
+centre lies within 1.75 m of the line straight ahead, whichever way it is heading: in 18% of the
+expert's standing emergency stops the car in its path is oncoming or crossing. A
+pedestrian is in the path within 2.5 m of that line, now or where its velocity takes it in
+1 s. The distances are the expert's own: it starts following at 25 m and slows for a
+pedestrian at 15 m. They separate its modes cleanly: a vehicle is in the path within 25 m in
+99% of its following and emergency-stop frames, and in 0.3% of its traffic-light stops and
+0.2% of its free driving. The expert's modes are not used: its PedestrianStop creeps at
+8 km/h, and its EmergencyStop is mostly a calm wait close behind a queued car.
 
 The 30 m reach includes waiting in a queue: 94.5% of standing frames at a red light are
-within 30 m of it, and nearly all beyond 15 m are queued behind another vehicle. Unlike the
-expert's StopSignStop and TrafficLightStop modes, which also cover the approach, the
-stopped situations hold only while standing.
+within 30 m of it, and nearly all beyond 15 m are queued behind another vehicle.
 
 ## Clip sampling
 

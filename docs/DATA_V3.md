@@ -66,6 +66,14 @@ Town07 episodes were kept separately.
   junction outlines instead ([LABELS.md](LABELS.md#navigation-commands)).
 - `traffic_light_distance` keeps 4,000 rows in 418 episodes that ended before the frame
   budget; rows past the episode's end are padding.
+- The expert stops for some red lights in the wrong place. 75 stops stand more than 4 m
+  past the stop line, mostly inside the junction, after it noticed the light late; 47 stand more
+  than 6 m before it with nothing in the path, at a few places in Town04, Town06 and
+  Town10HD. Training keeps them out of the loss
+  ([LABELS.md](LABELS.md#frames-kept-out-of-the-loss)).
+- The expert's driving modes name its rules, not what is in front of it: its
+  PedestrianStop creeps at 8 km/h, and its EmergencyStop is mostly a calm wait close behind
+  a queued car. The situation labels come from the recorded road users instead.
 - Steering labels include the expert's Gaussian steering noise (σ = 0.001), added before
   the control was applied and recorded.
 - Most completed episodes end at the frame budget, mid-route.
@@ -85,6 +93,14 @@ On the testbed cache, with the Phase 1 labels ([LABELS.md](LABELS.md)):
 | Loader memory over 30 minutes (`scripts/loader_soak.py`, 4 workers, batches of 8 × 32 frames) | Flat: main process 583 MiB throughout, each worker 505–551 MiB between batches and at most 1.43 GiB while holding one |
 | Label audit (`scripts/label_audit.py`), rendered on both machines | No unreadable episode; identical numbers |
 
+Reviewing the audit's sample frames found red-light stops in the wrong place, and situations
+copied from the expert's modes: "stopped for pedestrian" also covered creeping at 8 km/h.
+Both were fixed ([LABELS.md](LABELS.md#frames-kept-out-of-the-loss)), and the dataset pass
+and the audit were run again with the new labels: 0 problems in the same 53,079 clips,
+every "stopped" situation standing on 100% of its frames and every moving one on none,
+1.78% of frames kept out of the loss. The sampler and loader did not change, so the
+reachability and memory results stand.
+
 ## Preserved
 
 - Golden subset: 12 windows of 800 frames, two per town (6 completed, 3 timed out,
@@ -92,7 +108,8 @@ On the testbed cache, with the Phase 1 labels ([LABELS.md](LABELS.md)):
 - Testbed cache: every episode with images resized to 960×160 the way training resizes
   them, stored as JPEG (quality 90) at 10 Hz, and every signal at 20 Hz unchanged; built
   by `scripts/build_testbed_cache.py` and read through `src/data/schema_adapter.py`.
-- Junction outlines of the six towns from CARLA's maps (`scripts/export_junctions.py`), as
-  `junctions.json` beside the testbed cache and both golden copies.
+- Junction outlines and traffic-light stop lines of the six towns from CARLA's maps
+  (`scripts/export_junctions.py`), as `junctions.json` beside the testbed cache and both
+  golden copies.
 - The episode inventory from `scripts/scan_dataset.py`, the collection manifests and log.
 - Offline baselines of the April model on this data: [RUNS.md](RUNS.md).
