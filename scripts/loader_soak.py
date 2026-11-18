@@ -2,10 +2,10 @@
 
 Builds the training DataLoader as the trainer does and iterates it, epoch after epoch,
 for --minutes, reading the resident memory (RSS) of the main process and of each worker
-every --every seconds. A worker's RSS jumps while it holds a batch, so memory counts as
-flat when, after the --warmup minutes, no process's median RSS over the last third of
-the readings is 5% or more above that over the first third. RSS is read from /proc
-(Linux).
+every --every seconds. A worker's RSS rises while it holds a batch and falls back between
+batches, so a leak shows as a rising floor: memory counts as flat when, after the --warmup
+minutes, no process's lowest RSS over the last third of the readings is 5% or more above its
+lowest over the first third. RSS is read from /proc (Linux).
 
 Usage:
     python scripts/loader_soak.py --config configs/vrwkv_base.yaml --data-dir data/golden
@@ -15,7 +15,6 @@ from __future__ import annotations
 
 import argparse
 import time
-from statistics import median
 
 from src.training.config import load_training_config
 from src.training.trainer import build_loader
@@ -67,7 +66,7 @@ def main() -> None:
         raise SystemExit("too few readings after the warm-up")
     third = max(1, len(settled) // 3)
     growth = {
-        k: median(r[k] for r in settled[-third:]) / median(r[k] for r in settled[:third]) - 1
+        k: min(r[k] for r in settled[-third:]) / min(r[k] for r in settled[:third]) - 1
         for k in settled[0]
     }
     print(f"\n{batches} batches in {(time.time() - start) / 60:.1f} min")
