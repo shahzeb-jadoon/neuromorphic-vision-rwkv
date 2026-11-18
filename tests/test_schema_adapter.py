@@ -9,6 +9,7 @@ import h5py
 import numpy as np
 import pytest
 import torch
+import torch.nn.functional as F
 
 from scripts.create_toy_dataset import generate_episode, save_episode_hdf5
 from src.data import hdf5_schema as S
@@ -48,6 +49,18 @@ def test_window_equals_the_stored_fields(tmp_path: Path, version: int) -> None:
         got = getattr(window, name)
         assert got.dtype == expected.dtype and np.array_equal(got, expected), name
     assert signals_only.images.size == 0 and np.array_equal(signals_only.yaw, window.yaw)
+
+
+def test_raw_frames_are_resized_in_uint8(tmp_path: Path) -> None:
+    path = make_episode(tmp_path, version=3)
+    with h5py.File(path, "r") as f:
+        small = schema_adapter.read_window(f, 0, 8, lookahead=0, size=(8, 24)).images
+        full = torch.from_numpy(f[S.IMAGES][0:8]).permute(0, 3, 1, 2).float()
+        with pytest.raises(ValueError, match="cannot be enlarged"):
+            schema_adapter.read_window(f, 0, 8, lookahead=0, size=(32, 96))
+    expected = F.interpolate(full, size=(8, 24), mode="bilinear", align_corners=False)
+    assert small.dtype == np.uint8 and small.shape == (8, 8, 24, 3)
+    assert np.abs(small - expected.round().permute(0, 2, 3, 1).numpy()).max() <= 1
 
 
 def test_yield_stop_folds_into_stop_sign_stop(tmp_path: Path) -> None:

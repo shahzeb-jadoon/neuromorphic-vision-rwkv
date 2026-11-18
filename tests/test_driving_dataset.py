@@ -13,15 +13,17 @@ import numpy as np
 import pytest
 import torch
 
-from src.data import labels, schema_adapter
+from src.data import driving_dataset, labels, schema_adapter
 from src.data.driving_dataset import (
     TURN_WEIGHT,
     WAYPOINT_OFFSETS,
     DrivingSequenceDataset,
     EpisodeOrderedSampler,
     RandomClipSampler,
+    driving_worker_init_fn,
     mirror,
 )
+from src.utils.memory import loader_rss_mib
 
 
 @pytest.fixture
@@ -325,6 +327,28 @@ def test_episode_ordered_rows_continue_their_episodes() -> None:
 
 class TestDataLoader:
     """Verify DataLoader integration."""
+
+    def test_open_files_are_capped(
+        self, train_dataset: DrivingSequenceDataset, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(driving_dataset, "MAX_OPEN_FILES", 2)
+        handles = [train_dataset._get_h5(e) for e in range(4)]
+        assert train_dataset._get_h5(2) is handles[2] and list(train_dataset._h5_cache) == [3, 2]
+        assert [h.id.valid for h in handles] == [False, False, True, True]
+
+    @pytest.mark.skipif(not Path("/proc/self/status").exists(), reason="RSS is read from /proc")
+    def test_each_worker_reports_its_memory(self, train_dataset: DrivingSequenceDataset) -> None:
+        loader = torch.utils.data.DataLoader(
+            train_dataset,
+            batch_size=2,
+            num_workers=2,
+            persistent_workers=True,
+            worker_init_fn=driving_worker_init_fn,
+        )
+        next(iter(loader))
+        rss = loader_rss_mib(loader)
+        assert set(rss) == {"rss_main_mib", "rss_worker0_mib", "rss_worker1_mib"}
+        assert min(rss.values()) > 0
 
     def test_batch_loading(self, train_dataset: DrivingSequenceDataset) -> None:
         loader = torch.utils.data.DataLoader(

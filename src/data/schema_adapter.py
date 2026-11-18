@@ -12,8 +12,10 @@ dataset sees one format whatever wrote the file:
 The readers take `fps`, the rate to read an episode at (by default, the rate of its
 stored images): frame k is signal row k * (recorded fps / `fps`). Labels therefore come
 from the full-rate signals at the instants of the frames read, whether the images are
-raw or cached. Only an episode's usable frames (src.data.labels.usable_end) are read for
-training, and a nav command outside RoadOption 1-6 there is an error, never clamped.
+raw or cached. Images are resized in uint8, one frame at a time; cached JPEGs first
+decode at the smallest DCT scale that covers the requested size. Only an episode's usable
+frames (src.data.labels.usable_end) are read for training, and a nav command outside
+RoadOption 1-6 there is an error, never clamped.
 """
 
 from __future__ import annotations
@@ -23,6 +25,8 @@ from dataclasses import dataclass
 
 import h5py
 import numpy as np
+import torch
+import torch.nn.functional as F
 from PIL import Image
 
 from src.data import hdf5_schema as S
@@ -132,6 +136,18 @@ def _decode(jpeg: np.ndarray, size: tuple[int, int] | None) -> np.ndarray:
     return np.asarray(image.convert("RGB"))
 
 
+def _resize(pixels: np.ndarray, size: tuple[int, int] | None) -> np.ndarray:
+    """(H, W, 3) uint8 resized to `size` (height, width) bilinearly, as the cache builder
+    resizes, without leaving uint8; never enlarged."""
+    if size is None or pixels.shape[:2] == size:
+        return pixels
+    if pixels.shape[0] < size[0] or pixels.shape[1] < size[1]:
+        raise ValueError(f"{pixels.shape[0]}x{pixels.shape[1]} images cannot be enlarged to {size}")
+    x = torch.from_numpy(pixels).permute(2, 0, 1)[None]
+    y = F.interpolate(x, size=size, mode="bilinear", align_corners=False)
+    return np.asarray(y[0].permute(1, 2, 0))
+
+
 def read_window(
     f: h5py.File,
     start: int,
@@ -142,7 +158,7 @@ def read_window(
     size: tuple[int, int] | None = None,
     images: bool = True,
 ) -> Window:
-    """Frames [start, end) read at `fps`. `size` lets cached images decode smaller."""
+    """Frames [start, end) read at `fps`, images resized to `size` (height, width)."""
     step = _step(f, fps)
     if not images:
         pixels = np.empty((0, 0, 0, 3), dtype=np.uint8)
@@ -150,9 +166,11 @@ def read_window(
         every = step // _stored_every(f)
         first, last = start * every, (end - 1) * every + 1
         if is_cache(f):
-            pixels = np.stack([_decode(j, size) for j in f[S.IMAGES_JPEG][first:last:every]])
-        else:  # frame by frame: a strided read is far slower on chunked, compressed images
-            pixels = np.stack([f[S.IMAGES][i] for i in range(first, last, every)])
+            jpegs = f[S.IMAGES_JPEG][first:last:every]
+            pixels = np.stack([_resize(_decode(j, size), size) for j in jpegs])
+        else:  # frame by frame, which bounds memory; a strided read of chunked images is slow
+            raw = f[S.IMAGES]
+            pixels = np.stack([_resize(raw[i], size) for i in range(first, last, every)])
     mode = _rows(f, S.DRIVING_MODE, start, end, step)
     for written, sample in MODE_FOLD.items():
         mode[mode == written] = sample

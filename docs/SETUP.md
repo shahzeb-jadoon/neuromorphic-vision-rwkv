@@ -83,6 +83,24 @@ session and unmounts any attached data drive. The WSL system disk grows as files
 written inside WSL and does not shrink on its own, so keep datasets and caches on a
 separate data drive.
 
+### Training loader memory
+
+Each DataLoader worker builds whole batches and prefetches two, so the loader holds
+about workers × 3 × batch size samples at once. Two things keep that bounded:
+
+- Images are resized in uint8 one frame at a time and become float only at the training
+  size, with the image arithmetic done in place. Building one 32-frame sample at 160×960
+  peaks 94 MiB above the worker's baseline (509 MiB before); the sample itself is 56 MiB.
+- A worker keeps at most 16 episode files open (`MAX_OPEN_FILES`), closing the least
+  recently used, because every open HDF5 file holds its own caches.
+
+Training logs the resident memory of the main process and of the largest worker in
+`logs/metrics.csv` (`rss_main_mib`, `rss_worker_max_mib`), and of every worker in
+TensorBoard. `scripts/loader_soak.py` runs a config's training loader for a set time and
+checks that memory stays flat. On the raw golden files, with 4 workers and batches of
+8 × 32 frames at 160×960, 30 minutes (884 batches) left the main process at 485 MiB and
+each worker at 367–374 MiB between batches, rising to at most 1.25 GiB while it held one.
+
 ## Data drive under WSL
 
 Windows cannot read ext4, so an ext4 data drive is passed through to WSL. Find its disk

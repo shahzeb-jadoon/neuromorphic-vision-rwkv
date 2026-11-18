@@ -24,10 +24,11 @@ from torch.nn.utils import clip_grad_norm_
 from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
 
-from src.data.driving_dataset import DrivingSequenceDataset
+from src.data.driving_dataset import DrivingSequenceDataset, driving_worker_init_fn
 from src.models import VisionRWKVDriver
 from src.training.checkpointing import CheckpointManager, capture_rng_state, restore_rng_state
 from src.training.config import (
+    DatasetConfig,
     TrainingConfig,
     apply_dotlist_overrides,
     save_training_config,
@@ -35,6 +36,7 @@ from src.training.config import (
 )
 from src.training.plotting import plot_run_dashboard
 from src.utils.device import describe_device, select_device
+from src.utils.memory import loader_rss_mib
 from src.utils.settings import setting
 
 wandb: Any
@@ -82,6 +84,37 @@ def build_run_name(cfg: TrainingConfig) -> str:
     )
 
 
+def build_loader(dcfg: DatasetConfig, seed: int, split: str) -> DataLoader[dict[str, torch.Tensor]]:
+    """The training loader (the dataset's sampler, augmentation) or the validation loader."""
+    train = split == "train"
+    ds = DrivingSequenceDataset(
+        data_dir=dcfg.data_dir or setting("DATA_DIR"),
+        seq_len=dcfg.seq_len,
+        stride=dcfg.stride,
+        fps=dcfg.fps,
+        split=split,
+        val_fraction=dcfg.val_fraction,
+        seed=seed,
+        augment=dcfg.augment_train and train,
+        resize_height=dcfg.resize_height,
+        resize_width=dcfg.resize_width,
+    )
+    workers = dcfg.num_workers if train else dcfg.num_workers // 2
+    # Each worker prefetches 2 batches (the PyTorch default); 1 halves the loader's memory
+    # at the cost of slightly lower GPU utilisation.
+    return DataLoader(
+        ds,
+        batch_size=dcfg.batch_size,
+        sampler=ds.get_sampler(weighted=dcfg.weighted_sampling) if train else None,
+        num_workers=workers,
+        pin_memory=dcfg.pin_memory,
+        persistent_workers=workers > 0,
+        prefetch_factor=2 if workers > 0 else None,
+        worker_init_fn=driving_worker_init_fn,
+        drop_last=train,
+    )
+
+
 class CSVRunLogger:
     """CSV + TensorBoard (+ optional W&B) experiment logger."""
 
@@ -100,6 +133,8 @@ class CSVRunLogger:
         "accel_mae",
         "lr",
         "grad_norm",
+        "rss_main_mib",
+        "rss_worker_max_mib",
     ]
 
     EVENT_FIELDS = ["timestamp", "step", "epoch", "event_type", "detail", "value"]
@@ -159,6 +194,10 @@ class CSVRunLogger:
             "accel_mae": metrics.get("accel_mae", float("nan")),
             "lr": metrics.get("lr", float("nan")),
             "grad_norm": metrics.get("grad_norm", float("nan")),
+            "rss_main_mib": metrics.get("rss_main_mib", float("nan")),
+            "rss_worker_max_mib": max(
+                (v for k, v in metrics.items() if k.startswith("rss_worker")), default=float("nan")
+            ),
         }
         self._metrics_writer.writerow(row)
         self._metrics_fh.flush()
@@ -278,7 +317,8 @@ class Trainer:
             weight_decay=cfg.optimization.weight_decay,
         )
 
-        self.train_loader, self.val_loader = self._build_dataloaders()
+        self.train_loader = build_loader(cfg.dataset, cfg.run.seed, "train")
+        self.val_loader = build_loader(cfg.dataset, cfg.run.seed, "val")
         total_steps = max(1, cfg.optimization.epochs * len(self.train_loader))
         self.scheduler = self._build_scheduler(total_steps)
 
@@ -326,63 +366,6 @@ class Trainer:
         for p in teacher.parameters():
             p.requires_grad_(False)
         return teacher
-
-    def _build_dataloaders(
-        self,
-    ) -> tuple[DataLoader[dict[str, torch.Tensor]], DataLoader[dict[str, torch.Tensor]]]:
-        dcfg = self.cfg.dataset
-        data_dir = dcfg.data_dir or setting("DATA_DIR")
-
-        train_ds = DrivingSequenceDataset(
-            data_dir=data_dir,
-            seq_len=dcfg.seq_len,
-            stride=dcfg.stride,
-            fps=dcfg.fps,
-            split="train",
-            val_fraction=dcfg.val_fraction,
-            seed=self.cfg.run.seed,
-            augment=dcfg.augment_train,
-            resize_height=dcfg.resize_height,
-            resize_width=dcfg.resize_width,
-        )
-        val_ds = DrivingSequenceDataset(
-            data_dir=data_dir,
-            seq_len=dcfg.seq_len,
-            stride=dcfg.stride,
-            fps=dcfg.fps,
-            split="val",
-            val_fraction=dcfg.val_fraction,
-            seed=self.cfg.run.seed,
-            augment=False,
-            resize_height=dcfg.resize_height,
-            resize_width=dcfg.resize_width,
-        )
-
-        # prefetch_factor=2 is the PyTorch default (each worker prefetches 2 batches).
-        # Lower to 1 to halve DataLoader RAM at the cost of slightly lower GPU utilisation.
-        pf = 2 if dcfg.num_workers > 0 else None
-        train_loader = DataLoader(
-            train_ds,
-            batch_size=dcfg.batch_size,
-            sampler=train_ds.get_sampler(weighted=dcfg.weighted_sampling),
-            num_workers=dcfg.num_workers,
-            pin_memory=dcfg.pin_memory,
-            persistent_workers=dcfg.num_workers > 0,
-            prefetch_factor=pf,
-            drop_last=True,
-        )
-        val_workers = max(0, dcfg.num_workers // 2)
-        val_loader = DataLoader(
-            val_ds,
-            batch_size=dcfg.batch_size,
-            shuffle=False,
-            num_workers=val_workers,
-            pin_memory=dcfg.pin_memory,
-            persistent_workers=val_workers > 0,
-            prefetch_factor=2 if val_workers > 0 else None,
-            drop_last=False,
-        )
-        return train_loader, val_loader
 
     def _build_scheduler(self, total_steps: int) -> torch.optim.lr_scheduler.LambdaLR:
         scfg = self.cfg.scheduler
@@ -725,6 +708,7 @@ class Trainer:
                     pbar.set_postfix(postfix)
 
                     if self.global_step % max(1, self.cfg.logging.log_every_steps) == 0:
+                        metrics |= loader_rss_mib(self.train_loader)
                         self.logger.log_metrics(
                             "train", self.global_step, self.current_epoch, metrics
                         )

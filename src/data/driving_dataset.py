@@ -20,7 +20,6 @@ from typing import Any
 import h5py
 import numpy as np
 import torch
-import torch.nn.functional as F
 from torch.utils.data import Dataset, Sampler
 
 from src.data import labels, schema_adapter
@@ -59,6 +58,10 @@ MIRRORED_COMMAND = torch.tensor([1, 0, 2, 3, 5, 4])
 TURN_WEIGHT = 5.0
 
 ClipKey = tuple[int, int]  # (episode index, start frame)
+
+# Open episode files per process. Every open HDF5 file keeps its own metadata and chunk
+# caches, so a handle per episode visited grows a worker's memory without bound.
+MAX_OPEN_FILES = 16
 
 
 def mirror(sample: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
@@ -219,7 +222,7 @@ class DrivingSequenceDataset(Dataset):
 
         self.episode_files = [all_episodes[i] for i in selected_indices]
 
-        # Per-worker HDF5 file handle cache (fork-safe via worker_init_fn)
+        # Open HDF5 files of this process, least recently used first (see driving_worker_init_fn)
         self._h5_cache: dict[int, h5py.File] = {}
 
         # Per episode: usable frames, and which of them turn. Fixed clips every `stride`.
@@ -253,10 +256,14 @@ class DrivingSequenceDataset(Dataset):
         return RandomClipSampler(weights, len(self))
 
     def _get_h5(self, ep_idx: int) -> h5py.File:
-        """Return a cached h5py.File handle for the given episode."""
-        if ep_idx not in self._h5_cache:
-            self._h5_cache[ep_idx] = h5py.File(self.episode_files[ep_idx], "r")
-        return self._h5_cache[ep_idx]
+        """Episode `ep_idx`, opened once; past MAX_OPEN_FILES the least recently used closes."""
+        f = self._h5_cache.pop(ep_idx, None)
+        if f is None:
+            f = h5py.File(self.episode_files[ep_idx], "r")
+            if len(self._h5_cache) >= MAX_OPEN_FILES:
+                self._h5_cache.pop(next(iter(self._h5_cache))).close()
+        self._h5_cache[ep_idx] = f
+        return f
 
     def close(self) -> None:
         """Close all cached HDF5 file handles."""
@@ -292,9 +299,8 @@ class DrivingSequenceDataset(Dataset):
         Returns:
             Dictionary with:
                 images: (seq_len, 3, H_out, W_out) float32, ImageNet-normalized.
-                    By default H_out/W_out match stored panoramic frames
-                    (H=320, W=3*camera_width). If resize_* is set, images are
-                    resized on the fly for ablations and memory tuning.
+                    By default H_out/W_out match the stored frames; resize_* sets
+                    them, resizing in uint8 before conversion to float.
                 controls: (seq_len, 2) float32 [steering, acceleration]
                     acceleration = throttle - brake  ∈ [-1, 1]
                 nav_command: (seq_len,) int64  (RoadOption values, 0-indexed)
@@ -317,8 +323,8 @@ class DrivingSequenceDataset(Dataset):
             self._get_h5(ep_idx), start, end, max(WAYPOINT_OFFSETS), fps=self.fps, size=self.size
         )
 
-        # Convert images: uint8 HWC → float32 CHW [0, 1]
-        images = torch.from_numpy(w.images.copy()).permute(0, 3, 1, 2).float() / 255.0
+        # uint8 HWC → float32 CHW in [0, 1]; image arithmetic below is in place to bound memory
+        images = torch.from_numpy(w.images).permute(0, 3, 1, 2).float().div_(255.0)
 
         steering = torch.from_numpy(w.steering.copy())
         throttle = torch.from_numpy(w.throttle.copy())
@@ -348,12 +354,8 @@ class DrivingSequenceDataset(Dataset):
         if self.augment:
             images = self._jitter(images)
 
-        # Optional on-the-fly resize for resolution ablation experiments.
-        if self.size is not None and images.shape[-2:] != self.size:
-            images = F.interpolate(images, size=self.size, mode="bilinear", align_corners=False)
-
         # ImageNet normalization (after augmentation so jitter operates on real intensities)
-        images = (images - IMAGENET_MEAN) / IMAGENET_STD
+        images = images.sub_(IMAGENET_MEAN).div_(IMAGENET_STD)
 
         # Auxiliary targets
         target_speed_t = torch.from_numpy(w.target_speed.copy()) / MAX_SPEED_KMH
@@ -385,11 +387,11 @@ class DrivingSequenceDataset(Dataset):
         Applied before ImageNet normalisation, on (T, 3, H, W) values in [0, 1].
         """
         if torch.rand(1).item() < 0.5:
-            images = images * (1.0 + (torch.rand(1).item() - 0.5) * 0.4)  # [0.8, 1.2]
+            images.mul_(1.0 + (torch.rand(1).item() - 0.5) * 0.4)  # [0.8, 1.2]
         if torch.rand(1).item() < 0.3:
             mean = images.mean(dim=(2, 3), keepdim=True)
-            images = (images - mean) * (1.0 + (torch.rand(1).item() - 0.5) * 0.4) + mean
-        return images.clamp(0.0, 1.0)
+            images.sub_(mean).mul_(1.0 + (torch.rand(1).item() - 0.5) * 0.4).add_(mean)
+        return images.clamp_(0.0, 1.0)
 
     def get_split_info(self) -> dict[str, Any]:
         """Return metadata about this dataset split."""
