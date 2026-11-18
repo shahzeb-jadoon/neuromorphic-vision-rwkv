@@ -58,6 +58,10 @@ Town07 episodes were kept separately.
   the driven trajectory.
 - LEFT and RIGHT cover 44% of frames, approaches included, while only 12.6% of frames
   steer by more than 0.1.
+- Commands can end before the turn they announce. 28% of the frames that steer by 0.5 or
+  more are labelled LANEFOLLOW (in 799 episodes), 12% of them in the first 3 s after
+  spawning and most of the rest in junction turns; 180 episodes have a LEFT or RIGHT run
+  in which the car never steers that way (`scripts/label_audit.py`).
 - Steering labels include the expert's Gaussian steering noise (σ = 0.001), added before
   the control was applied and recorded.
 - Most completed episodes end at the frame budget, mid-route.

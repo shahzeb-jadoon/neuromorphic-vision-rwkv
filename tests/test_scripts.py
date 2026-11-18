@@ -21,6 +21,8 @@ import numpy as np
 import pytest
 
 from src.data import hdf5_schema as S
+from src.data import schema_adapter
+from src.data.driving_dataset import FPS
 
 # Directory for test outputs
 TEST_OUTPUT_DIR = Path("/tmp/test_scripts_output")
@@ -236,3 +238,25 @@ class TestAnalyzeDataset:
         assert "consecutive lane-change: 1 violations" in output
         assert "straight-in-exit-lane: 1 violations" in output
         assert output.count("-> FAIL") == 4
+
+
+class TestLabelAudit:
+    def test_report_covers_every_usable_frame(self, toy_data_dir: Path, tmp_path: Path) -> None:
+        out = tmp_path / "audit"
+        result = subprocess.run(
+            [sys.executable, "scripts/label_audit.py", str(toy_data_dir), str(out)]
+            + ["--workers", "1", "--samples", "2"],
+            capture_output=True,
+            text=True,
+            cwd=_PROJECT_ROOT,
+            env=_script_env(),
+        )
+        assert result.returncode == 0, result.stderr
+        usable = 0
+        for path in toy_data_dir.glob("episode_*.h5"):
+            with h5py.File(path, "r") as f:
+                usable += schema_adapter.usable_frames(f, FPS)
+        numbers = json.loads((out / "audit.json").read_text())
+        assert numbers["usable_frames"] == usable and not numbers["errors"]
+        assert any(f["frames"] for f in numbers["findings"])
+        assert "<h2>Findings</h2>" in (out / "index.html").read_text()
