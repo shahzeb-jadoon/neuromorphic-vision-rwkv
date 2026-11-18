@@ -176,14 +176,16 @@ class TestNormalization:
         mask = train_dataset[len(train_dataset) - 1]["waypoint_mask"].numpy()
         assert np.array_equal(mask, ahead < recorded) and mask.any() and not mask.all()
 
-    def test_commands_are_derived_from_the_path(
-        self, train_dataset: DrivingSequenceDataset
-    ) -> None:
+    def test_route_labels_come_from_the_path(self, train_dataset: DrivingSequenceDataset) -> None:
         ep_idx, start = train_dataset.clips[-1]
         with h5py.File(train_dataset.episode_files[ep_idx], "r") as f:
-            derived = schema_adapter.commands(f, train_dataset.fps)
-        got = train_dataset[len(train_dataset) - 1]["nav_command"] + 1
-        assert got.tolist() == derived[start : start + train_dataset.seq_len].tolist()
+            episode = schema_adapter.read_labels(f, train_dataset.fps)
+        clip = slice(start, start + train_dataset.seq_len)
+        got = train_dataset[len(train_dataset) - 1]
+        assert (got["nav_command"] + 1).tolist() == episode.command[clip].tolist()
+        assert np.array_equal(got["target_point"].numpy(), episode.target_point[clip])
+        assert np.array_equal(got["situation"].numpy(), episode.situation[clip])
+        assert got["situation"].shape == (train_dataset.seq_len, len(labels.SITUATIONS))
 
 
 class TestSplit:
@@ -242,6 +244,7 @@ class TestAugmentation:
             "controls": torch.randn(6, 2, generator=g),
             "nav_command": torch.arange(6),
             "future_waypoints": torch.randn(6, 4, 2, generator=g),
+            "target_point": torch.randn(6, 2, generator=g),
             "velocity": torch.randn(6, 3, generator=g),
         }
         m = mirror(sample)
@@ -251,6 +254,7 @@ class TestAugmentation:
         assert m["nav_command"].tolist() == [1, 0, 2, 3, 5, 4]  # LEFT<->RIGHT, lane changes
         assert torch.equal(m["future_waypoints"][..., 0], sample["future_waypoints"][..., 0])
         assert torch.equal(m["future_waypoints"][..., 1], -sample["future_waypoints"][..., 1])
+        assert torch.equal(m["target_point"], sample["target_point"] * torch.tensor([1.0, -1.0]))
         assert torch.equal(m["velocity"], sample["velocity"])
 
     def test_mirror_moves_each_side_camera_to_the_other_panel(self) -> None:
@@ -262,6 +266,7 @@ class TestAugmentation:
                 "controls": torch.zeros(1, 2),
                 "nav_command": torch.zeros(1, dtype=torch.long),
                 "future_waypoints": torch.zeros(1, 4, 2),
+                "target_point": torch.zeros(1, 2),
             }
         )["images"][0]
         for camera, panel in ((0, 2), (1, 1), (2, 0)):

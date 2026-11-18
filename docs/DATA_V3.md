@@ -61,8 +61,11 @@ Town07 episodes were kept separately.
 - Commands can end before the turn they announce. 28% of the frames that steer by 0.5 or
   more are labelled LANEFOLLOW (in 799 episodes), 12% of them in the first 3 s after
   spawning and most of the rest in junction turns; 180 episodes have a LEFT or RIGHT run
-  in which the car never steers that way. Training derives the commands from the path
-  driven instead ([LABELS.md](LABELS.md#navigation-commands)).
+  in which the car never steers that way. The recorded STRAIGHT lies inside a junction on
+  only 26% of its rows. Training derives the commands from the path driven and the
+  junction outlines instead ([LABELS.md](LABELS.md#navigation-commands)).
+- `traffic_light_distance` keeps 4,000 rows in 418 episodes that ended before the frame
+  budget; rows past the episode's end are padding.
 - Steering labels include the expert's Gaussian steering noise (σ = 0.001), added before
   the control was applied and recorded.
 - Most completed episodes end at the frame budget, mid-route.
@@ -78,5 +81,7 @@ Town07 episodes were kept separately.
 - Testbed cache: every episode with images resized to 960×160 the way training resizes
   them, stored as JPEG (quality 90) at 10 Hz, and every signal at 20 Hz unchanged; built
   by `scripts/build_testbed_cache.py` and read through `src/data/schema_adapter.py`.
+- Junction outlines of the six towns from CARLA's maps (`scripts/export_junctions.py`), as
+  `junctions.json` beside the testbed cache and both golden copies.
 - The episode inventory from `scripts/scan_dataset.py`, the collection manifests and log.
 - Offline baselines of the April model on this data: [RUNS.md](RUNS.md).

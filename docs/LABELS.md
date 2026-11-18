@@ -1,7 +1,7 @@
 # Training targets
 
-How a sample's targets are computed from an episode's raw signals, and which clips
-training draws, in `src/data/labels.py`, `src/data/schema_adapter.py` and
+How a sample's targets and route inputs are computed from an episode's raw signals, and
+which clips training draws, in `src/data/labels.py`, `src/data/schema_adapter.py` and
 `src/data/driving_dataset.py`.
 
 Every episode is read at 10 frames per second (`dataset.fps`): frame k is recorded row
@@ -13,11 +13,13 @@ A 20 Hz recording and its 10 Hz training cache therefore give identical targets.
 | Target | Definition |
 | --- | --- |
 | `controls` | Steering in [−1, 1] and acceleration = throttle − brake in [−1, 1], as the expert applied them |
-| `nav_command` | RoadOption minus one, derived from the path driven ([below](#navigation-commands)): LEFT 0, RIGHT 1, LANEFOLLOW 3; STRAIGHT (2) and the lane changes (4, 5) do not occur. A recorded command outside 1–6 is still an error, never clamped |
+| `nav_command` | RoadOption minus one, what the route does at the next junction ([below](#navigation-commands)): LEFT 0, RIGHT 1, STRAIGHT 2, LANEFOLLOW 3 (no junction maneuver). The lane changes (4, 5) do not occur in v3. A recorded command outside 1–6 is still an error, never clamped |
+| `target_point` | The path 30 m ahead, in the vehicle's frame: x forward, y to the right, metres ([below](#target-point)); an input, not a target |
 | `future_waypoints` | Positions 5, 10, 15 and 20 frames (0.5–2 s) ahead, in the vehicle's frame at that frame: x forward, y to the right, metres |
 | `waypoint_mask` | False where a waypoint lies past the end of the recording, so is clamped to its last position: such waypoints are left out of the waypoint loss, while the frame's other targets stay. In v3 these are the last 2 s of the 684 completed episodes, which stop at the frame budget mid-drive: 13,680 frames (0.8%) |
 | `target_speed` | The expert's target speed divided by 120 km/h |
 | `driving_mode` | The expert's mode 1–8 minus one; the v6 YieldStop is folded into StopSignStop |
+| `situation` | Which of ten situations hold, several at once: junctions, turning, red lights, stop signs and the expert's reasons for slowing ([below](#situations)) |
 | `loss_weight` | 0.1 for a stationary frame, otherwise 1 (below) |
 
 ## Frames used
@@ -41,22 +43,60 @@ collisions.
 
 The recorded commands of v3 often end before the turn they announce
 ([DATA_V3.md](DATA_V3.md#known-limitations)), so training derives the command from the
-path the vehicle drove (`path_commands` in `labels.py`). Along the distance travelled, a
-turn is a stretch curving one way by at least 1°/m that peaks above 3°/m (a radius under
-19 m) and changes the heading by 45° or more: v3's junction turns peak near 6°/m, its road
-curves below 2°/m. The command is LEFT or RIGHT from 30 m before a turn until the turn
-ends, and LANEFOLLOW elsewhere; turns the same way whose commands would come within 10 m
-share one. Measured along the distance travelled, a command holds however long the
-vehicle waits before its turn.
+path the vehicle drove and the junctions of its town (`route` in `labels.py`), with CARLA's
+meaning: LEFT, RIGHT or STRAIGHT is what the route does at the next junction, from 30 m
+before it until the vehicle leaves it, and LANEFOLLOW means no junction maneuver. A
+junction crossing's heading change, measured from 5 m before entering to 10 m after
+leaving, decides it: under 35° is STRAIGHT, as in CARLA's route planner. Visits under 3 m
+only clip an outline and are ignored, and a junction's command starts as soon as the
+previous junction is left when its approach would otherwise begin less than 10 m later.
+Measured along the distance travelled, a command holds however long the vehicle waits.
 
-Going straight through a junction cannot be told from following the lane, so STRAIGHT
-becomes LANEFOLLOW. At driving time the agent has to derive its command the same way,
-from the planned route: `path_commands` takes any path with headings.
+Lane following is not a command that competes with these: the vehicle follows its lane
+through a junction too. Lane changes would be a second, separate input; v3 records none,
+and the v7 schema adds them. Bends between junctions are LANEFOLLOW: the target point
+shows them.
 
-On every recorded row of v3, the derived commands start where the recorded ones do (median
-1 m later: the expert also announced turns about 30 m ahead) but last until the turn
-ends. While moving, LANEFOLLOW covers 6.7% of the frames that steer by 0.5 or more instead
-of 32.7%, and 97.4% of the turning frames under a derived turn command steer its way.
+Junction outlines come from CARLA's maps (`scripts/export_junctions.py`, 123 junctions in
+the six v3 towns) and are stored as `junctions.json` beside the episodes; reading labels
+without it is an error. At driving time the agent derives its command the same way from the
+planned route, whose junction waypoints CARLA marks.
+
+On the v3 testbed the derived commands agree with the recorded LEFT and RIGHT on 88% of
+their frames, and 92% of the turning frames under a turn command steer its way. The
+recorded STRAIGHT lies inside a junction on only 26% of its rows, ending early as the
+recorded turns do.
+
+## Target point
+
+`target_point` is where the path is 30 m further on, in the vehicle's frame at that frame,
+as TransFuser-style models condition on the route. In v3 it comes from the driven path,
+continued straight along the final heading past the end of a recording; in v7 it comes
+from the recorded route, and at driving time from the planned one. Mirroring flips its y.
+
+## Situations
+
+Several can hold at once (`SITUATIONS` in `labels.py`). Junction and turning situations come
+from the path, red lights and stop signs from the recorded telemetry, and the last three
+from the expert's own mode, the only record v3 has of its reasons.
+
+| Situation | True when | v3 frames |
+| --- | --- | ---: |
+| approaching junction | within 30 m before a junction (as its command) | 44.7% |
+| in junction | inside a junction outline | 21.3% |
+| turning | the path curves by 3°/m or more (a radius under 19 m) | 7.2% |
+| approaching red light | moving, with a red or yellow light within 30 m | 6.1% |
+| stopped at red light | standing (under 0.5 km/h) with a red or yellow light within 30 m | 27.8% |
+| approaching stop sign | moving, with a stop sign within 30 m | 1.6% |
+| stopped at stop sign | standing with a stop sign within 30 m | 0.9% |
+| following vehicle | the expert follows a lead vehicle | 10.0% |
+| stopped for pedestrian | the expert stops for a pedestrian | 0.4% |
+| emergency stop | the expert's emergency stop: braking for, or standing behind, an obstacle in its path, mostly a stopped vehicle | 10.1% |
+
+The 30 m reach includes waiting in a queue: 94.5% of standing frames at a red light are
+within 30 m of it, and nearly all beyond 15 m are queued behind another vehicle. Unlike the
+expert's StopSignStop and TrafficLightStop modes, which also cover the approach, the
+stopped situations hold only while standing.
 
 ## Clip sampling
 
@@ -99,5 +139,5 @@ loss and the validation metric.
 
 During training half of the clips are mirrored left to right (`mirror` in
 `driving_dataset.py`): the panorama is flipped, which also swaps the side cameras;
-steering and waypoint y change sign; LEFT and RIGHT swap, as do the two lane changes. A
-mirrored scene shows left-hand traffic.
+steering, waypoint y and target point y change sign; LEFT and RIGHT swap, as do the two
+lane changes; no situation has a side. A mirrored scene shows left-hand traffic.

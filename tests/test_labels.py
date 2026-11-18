@@ -6,12 +6,19 @@ import numpy as np
 import pytest
 
 from src.data.labels import (
+    APPROACH,
     LANEFOLLOW,
     LEFT,
+    MIN_CROSSING,
     RIGHT,
-    TURN_APPROACH,
+    SITUATIONS,
+    STRAIGHT,
+    TARGET_DISTANCE,
+    Route,
     ego_waypoints,
-    path_commands,
+    junction_ids,
+    route,
+    situations,
     usable_end,
 )
 
@@ -88,35 +95,98 @@ def drive(turns: list[tuple[float, float]], step: float = 0.25) -> tuple[np.ndar
     return np.c_[xy, np.zeros(len(xy))], np.degrees(psi)
 
 
+def square(x0: float, x1: float, y0: float, y1: float) -> list[tuple[int, np.ndarray]]:
+    return [(7, np.array([[x0, y0], [x1, y0], [x1, y1], [x0, y1]], float))]
+
+
+def route_of(position: np.ndarray, yaw: np.ndarray, outlines: list) -> Route:
+    return route(position, yaw, junction_ids(position[:, :2], outlines))
+
+
 @pytest.mark.parametrize("sign, command", [(1, RIGHT), (-1, LEFT)])
-def test_a_junction_turn_is_announced_until_it_ends(sign: int, command: int) -> None:
-    arc = np.pi / 2 * 10  # 90 degrees at a 10 m radius
+def test_a_junction_turn_is_commanded_from_its_approach_until_left(sign: int, command: int) -> None:
+    arc = np.pi / 2 * 10  # 90 degrees at a 10 m radius, from (60, 0) to (70, 10 * sign)
     position, yaw = drive([(60, 0), (arc, sign * 90), (60, 0)])
+    r = route_of(position, yaw, square(57, 73, -13, 13))
     s = np.arange(len(yaw)) * 0.25
-    got = path_commands(position, yaw)
-    turn_end = 60 + arc
-    assert set(got[(s > 60 - TURN_APPROACH + 2) & (s < turn_end - 1)]) == {command}
-    assert set(got[(s < 60 - TURN_APPROACH - 3) | (s > turn_end + 3)]) == {LANEFOLLOW}
+    leave = 60 + arc + 3  # the path leaves the square at |y| = 13
+    assert set(r.command[(s > 57 - APPROACH + 1) & (s < leave - 1)]) == {command}
+    assert set(r.command[(s < 57 - APPROACH - 1) | (s > leave + 1)]) == {LANEFOLLOW}
+    assert r.approaching[(s > 28) & (s < 56)].all() and not r.approaching[s > 58].any()
+    assert r.in_junction[(s > 58) & (s < leave - 1)].all()
 
 
-def test_a_road_curve_is_lane_following() -> None:
-    position, yaw = drive([(40, 0), (np.pi / 3 * 60, 60), (40, 0)])  # 60 degrees, 60 m radius
-    assert set(path_commands(position, yaw)) == {LANEFOLLOW}
+def test_going_straight_through_a_junction_is_straight() -> None:
+    position, yaw = drive([(150, 0)])
+    r = route_of(position, yaw, square(60, 75, -8, 8))
+    s = np.arange(len(yaw)) * 0.25
+    assert set(r.command[(s > 31) & (s < 74)]) == {STRAIGHT}
+    assert set(r.command[(s < 29) | (s > 76)]) == {LANEFOLLOW}
 
 
-def test_waiting_before_a_turn_keeps_its_command() -> None:
-    position, yaw = drive([(60, 0), (np.pi / 2 * 10, -90), (40, 0)])
-    wait = int(
-        (60 - TURN_APPROACH / 2) / 0.25
-    )  # stand still for 400 rows halfway along the approach
+def test_junctions_close_together_leave_no_lane_following_between() -> None:
+    position, yaw = drive([(200, 0)])
+    near = square(60, 75, -8, 8) + [(8, square(110, 125, -8, 8)[0][1])]  # approach at 80 m
+    r = route_of(position, yaw, near)
+    s = np.arange(len(yaw)) * 0.25
+    assert set(r.command[(s > 31) & (s < 124)]) == {STRAIGHT}
+
+
+def test_clipping_an_outline_is_not_a_junction() -> None:
+    position, yaw = drive([(150, 0)])
+    r = route_of(position, yaw, square(60, 60 + MIN_CROSSING - 1, -8, 8))
+    assert set(r.command) == {LANEFOLLOW} and not r.in_junction.any()
+
+
+def test_waiting_before_a_junction_keeps_its_command() -> None:
+    position, yaw = drive([(150, 0)])
+    wait = int(45 / 0.25)  # stand still for 400 rows 15 m before the junction
     position = np.insert(position, wait, np.repeat(position[wait : wait + 1], 400, axis=0), axis=0)
     yaw = np.insert(yaw, wait, np.full(400, yaw[wait]))
-    assert set(path_commands(position, yaw)[wait : wait + 400]) == {LEFT}
+    r = route_of(position, yaw, square(60, 75, -8, 8))
+    assert (
+        set(r.command[wait : wait + 400]) == {STRAIGHT} and r.approaching[wait : wait + 400].all()
+    )
 
 
-def test_close_turns_the_same_way_share_one_command() -> None:
-    arc = np.pi / 2 * 10
-    position, yaw = drive([(60, 0), (arc, -90), (35, 0), (arc, -90), (60, 0)])
+def test_a_bend_between_junctions_is_lane_following_but_turning() -> None:
+    position, yaw = drive([(40, 0), (np.pi / 2 * 10, 90), (40, 0)])
+    r = route_of(position, yaw, [])
     s = np.arange(len(yaw)) * 0.25
-    got = path_commands(position, yaw)
-    assert set(got[(s > 60 - TURN_APPROACH + 2) & (s < 60 + 2 * arc + 35 - 1)]) == {LEFT}
+    assert set(r.command) == {LANEFOLLOW}
+    assert r.turning[(s > 43) & (s < 53)].all() and not r.turning[(s < 37) | (s > 59)].any()
+
+
+def test_target_point_lies_ahead_along_the_path() -> None:
+    straight, yaw = drive([(100, 0)])
+    assert np.allclose(route_of(straight, yaw, []).target, [TARGET_DISTANCE, 0.0], atol=1e-3)
+    position, yaw = drive([(60, 0), (np.pi / 2 * 10, 90), (60, 0)])
+    target = route_of(position, yaw, []).target[int(40 / 0.25)]  # 30 m on: 10 m into the arc
+    assert np.allclose(target, [20 + 10 * np.sin(1.0), 10 - 10 * np.cos(1.0)], atol=0.1)
+
+
+def test_situations_follow_the_rules_and_the_expert() -> None:
+    names = {name: i for i, name in enumerate(SITUATIONS)}
+    position, yaw = drive([(10, 0)])
+    r = route_of(position[:8], yaw[:8], [])
+    red, green = 3, 1  # TRAFFIC_LIGHT_STATE_NAMES codes
+    got = situations(
+        r,
+        speed=np.array([5, 0, 0, 5, 5, 0, 5, 5]),
+        light_state=np.array([red, red, green, red, 0, 0, 0, 0]),
+        light_distance=np.array([25, 28, 10, 40, -1, -1, -1, -1]),
+        stop_distance=np.array([-1, -1, -1, -1, 20, 5, -1, -1]),
+        mode=np.array([1, 4, 1, 1, 1, 8, 5, 7]),
+    )
+    expected = [
+        {"approaching red light"},
+        {"stopped at red light"},
+        set(),
+        set(),
+        {"approaching stop sign"},
+        {"stopped at stop sign"},
+        {"following vehicle"},
+        {"emergency stop"},
+    ]
+    for row, want in zip(got, expected):
+        assert {name for name, i in names.items() if row[i]} == want

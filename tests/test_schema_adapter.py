@@ -13,7 +13,7 @@ import torch.nn.functional as F
 
 from scripts.create_toy_dataset import generate_episode, save_episode_hdf5
 from src.data import hdf5_schema as S
-from src.data import schema_adapter
+from src.data import labels, schema_adapter
 from src.data.driving_dataset import IMAGENET_MEAN, IMAGENET_STD, DrivingSequenceDataset
 from src.models.vision_rwkv_driver import N_DRIVING_MODES
 
@@ -121,7 +121,25 @@ def test_an_episode_without_usable_frames_reads_empty(tmp_path: Path) -> None:
     build_episode(src, cache, height=8, width=24, quality=90, stride=2)
     for path in (src, cache):
         with h5py.File(path, "r") as f:
-            assert [len(a) for a in schema_adapter.read_labels(f, fps=10)] == [0, 0, 0]
+            episode = schema_adapter.read_labels(f, fps=10)
+            assert [len(getattr(episode, k)) for k in vars(episode)] == [0] * len(vars(episode))
+
+
+def test_labels_need_the_junction_outlines_of_the_town(tmp_path: Path) -> None:
+    path = make_episode(tmp_path, version=3)
+    with h5py.File(path, "r") as f:
+        episode = schema_adapter.read_labels(f, fps=10)
+        assert episode.target_point.shape == (len(episode.steering), 2)
+        assert episode.situation.shape == (len(episode.steering), len(labels.SITUATIONS))
+    junctions = tmp_path / schema_adapter.JUNCTIONS_FILE
+    junctions.write_text("{}")
+    schema_adapter._junction_file.cache_clear()
+    with h5py.File(path, "r") as f, pytest.raises(ValueError, match="no junction outlines"):
+        schema_adapter.read_labels(f)
+    junctions.unlink()
+    schema_adapter._junction_file.cache_clear()
+    with h5py.File(path, "r") as f, pytest.raises(FileNotFoundError, match="export_junctions"):
+        schema_adapter.read_labels(f)
 
 
 def test_invalid_nav_command_is_rejected(tmp_path: Path) -> None:

@@ -18,6 +18,7 @@ import h5py
 import numpy as np
 
 from src.data import hdf5_schema as S
+from src.data.schema_adapter import JUNCTIONS_FILE
 
 # Navigation commands matching CARLA RoadOption enum (v3 schema)
 NAV_COMMANDS = {
@@ -131,10 +132,13 @@ def generate_episode(
 
     # Traffic light state: no light nearby mostly, with yellow-then-red episodes
     traffic_light_state = np.full(n_frames, TL_NONE, dtype=np.int32)
+    traffic_light_distance = np.full(n_frames, -1.0, dtype=np.float32)
     red_starts = rng.choice(max(1, n_frames - 20), size=max(1, n_frames // 50), replace=False)
     for rs in red_starts:
         traffic_light_state[rs : min(rs + 15, n_frames)] = TL_RED
         traffic_light_state[max(0, rs - 3) : rs] = TL_YELLOW
+        lit = slice(max(0, rs - 3), min(rs + 15, n_frames))
+        traffic_light_distance[lit] = np.linspace(20.0, 8.0, lit.stop - lit.start)
 
     # Target speed (km/h, as the expert records it): 0 while braking
     target_speed = np.full(n_frames, TARGET_SPEED_KMH, dtype=np.float32)
@@ -194,6 +198,7 @@ def generate_episode(
         "position": position,
         "rotation": rotation,
         "traffic_light_state": traffic_light_state,
+        "traffic_light_distance": traffic_light_distance,
         "stop_sign_distance": stop_sign_distance,
         "target_speed": target_speed,
         "driving_mode": driving_mode,
@@ -252,6 +257,7 @@ def save_episode_hdf5(
         f.create_dataset(S.POSITION, data=episode_data["position"])
         f.create_dataset(S.ROTATION, data=episode_data["rotation"])
         f.create_dataset(S.TRAFFIC_LIGHT_STATE, data=episode_data["traffic_light_state"])
+        f.create_dataset(S.TRAFFIC_LIGHT_DISTANCE, data=episode_data["traffic_light_distance"])
         f.create_dataset(S.TARGET_SPEED, data=episode_data["target_speed"])
         f.create_dataset(S.DRIVING_MODE, data=episode_data["driving_mode"])
 
@@ -278,6 +284,11 @@ def save_episode_hdf5(
         for key, value in episode_data["metadata"].items():
             meta.attrs[key] = value
 
+    # Toy towns have no junctions, but the labels need an outline list for every town.
+    junctions = output_dir / JUNCTIONS_FILE
+    towns = json.loads(junctions.read_text()) if junctions.exists() else {}
+    towns.setdefault(episode_data["metadata"]["town"], [])
+    junctions.write_text(json.dumps(towns))
     return filename, episode_hash
 
 

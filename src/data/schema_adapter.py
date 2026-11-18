@@ -14,16 +14,22 @@ stored images): frame k is signal row k * (recorded fps / `fps`). Labels therefo
 from the full-rate signals at the instants of the frames read, whether the images are
 raw or cached. Images are resized in uint8, one frame at a time; cached JPEGs first
 decode at the smallest DCT scale that covers the requested size. Only an episode's usable
-frames (src.data.labels.usable_end) are read for training. The navigation command is
-derived from the path driven (src.data.labels.path_commands), since the recorded one can
-end before the turn it announces; a recorded command outside RoadOption 1-6 is still an
+frames (src.data.labels.usable_end) are read for training.
+
+The navigation command, target point and situations (src.data.labels.route) are derived
+from the path driven and the junction outlines of its town, read from JUNCTIONS_FILE
+beside the episodes (scripts/export_junctions.py), since the recorded command can end
+before the turn it announces. A recorded command outside RoadOption 1-6 is still an
 error, never clamped, as it marks a corrupt file.
 """
 
 from __future__ import annotations
 
+import functools
 import io
+import json
 from dataclasses import dataclass
+from pathlib import Path
 
 import h5py
 import numpy as np
@@ -36,6 +42,7 @@ from src.data import labels
 
 SUPPORTED_SCHEMAS = range(3, 7)
 MODE_FOLD = {9: 8}
+JUNCTIONS_FILE = "junctions.json"  # junction outlines per town, beside the episodes
 
 
 @dataclass(frozen=True)
@@ -48,7 +55,7 @@ class Window:
     steering: np.ndarray  # (T,) float32
     throttle: np.ndarray  # (T,) float32
     brake: np.ndarray  # (T,) float32
-    nav_command: np.ndarray  # (T,) RoadOption 1..6 as recorded; training uses commands()
+    nav_command: np.ndarray  # (T,) RoadOption 1..6 as recorded; training uses read_labels()
     velocity: np.ndarray  # (T, 3) float32, m/s, world frame
     target_speed: np.ndarray  # (T,) float32, km/h
     driving_mode: np.ndarray  # (T,) DrivingMode 1..8
@@ -129,10 +136,34 @@ def nav_commands(f: h5py.File, fps: int | None = None) -> np.ndarray:
     return nav[:: _step(f, fps)]
 
 
-def commands(f: h5py.File, fps: int | None = None) -> np.ndarray:
-    """Navigation command (RoadOption) of every usable frame, from the path driven."""
-    every_row = labels.path_commands(f[S.POSITION][()], f[S.ROTATION][:, 1])
-    return every_row[: _usable_end(f) : _step(f, fps)]
+@functools.lru_cache(maxsize=8)
+def _junction_file(directory: str) -> dict[str, list[tuple[int, np.ndarray]]]:
+    path = Path(directory) / JUNCTIONS_FILE
+    if not path.exists():
+        raise FileNotFoundError(
+            f"{path} is missing; scripts/export_junctions.py writes the junction outlines "
+            "that the navigation labels need"
+        )
+    towns = json.loads(path.read_text(encoding="utf-8"))
+    return {
+        town: [(j["id"], np.asarray(j["outline"], np.float64)) for j in junctions]
+        for town, junctions in towns.items()
+    }
+
+
+def _junctions(f: h5py.File) -> list[tuple[int, np.ndarray]]:
+    town = f[S.METADATA_GROUP].attrs.get(S.META_TOWN, "")
+    town = town.decode() if isinstance(town, bytes) else str(town)
+    towns = _junction_file(str(Path(f.filename).parent))
+    if town not in towns:
+        raise ValueError(f"{f.filename}: {JUNCTIONS_FILE} has no junction outlines for {town!r}")
+    return towns[town]
+
+
+def _fold(mode: np.ndarray) -> np.ndarray:
+    for written, sample in MODE_FOLD.items():
+        mode[mode == written] = sample
+    return mode
 
 
 def _decode(jpeg: np.ndarray, size: tuple[int, int] | None) -> np.ndarray:
@@ -179,9 +210,7 @@ def read_window(
         else:  # frame by frame, which bounds memory; a strided read of chunked images is slow
             raw = f[S.IMAGES]
             pixels = np.stack([_resize(raw[i], size) for i in range(first, last, every)])
-    mode = _rows(f, S.DRIVING_MODE, start, end, step)
-    for written, sample in MODE_FOLD.items():
-        mode[mode == written] = sample
+    mode = _fold(_rows(f, S.DRIVING_MODE, start, end, step))
     frames = -(-int(f[S.POSITION].shape[0]) // step)
     return Window(
         images=pixels,
@@ -197,12 +226,41 @@ def read_window(
     )
 
 
-def read_labels(f: h5py.File, fps: int | None = None) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Steering, acceleration (throttle - brake) and navigation command (`commands`) over
-    the usable frames; raises on a recorded command outside RoadOption 1-6."""
+@dataclass(frozen=True)
+class Labels:
+    """Per-frame labels of an episode's usable frames, computed from its full-rate signals."""
+
+    steering: np.ndarray  # (N,) float32
+    acceleration: np.ndarray  # (N,) float32, throttle - brake
+    command: np.ndarray  # (N,) RoadOption (src.data.labels.route)
+    target_point: np.ndarray  # (N, 2) float32, metres, x forward and y right
+    situation: np.ndarray  # (N, len(labels.SITUATIONS)) bool
+
+
+def read_labels(f: h5py.File, fps: int | None = None) -> Labels:
+    """Labels of the usable frames read at `fps`; raises on a recorded command outside
+    RoadOption 1-6."""
     nav_commands(f)
-    nav = commands(f, fps)
-    step, n = _step(f, fps), len(nav)
-    steering = _rows(f, S.STEERING, 0, n, step)
-    acceleration = _rows(f, S.THROTTLE, 0, n, step) - _rows(f, S.BRAKE, 0, n, step)
-    return steering, acceleration, nav
+    n = f[S.POSITION].shape[0]
+    position = f[S.POSITION][()]
+    path = labels.route(
+        position, f[S.ROTATION][:, 1], labels.junction_ids(position[:, :2], _junctions(f))
+    )
+    # Some v3 files keep traffic_light_distance at the frame budget's length: rows past n
+    # are padding.
+    situation = labels.situations(
+        path,
+        np.linalg.norm(f[S.VELOCITY][()][:, :2], axis=1),
+        f[S.TRAFFIC_LIGHT_STATE][:n],
+        f[S.TRAFFIC_LIGHT_DISTANCE][:n],
+        f[S.STOP_SIGN_DISTANCE][:n],
+        _fold(f[S.DRIVING_MODE][()]),
+    )
+    rows = slice(0, _usable_end(f), _step(f, fps))
+    return Labels(
+        steering=f[S.STEERING][()][rows],
+        acceleration=(f[S.THROTTLE][()] - f[S.BRAKE][()])[rows],
+        command=path.command[rows],
+        target_point=path.target[rows],
+        situation=situation[rows],
+    )

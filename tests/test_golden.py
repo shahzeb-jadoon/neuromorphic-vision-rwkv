@@ -39,7 +39,7 @@ def test_path_commands_agree_with_recorded_turns(golden_dir: Path) -> None:
             w = schema_adapter.read_window(f, 0, n, 0, fps=FPS, images=False)
             hard = (np.abs(w.steering) >= 0.5) & (np.linalg.norm(w.velocity[:, :2], axis=1) >= 1)
             keep = hard & np.isin(w.nav_command, (LEFT, RIGHT))
-            derived.append(schema_adapter.commands(f, FPS)[keep])
+            derived.append(schema_adapter.read_labels(f, FPS).command[keep])
             recorded.append(w.nav_command[keep])
     agree = np.mean(np.concatenate(derived) == np.concatenate(recorded))
     assert agree >= 0.95, f"derived equals recorded on {agree:.1%} of hard turning frames"

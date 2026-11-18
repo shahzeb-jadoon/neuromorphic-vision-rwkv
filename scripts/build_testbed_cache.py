@@ -5,7 +5,8 @@ rate, lossless) and one JPEG every `stride` source frames, resized the way train
 resizes (bilinear, no corner alignment). src.data.schema_adapter reads a cache as an
 episode at the image rate, so labels are computed at load time from the raw signals.
 Episodes are written under a temporary name and renamed when complete; finished episodes
-are skipped, so an interrupted build resumes where it stopped.
+are skipped, so an interrupted build resumes where it stopped. The source's junction
+outlines (schema_adapter.JUNCTIONS_FILE) are copied along.
 
 usage: python scripts/build_testbed_cache.py SRC_DIR OUT_DIR [--workers 6]
 """
@@ -14,6 +15,7 @@ from __future__ import annotations
 
 import argparse
 import io
+import shutil
 import time
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
@@ -26,6 +28,7 @@ import torch.nn.functional as F
 from PIL import Image
 
 from src.data import hdf5_schema as S
+from src.data import schema_adapter
 
 CHUNK = 32  # source images decoded at a time
 
@@ -63,6 +66,12 @@ def build_episode(
         meta.attrs[S.META_IMAGE_STRIDE] = stride
         meta.attrs[S.META_SOURCE_FILE] = src.name
     tmp.rename(dst)
+    junctions, copy = (
+        src.parent / schema_adapter.JUNCTIONS_FILE,
+        dst.parent / schema_adapter.JUNCTIONS_FILE,
+    )
+    if junctions.exists() and (not copy.exists() or copy.read_bytes() != junctions.read_bytes()):
+        shutil.copyfile(junctions, copy)
     return {"file": dst.name, "images": n_images, "bytes": dst.stat().st_size}
 
 

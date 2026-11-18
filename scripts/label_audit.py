@@ -55,7 +55,10 @@ COLUMNS = (
     "wp_x",
     "wp_y",
     "wp_ok",
+    "situation",
+    "point",
 )
+TURNING = labels.SITUATIONS.index("turning")
 
 
 def text(value: Any) -> str:
@@ -68,7 +71,8 @@ def read_episode(path: Path) -> dict[str, Any]:
     try:
         with h5py.File(path, "r") as f:
             meta = f[S.METADATA_GROUP].attrs
-            nav = schema_adapter.read_labels(f, FPS)[2]
+            episode = schema_adapter.read_labels(f, FPS)
+            nav = episode.command
             n = len(nav)
             w = schema_adapter.read_window(f, 0, n, max(WAYPOINT_OFFSETS), fps=FPS, images=False)
             far = labels.ego_waypoints(w.position, w.yaw, WAYPOINT_OFFSETS)[:, -1]
@@ -87,6 +91,8 @@ def read_episode(path: Path) -> dict[str, Any]:
                 wp_x=far[:, 0],
                 wp_y=far[:, 1],
                 wp_ok=np.arange(n) + max(WAYPOINT_OFFSETS) < len(w.position),
+                situation=episode.situation,
+                point=episode.target_point,
             )
     except Exception as e:  # noqa: BLE001 — an unreadable episode is itself a finding
         record["error"] = f"{type(e).__name__}: {e}"
@@ -131,8 +137,8 @@ def findings(t: dict[str, np.ndarray]) -> list[tuple[str, str, np.ndarray]]:
     return [
         (
             "LaneFollow at more than half lock",
-            "LANEFOLLOW while moving at 1 m/s or more with |steering| ≥ 0.5",
-            moving & (nav == LANEFOLLOW) & (np.abs(steer) >= 0.5),
+            "LANEFOLLOW while moving at 1 m/s or more with |steering| ≥ 0.5, not on a sharp bend",
+            moving & (nav == LANEFOLLOW) & (np.abs(steer) >= 0.5) & ~t["situation"][:, TURNING],
         ),
         (
             "Turn command, hard steering the other way",
@@ -230,8 +236,28 @@ def recorded_rows(t: dict[str, np.ndarray]) -> list[list[str]]:
     rows = []
     for c in sorted(set(t["recorded"].tolist())):
         m = t["recorded"] == c
-        cells = [share(t["nav"] == d, m) for d in (LEFT, RIGHT, LANEFOLLOW)]
+        cells = [share(t["nav"] == d, m) for d in (LEFT, RIGHT, STRAIGHT, LANEFOLLOW)]
         rows.append([S.NAV_COMMAND_NAMES[c], f"{m.mean():.1%}", *cells])
+    return rows
+
+
+def situation_rows(t: dict[str, np.ndarray]) -> list[list[str]]:
+    standing = t["speed"] < STANDING
+    rows = []
+    for i, name in enumerate(labels.SITUATIONS):
+        m = t["situation"][:, i]
+        moving = m & ~standing
+        rows.append(
+            [
+                name,
+                f"{m.sum() / FPS / 3600:,.1f}",
+                f"{m.mean():.1%}",
+                share(standing, m),
+                f"{np.median(t['speed'][moving]) * 3.6:.0f}" if moving.any() else "–",
+                share(t["brake"] > 0.1, m),
+                str(len(np.unique(t["episode"][m]))),
+            ]
+        )
     return rows
 
 
@@ -279,19 +305,22 @@ def sample_frames(
         points = labels.ego_waypoints(w.position, w.yaw, WAYPOINT_OFFSETS)[0]
         image_ax.imshow(w.images[0])
         image_ax.set_axis_off()
+        active = [n for n, on in zip(labels.SITUATIONS, t["situation"][i]) if on]
         image_ax.set_title(
             f"{path.stem} frame {k} · {S.NAV_COMMAND_NAMES[int(t['nav'][i])]} · "
             f"{S.DRIVING_MODE_NAMES[int(t['mode'][i])]} · steer {t['steer'][i]:+.2f} · "
             f"throttle {t['throttle'][i]:.2f} brake {t['brake'][i]:.2f} · "
-            f"{t['speed'][i] * 3.6:.0f} km/h (target {t['target'][i]:.0f})",
+            f"{t['speed'][i] * 3.6:.0f} km/h (target {t['target'][i]:.0f})\n"
+            f"situations: {', '.join(active) or 'none'}",
             fontsize=8,
             loc="left",
         )
         wp_ax.plot(points[:, 1], points[:, 0], "o-", color="tab:blue")
+        wp_ax.plot(t["point"][i, 1], t["point"][i, 0], "*", color="tab:red", markersize=10)
         wp_ax.plot(0, 0, "k^")
-        wp_ax.set(xlim=(-12, 12), ylim=(-2, 25), aspect="equal")
+        wp_ax.set(xlim=(-20, 20), ylim=(-2, 35), aspect="equal")
         wp_ax.tick_params(labelsize=7)
-        wp_ax.set_title("waypoints, m", fontsize=7)
+        wp_ax.set_title("waypoints, target ★, m", fontsize=7)
     return png(fig)
 
 
@@ -399,6 +428,11 @@ def main() -> None:
             }
         )
 
+    sit_rows = situation_rows(t)
+    sit_figures = [
+        sample_frames(t, files, t["situation"][:, i], args.samples, rng)
+        for i in range(len(labels.SITUATIONS))
+    ]
     args.out_dir.mkdir(parents=True, exist_ok=True)
     finding_rows = [
         [f["name"], f["what"], f"{f['frames']:,}", f"{f['share']:.2%}", str(f["episodes"])]
@@ -420,17 +454,30 @@ def main() -> None:
             f"Turning: |steering| &gt; {TURN_THRESHOLD}.</p>",
             table([], overview),
             f"<h2>Per town</h2>{table(head, town_rows)}",
-            f"<h2>Per command</h2>{table(cmd_head, cmd_rows)}",
-            "<p>Commands are derived from the path driven, as training uses them; below, the "
-            "recorded command against the derived one.</p>",
-            table(["recorded", "frames", "Left", "Right", "LaneFollow"], recorded_rows(t)),
+            "<h2>Per command</h2><p>Commands are derived from the path driven and the junction "
+            "outlines, as training uses them.</p>",
+            table(cmd_head, cmd_rows),
             "<p>The last two shares are of turning frames; the waypoint share counts only frames "
-            "whose 2 s waypoint lies inside the episode.</p>",
-            f"<h2>Per driving mode</h2>{table(head, mode_rows)}",
+            "whose 2 s waypoint lies inside the episode. The recorded command against the "
+            "derived one:</p>",
+            table(
+                ["recorded", "frames", "Left", "Right", "Straight", "LaneFollow"], recorded_rows(t)
+            ),
+            "<h2>Situations</h2><p>Several can hold at once; sample frames are at the end.</p>",
+            table(
+                ["", "hours", "share", "standing", "median km/h moving", "braking", "episodes"],
+                sit_rows,
+            ),
+            f"<h2>Per driving mode (the expert's own)</h2>{table(head, mode_rows)}",
             f"<h2>Distributions</h2>{distributions(t)}",
             f"<h2>Findings</h2>{table(['', 'what', 'frames', 'share', 'episodes'], finding_rows)}",
             f"<h3>Unreadable episodes</h3><p>{unreadable}</p>" if errors else "",
             sections,
+            "".join(
+                f"<h3>Situation: {html.escape(row[0])}</h3>{figure}"
+                for row, figure in zip(sit_rows, sit_figures)
+                if figure
+            ),
         ]
     )
     (args.out_dir / "index.html").write_text(page, encoding="utf-8")
@@ -444,6 +491,7 @@ def main() -> None:
         "towns": {r[0]: r[1:] for r in town_rows},
         "commands": {r[0]: r[1:] for r in cmd_rows},
         "recorded_commands": {r[0]: r[1:] for r in recorded_rows(t)},
+        "situations": {r[0]: r[1:] for r in sit_rows},
         "modes": {r[0]: r[1:] for r in mode_rows},
         "findings": [{k: v for k, v in f.items() if k != "figure"} for f in found],
     }

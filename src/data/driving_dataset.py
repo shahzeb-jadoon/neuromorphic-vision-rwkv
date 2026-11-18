@@ -68,8 +68,9 @@ def mirror(sample: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
     """The sample as it would be recorded in a left-right mirror image of the world.
 
     Flipping the panorama also moves each side camera's view to the opposite panel.
-    Steering and waypoint y change sign and left and right commands swap; every other
-    field is unchanged (velocity is world-frame and only its magnitude is used).
+    Steering, waypoint y and target point y change sign and left and right commands swap;
+    every other field is unchanged (velocity is world-frame and only its magnitude is used,
+    and no situation has a side).
     """
     return {
         **sample,
@@ -77,6 +78,7 @@ def mirror(sample: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
         "controls": sample["controls"] * torch.tensor([-1.0, 1.0]),
         "nav_command": MIRRORED_COMMAND[sample["nav_command"]],
         "future_waypoints": sample["future_waypoints"] * torch.tensor([1.0, -1.0]),
+        "target_point": sample["target_point"] * torch.tensor([1.0, -1.0]),
     }
 
 
@@ -225,20 +227,25 @@ class DrivingSequenceDataset(Dataset):
         # Open HDF5 files of this process, least recently used first (see driving_worker_init_fn)
         self._h5_cache: dict[int, h5py.File] = {}
 
-        # Per episode: usable frames, which of them turn, and their navigation commands
-        # (derived from the path, see schema_adapter.commands). Fixed clips every `stride`.
+        # Per episode: usable frames, which of them turn, and their route labels (derived
+        # from the path, see schema_adapter.read_labels). Fixed clips every `stride`.
         self.episode_frames: list[int] = []
         self.turning: list[np.ndarray] = []
         self.commands: list[np.ndarray] = []
+        self.target_points: list[np.ndarray] = []
+        self.situations: list[np.ndarray] = []
         self.clips: list[ClipKey] = []
         for ep_idx, ep_path in enumerate(self.episode_files):
             with h5py.File(ep_path, "r") as f:
                 schema_adapter.check_supported(f, ep_path.name)
-                steering, _, command = schema_adapter.read_labels(f, fps)
-            self.episode_frames.append(len(steering))
-            self.turning.append(turn_frames(steering))
-            self.commands.append(command.astype(np.int8))
-            self.clips += [(ep_idx, s) for s in range(0, len(steering) - seq_len + 1, stride)]
+                episode = schema_adapter.read_labels(f, fps)
+            n = len(episode.steering)
+            self.episode_frames.append(n)
+            self.turning.append(turn_frames(episode.steering))
+            self.commands.append(episode.command.astype(np.int8))
+            self.target_points.append(episode.target_point)
+            self.situations.append(episode.situation)
+            self.clips += [(ep_idx, s) for s in range(0, n - seq_len + 1, stride)]
 
         if not self.clips:
             raise ValueError(
@@ -293,7 +300,7 @@ class DrivingSequenceDataset(Dataset):
     # Stationary-frame loss down-weight.
     # Stationary frames (horizontal speed below this, m/s) get a reduced loss weight so the
     # easiest third of the data does not dominate; see docs/LABELS.md.
-    STATIONARY_SPEED_THRESH: float = 0.14  # ~0.5 km/h
+    STATIONARY_SPEED_THRESH: float = labels.STANDING_SPEED  # 0.5 km/h
     STATIONARY_LOSS_WEIGHT: float = 0.1
 
     def __getitem__(self, key: int | ClipKey) -> dict[str, torch.Tensor]:
@@ -318,6 +325,9 @@ class DrivingSequenceDataset(Dataset):
                     y right, metres; for aux loss)
                 waypoint_mask: (seq_len, 4) bool  (False where a waypoint lies past
                     the end of the recording and is clamped; left out of the loss)
+                target_point: (seq_len, 2) float32  (the path 30 m ahead in the vehicle's
+                    frame: x forward, y right, metres; a route input)
+                situation: (seq_len, 10) bool  (labels.SITUATIONS that hold; several can)
         """
         ep_idx, start = key if isinstance(key, tuple) else self.clips[key]
         if not 0 <= start <= self.episode_frames[ep_idx] - self.seq_len:
@@ -382,6 +392,8 @@ class DrivingSequenceDataset(Dataset):
             "driving_mode": driving_mode_t,
             "future_waypoints": future_waypoints,
             "waypoint_mask": waypoint_mask,
+            "target_point": torch.from_numpy(self.target_points[ep_idx][start:end]),
+            "situation": torch.from_numpy(self.situations[ep_idx][start:end]),
         }
         if self.augment and torch.rand(1).item() < 0.5:
             sample = mirror(sample)
