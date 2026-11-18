@@ -48,6 +48,7 @@ model:
     n_nav_commands: 6
     speed_embed_dim: 16
     speed_dropout: 0.5
+    target_embed_dim: 16
     fused_dim: 64
     dropout: 0.0
   policy_head:

@@ -23,6 +23,7 @@ from src.data.labels import (
     pedestrian_distances,
     route,
     situations,
+    target_on_route,
     usable_end,
     vehicle_gaps,
 )
@@ -168,6 +169,19 @@ def test_target_point_lies_ahead_along_the_path() -> None:
     position, yaw = drive([(60, 0), (np.pi / 2 * 10, 90), (60, 0)])
     target = route_of(position, yaw, []).target[int(40 / 0.25)]  # 30 m on: 10 m into the arc
     assert np.allclose(target, [20 + 10 * np.sin(1.0), 10 - 10 * np.cos(1.0)], atol=0.1)
+
+
+def test_a_planned_route_gives_the_target_point_of_the_same_path() -> None:
+    position, yaw = drive([(60, 0), (np.pi / 2 * 10, 90), (60, 0)])
+    expected = route_of(position, yaw, []).target
+    for t in range(0, len(yaw), 37):
+        got = target_on_route(position[t], yaw[t], position[t + 1 :])
+        assert np.allclose(got, expected[t], atol=0.05)
+
+
+def test_without_a_route_the_target_point_lies_straight_ahead() -> None:
+    got = target_on_route(np.array([5.0, -3.0]), 90.0, np.empty((0, 2)))
+    assert np.allclose(got, [TARGET_DISTANCE, 0.0], atol=1e-3)
 
 
 def test_situations_pair_each_cause_moving_and_standing() -> None:

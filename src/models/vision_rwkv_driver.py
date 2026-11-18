@@ -10,6 +10,7 @@ Input:
     images:      (B, T, 3, H, W)  — RGB camera frames
     nav_command: (B, T)            — navigation command per frame (0-5)
     speed:       (B, T)            — normalised ego speed per frame
+    target_point: (B, T, 2)        — route point ahead per frame (x forward, y right, metres)
     state:       optional TemporalState — recurrent hidden state
 
 Output:
@@ -119,7 +120,7 @@ class VisionRWKVDriver(nn.Module):
     This is the top-level model that chains:
     1. VisionTokenizer:  images → one token per frame
     2. TemporalCore:     frame tokens → temporal features
-    3. NavigationFusion: temporal features + nav + speed → fused features
+    3. NavigationFusion: temporal features + nav + speed + target point → fused features
     4. PolicyHead:       fused features → control predictions
     5. Auxiliary heads:  fused features → speed, mode, waypoint predictions
 
@@ -147,6 +148,7 @@ class VisionRWKVDriver(nn.Module):
         images: torch.Tensor,
         nav_command: torch.Tensor,
         speed: torch.Tensor,
+        target_point: torch.Tensor,
         state: TemporalState | None = None,
     ) -> tuple[torch.Tensor, TemporalState, dict[str, torch.Tensor]]:
         """End-to-end forward pass from images to controls.
@@ -155,6 +157,7 @@ class VisionRWKVDriver(nn.Module):
             images:      (B, T, 3, H, W) RGB camera frames, normalized [0, 1].
             nav_command: (B, T) integer navigation commands (0=follow, 1=left, etc.).
             speed:       (B, T) ego speed, normalised as in the dataset's `speed` field.
+            target_point: (B, T, 2) route point ahead in the vehicle's frame, metres.
             state:       Optional recurrent state from previous forward call.
                          If None, initialized to zeros.
 
@@ -168,7 +171,7 @@ class VisionRWKVDriver(nn.Module):
         """
         tokens = self.tokenizer(images)
         features, new_state = self.encoder(tokens, state)
-        fused = self.fusion(features, nav_command, speed)
+        fused = self.fusion(features, nav_command, speed, target_point)
         controls = self.policy_head(fused)
 
         aux: dict[str, torch.Tensor] = {
@@ -184,11 +187,16 @@ class VisionRWKVDriver(nn.Module):
         image: torch.Tensor,
         nav_command: torch.Tensor,
         speed: torch.Tensor,
+        target_point: torch.Tensor,
         state: TemporalState | None = None,
     ) -> tuple[torch.Tensor, TemporalState, dict[str, torch.Tensor]]:
-        """`forward` for one frame: (B, 3, H, W), (B) and (B), with no time axis in the outputs."""
+        """`forward` for one frame: every input without its time axis, and so are the outputs."""
         controls, state, aux = self(
-            image.unsqueeze(1), nav_command.unsqueeze(1), speed.unsqueeze(1), state
+            image.unsqueeze(1),
+            nav_command.unsqueeze(1),
+            speed.unsqueeze(1),
+            target_point.unsqueeze(1),
+            state,
         )
         return controls.squeeze(1), state, {k: v.squeeze(1) for k, v in aux.items()}
 

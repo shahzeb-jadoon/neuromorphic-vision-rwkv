@@ -92,6 +92,11 @@ recorded turns do.
 as TransFuser-style models condition on the route. In v3 it comes from the driven path,
 continued straight along the final heading past the end of a recording; in v7 it comes
 from the recorded route, and at driving time from the planned one. Mirroring flips its y.
+The model embeds it after the temporal core, in units of 30 m.
+
+The v3 point shows the exact line the expert went on to drive, which a planned route does not,
+so it gives away upcoming steering. Judge v3 offline scores against a baseline that sees only
+the target point, not only against the per-command baseline.
 
 ## Situations
 

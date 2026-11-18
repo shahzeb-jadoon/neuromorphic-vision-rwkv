@@ -93,6 +93,15 @@ def test_training_aborts_after_too_many_non_finite_steps_in_a_row(trainer: Train
     assert all(p.isfinite().all() for p in trainer.model.parameters())
 
 
+def test_training_gives_the_policy_the_speed_and_target_point(trainer: Trainer) -> None:
+    batch = next(iter(trainer.train_loader))
+    seen: list[tuple[torch.Tensor, ...]] = []
+    trainer.model.fusion.register_forward_pre_hook(lambda _, inputs: seen.append(inputs))
+    trainer._compute_losses(batch)
+    assert torch.equal(seen[0][2], batch["speed"])
+    assert torch.equal(seen[0][3], batch["target_point"])
+
+
 def test_control_error_pools_the_frames_that_count() -> None:
     target = torch.tensor([[[0.0, 0.0], [0.5, 0.0], [0.5, 0.0], [0.5, 0.0]]])
     errors = torch.tensor([[[0.0, 0.2], [0.4, -0.8], [0.9, 0.9], [0.9, 0.9]]])
@@ -142,9 +151,9 @@ def test_validation_logs_the_score_that_selects_checkpoints(trainer: Trainer) ->
 def test_training_runs_in_bf16(toy_data_dir: Path, tmp_path: Path) -> None:
     t = make_trainer(toy_data_dir, tmp_path, "cuda")
     batch = next(iter(t.train_loader))
-    images, nav, speed = batch["images"].cuda(), batch["nav_command"].cuda(), batch["speed"].cuda()
+    inputs = [batch[k].cuda() for k in ("images", "nav_command", "speed", "target_point")]
     with t._autocast():
-        controls, _, _ = t.model(images, nav, speed)
+        controls, _, _ = t.model(*inputs)
     assert controls.dtype == torch.bfloat16
     assert t._train_step(batch) is not None
     t.logger.close()

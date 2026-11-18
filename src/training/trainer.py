@@ -528,9 +528,10 @@ class Trainer:
         images = batch["images"].to(self.device, non_blocking=True)
         nav = batch["nav_command"].to(self.device, non_blocking=True)
         speed = batch["speed"].to(self.device, non_blocking=True)
+        target_point = batch["target_point"].to(self.device, non_blocking=True)
         target_controls = batch["controls"].to(self.device, non_blocking=True)
 
-        pred_controls, _, aux = self.model(images, nav, speed)
+        pred_controls, _, aux = self.model(images, nav, speed, target_point)
 
         _bsz, _seq_len, _ = pred_controls.shape
         frame_weight = batch["loss_weight"].to(self.device, non_blocking=True).float()
@@ -568,7 +569,7 @@ class Trainer:
         distill_loss = torch.zeros((), device=self.device)
         if self.teacher is not None:
             with torch.no_grad():
-                teacher_controls, _, _ = self.teacher(images, nav, speed)
+                teacher_controls, _, _ = self.teacher(images, nav, speed, target_point)
             distill_mse = (pred_controls - teacher_controls).pow(2).mean(dim=-1)
             distill_loss = self._masked_mean(distill_mse, frame_weight)
 

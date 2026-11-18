@@ -47,9 +47,10 @@ def collect(
             images = batch["images"].to(device)
             nav = batch["nav_command"].to(device)
             speed = batch["speed"].to(device)
-            pred, _, _ = model(images, nav, speed)
+            target_point = batch["target_point"].to(device)
+            pred, _, _ = model(images, nav, speed, target_point)
             # flipping also swaps the left and right panels
-            mirrored, _, _ = model(images.flip(-1), nav, speed)
+            mirrored, _, _ = model(images.flip(-1), nav, speed, target_point)
             weight = batch["loss_weight"].clone()
             weight[:, :burn_in] = 0.0
             parts["pred"].append(pred.cpu().numpy())

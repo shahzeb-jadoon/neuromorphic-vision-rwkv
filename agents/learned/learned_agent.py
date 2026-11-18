@@ -42,6 +42,7 @@ except ImportError:
     CARLA_AVAILABLE = False
 
 from src.data.driving_dataset import MAX_SPEED_MS
+from src.data.labels import TARGET_DISTANCE, target_on_route
 from src.models import VisionRWKVDriver
 from src.training.config import load_training_config
 
@@ -172,6 +173,7 @@ class LearnedAgent:
         # Route planner
         self._planner = GlobalRoutePlanner(self.map, sampling_resolution=route_resolution)
         self._route: List[Tuple] = []
+        self._target_route_points = int(np.ceil(TARGET_DISTANCE / route_resolution)) + 1
 
         # Camera queues and actors
         self._cam_queues: List[queue.Queue] = [queue.Queue(maxsize=1) for _ in range(3)]
@@ -249,6 +251,17 @@ class LearnedAgent:
         _, road_option = self._route[0]
         return max(0, int(road_option) - 1)
 
+    def _get_target_point(self) -> torch.Tensor:
+        """The route point TARGET_DISTANCE ahead in the vehicle's frame, (1, 1, 2) metres."""
+        transform = self.vehicle.get_transform()
+        planned = [wp.transform.location for wp, _ in self._route[: self._target_route_points]]
+        point = target_on_route(
+            np.array([transform.location.x, transform.location.y]),
+            transform.rotation.yaw,
+            np.array([[loc.x, loc.y] for loc in planned]).reshape(-1, 2),
+        )
+        return torch.from_numpy(point)[None, None].to(self.device)
+
     # ------------------------------------------------------------------
     # Perception
     # ------------------------------------------------------------------
@@ -316,7 +329,9 @@ class LearnedAgent:
         speed_norm = float(np.hypot(vel.x, vel.y)) / MAX_SPEED_MS
         speed = torch.tensor([[speed_norm]], device=self.device)          # (1, 1)
 
-        controls, self.state, _ = self.model(images, nav_cmd, speed, self.state)
+        target_point = self._get_target_point()
+
+        controls, self.state, _ = self.model(images, nav_cmd, speed, target_point, self.state)
 
         steer = float(controls[0, 0, 0])
         accel = float(controls[0, 0, 1])

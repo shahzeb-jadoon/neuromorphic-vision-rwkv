@@ -152,7 +152,7 @@ class TestNavigationFusion:
         module = NavigationFusion(config)
         visual = torch.randn(1, 4, config.visual_dim)
         nav = torch.zeros(1, 4, dtype=torch.long)
-        out = module(visual, nav, torch.zeros(1, 4))
+        out = module(visual, nav, torch.zeros(1, 4), torch.zeros(1, 4, 2))
         assert out.shape == (1, 4, config.fused_dim)
 
     def test_fusion_nav_embedding_size(self) -> None:
@@ -165,7 +165,39 @@ class TestNavigationFusion:
         config = FusionConfig(visual_dim=8, fused_dim=8)
         nav = torch.zeros(1, 4, dtype=torch.long)
         with pytest.raises(ValueError, match="speed must be"):
-            NavigationFusion(config)(torch.randn(1, 4, 8), nav, torch.zeros(1, 4, 1))
+            NavigationFusion(config)(
+                torch.randn(1, 4, 8), nav, torch.zeros(1, 4, 1), torch.zeros(1, 4, 2)
+            )
+
+    def test_fusion_refuses_a_target_point_of_the_wrong_shape(self) -> None:
+        config = FusionConfig(visual_dim=8, fused_dim=8)
+        nav = torch.zeros(1, 4, dtype=torch.long)
+        with pytest.raises(ValueError, match="target_point must be"):
+            NavigationFusion(config)(
+                torch.randn(1, 4, 8), nav, torch.zeros(1, 4), torch.zeros(1, 4, 3)
+            )
+
+
+class TestTargetPoint:
+    """The route point ahead reaches the fused features, in units of the target distance."""
+
+    @staticmethod
+    def fuse(target: torch.Tensor, scale: float = 30.0) -> torch.Tensor:
+        torch.manual_seed(0)
+        config = FusionConfig(visual_dim=8, nav_embed_dim=4, fused_dim=8, target_scale=scale)
+        module = NavigationFusion(config).eval()
+        nav = torch.zeros(2, 3, dtype=torch.long)
+        fused: torch.Tensor = module(torch.randn(2, 3, 8), nav, torch.zeros(2, 3), target)
+        return fused
+
+    def test_left_and_right_of_the_vehicle_differ(self) -> None:
+        left = self.fuse(torch.tensor([20.0, -20.0]).expand(2, 3, 2))
+        right = self.fuse(torch.tensor([20.0, 20.0]).expand(2, 3, 2))
+        assert (left - right).abs().max() > 1e-3
+
+    def test_metres_are_scaled_by_the_target_distance(self) -> None:
+        target = torch.tensor([24.0, -18.0]).expand(2, 3, 2)
+        assert torch.equal(self.fuse(target, 30.0), self.fuse(2 * target, 60.0))
 
 
 class TestSpeedDropout:
@@ -179,7 +211,8 @@ class TestSpeedDropout:
         config = FusionConfig(visual_dim=8, nav_embed_dim=4, fused_dim=8, dropout=0.0)
         module = NavigationFusion(replace(config, speed_dropout=p)).train(training)
         visual = torch.randn(clips, 6, 8)
-        return module, module(visual, torch.zeros(clips, 6, dtype=torch.long), speed)
+        nav = torch.zeros(clips, 6, dtype=torch.long)
+        return module, module(visual, nav, speed, torch.zeros(clips, 6, 2))
 
     def test_speed_reaches_the_output_when_shown(self) -> None:
         _, slow = self.fuse(0.0, True, torch.zeros(400, 6))
@@ -259,7 +292,7 @@ class TestVisionRWKVDriver:
         model = VisionRWKVDriver(ModelConfig())
         images = torch.randn(1, 4, 3, 320, 1920)
         nav = torch.zeros(1, 4, dtype=torch.long)
-        controls, state, aux = model(images, nav, torch.zeros(1, 4))
+        controls, state, aux = model(images, nav, torch.zeros(1, 4), torch.zeros(1, 4, 2))
         assert controls.shape == (1, 4, 2)
         assert len(state) == model.config.encoder.n_layers * STATE_PARTS
         assert "speed" in aux and "mode_logits" in aux and "future_waypoints" in aux

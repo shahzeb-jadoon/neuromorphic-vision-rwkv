@@ -1,15 +1,16 @@
 """Navigation fusion module (gated linear fusion).
 
-Fuses visual features from the temporal core with navigation command
-and ego speed embeddings to produce context-aware driving features.
+Fuses visual features from the temporal core with navigation command, ego speed
+and target point embeddings to produce context-aware driving features.
 
-Mechanism: concatenate visual + nav + speed embeddings, project through
+Mechanism: concatenate visual + nav + speed + target embeddings, project through
 a linear layer, and apply a learned sigmoid gate. This is a gated
 linear fusion — lightweight and O(1) per token.
 
 Input:  visual_features (B, T, visual_dim)
         nav_command     (B, T) int64
         speed           (B, T) normalised ego speed
+        target_point    (B, T, 2) route point ahead: x forward, y right, metres
 Output: fused_features  (B, T, fused_dim)
 """
 
@@ -24,10 +25,10 @@ from src.models.config import FusionConfig
 
 
 class NavigationFusion(nn.Module):
-    """Gated linear fusion for visual, navigation and speed features.
+    """Gated linear fusion for visual, navigation, speed and route features.
 
-    Embeds the navigation command and the ego speed, concatenates them with the
-    visual features, and applies a gated linear projection.
+    Embeds the navigation command, the ego speed and the target point, concatenates them
+    with the visual features, and applies a gated linear projection.
 
     In training, `config.speed_dropout` of the clips see a learned "unknown speed" vector
     for all their frames, so the policy cannot simply continue the motion it measures.
@@ -43,12 +44,17 @@ class NavigationFusion(nn.Module):
         # Navigation command embedding
         self.nav_embedding = nn.Embedding(config.n_nav_commands, config.nav_embed_dim)
 
-        dim = config.speed_embed_dim
-        self.speed_encoder = nn.Sequential(nn.Linear(1, dim), nn.ReLU(), nn.Linear(dim, dim))
-        self.unknown_speed = nn.Parameter(torch.zeros(dim))
+        speed_dim, target_dim = config.speed_embed_dim, config.target_embed_dim
+        self.speed_encoder = nn.Sequential(
+            nn.Linear(1, speed_dim), nn.ReLU(), nn.Linear(speed_dim, speed_dim)
+        )
+        self.unknown_speed = nn.Parameter(torch.zeros(speed_dim))
+        self.target_encoder = nn.Sequential(
+            nn.Linear(2, target_dim), nn.ReLU(), nn.Linear(target_dim, target_dim)
+        )
 
-        # Concatenate visual + nav + speed, then project to fused dim
-        combined_dim = config.visual_dim + config.nav_embed_dim + dim
+        # Concatenate visual + nav + speed + target, then project to fused dim
+        combined_dim = config.visual_dim + config.nav_embed_dim + speed_dim + target_dim
         self.projection = nn.Linear(combined_dim, config.fused_dim)
 
         # Gating mechanism
@@ -62,13 +68,15 @@ class NavigationFusion(nn.Module):
         visual_features: torch.Tensor,
         nav_command: torch.Tensor,
         speed: torch.Tensor,
+        target_point: torch.Tensor,
     ) -> torch.Tensor:
-        """Fuse visual features with the navigation command and ego speed.
+        """Fuse visual features with the navigation command, ego speed and target point.
 
         Args:
             visual_features: (B, T, visual_dim) from the temporal core.
             nav_command: (B, T) int64, navigation command IDs (0-5).
             speed: (B, T) ego speed, normalised as in the dataset's `speed` field.
+            target_point: (B, T, 2) route point ahead in the vehicle's frame, metres.
 
         Returns:
             (B, T, fused_dim) fused feature tensor.
@@ -88,9 +96,16 @@ class NavigationFusion(nn.Module):
             raise ValueError(
                 f"speed must be (B, T) like nav_command, got shape {tuple(speed.shape)}"
             )
+        if target_point.shape != (*nav_command.shape, 2):
+            raise ValueError(
+                f"target_point must be (B, T, 2), got shape {tuple(target_point.shape)}"
+            )
 
         nav_embed = self.nav_embedding(nav_command)  # (B, T, nav_embed_dim)
-        combined = torch.cat([visual_features, nav_embed, self._embed_speed(speed)], dim=-1)
+        target_embed = self.target_encoder(target_point / self.config.target_scale)
+        combined = torch.cat(
+            [visual_features, nav_embed, self._embed_speed(speed), target_embed], dim=-1
+        )
         projected = self.projection(combined)
         gate = torch.sigmoid(self.gate(combined))
 

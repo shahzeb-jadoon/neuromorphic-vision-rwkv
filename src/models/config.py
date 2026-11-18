@@ -48,8 +48,8 @@ class RWKVEncoderConfig:
 class FusionConfig:
     """Configuration for the fusion module (gated linear fusion).
 
-    Fuses visual features with navigation command and ego speed embeddings
-    via concatenation, linear projection, and learned sigmoid gating.
+    Fuses visual features with navigation command, ego speed and target point
+    embeddings via concatenation, linear projection, and learned sigmoid gating.
     """
 
     visual_dim: int = 768
@@ -57,6 +57,8 @@ class FusionConfig:
     n_nav_commands: int = 6  # LEFT..CHANGELANERIGHT (remapped from RoadOption 1-6 → 0-5)
     speed_embed_dim: int = 64
     speed_dropout: float = 0.5  # share of training clips that hide the ego speed
+    target_embed_dim: int = 64
+    target_scale: float = 30.0  # metres: the target point's distance along the route
     fused_dim: int = 768
     dropout: float = 0.1
 

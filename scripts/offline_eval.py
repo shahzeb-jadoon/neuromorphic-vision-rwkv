@@ -27,6 +27,7 @@ import torch.nn.functional as F
 from tqdm import tqdm
 
 from agents.learned.learned_agent import load_checkpoint
+from src.data import labels
 from src.data.driving_dataset import DrivingSequenceDataset
 from src.data.driving_dataset import IMAGENET_MEAN, IMAGENET_STD, MAX_SPEED_MS
 from src.utils.settings import setting
@@ -97,6 +98,7 @@ def run_offline_eval(
             nav_cmd = f[S.NAV_COMMAND][:]  # (N,) values 1-6
             speeds = np.linalg.norm(f[S.VELOCITY][:, :2], axis=1) / MAX_SPEED_MS  # (N,)
             n_frames = len(steering)
+            path = labels.route(f[S.POSITION][()], f[S.ROTATION][:, 1], np.full(n_frames, -1))
 
         # Remap nav: 1-6 → 0-5 (match training)
         nav_cmd = np.clip(nav_cmd - 1, 0, 5)
@@ -127,7 +129,9 @@ def run_offline_eval(
 
                 speed = torch.tensor([[float(speeds[t])]], device=dev)  # (1, 1)
 
-                controls, state, _ = model(img, nav, speed, state)
+                target_point = torch.from_numpy(path.target[t])[None, None].to(dev)  # (1, 1, 2)
+
+                controls, state, _ = model(img, nav, speed, target_point, state)
 
                 steer_pred = float(controls[0, 0, 0])
                 accel_pred = float(controls[0, 0, 1])

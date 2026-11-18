@@ -171,6 +171,30 @@ def route(position: np.ndarray, yaw: np.ndarray, junction: np.ndarray) -> Route:
     return Route(command, approaching, in_junction, turning, target)
 
 
+def target_on_route(position: np.ndarray, yaw: float, planned: np.ndarray) -> np.ndarray:
+    """The target point of a vehicle driving a planned route, as `route` gives for a path.
+
+    position: (2+,) world position in metres; yaw: CARLA yaw in degrees; planned: (N, 2+) the
+    route's remaining points in order. Past its end the point continues straight along the
+    last segment, or along the vehicle's heading if no route remains. Returns (2,) float32
+    metres: x forward, y to the right.
+    """
+    xy = position[:2].astype(np.float64)
+    path = np.vstack([xy, planned[:, :2].astype(np.float64)])
+    path = path[np.r_[True, np.linalg.norm(np.diff(path, axis=0), axis=1) > 1e-3]]
+    s = np.r_[0.0, np.cumsum(np.linalg.norm(np.diff(path, axis=0), axis=1))]
+    if s[-1] >= TARGET_DISTANCE:
+        point = np.array([np.interp(TARGET_DISTANCE, s, path[:, i]) for i in range(2)])
+    else:
+        dx, dy = (
+            path[-1] - path[-2]
+            if len(path) > 1
+            else (np.cos(np.radians(yaw)), np.sin(np.radians(yaw)))
+        )
+        point = path[-1] + (TARGET_DISTANCE - s[-1]) * np.array([dx, dy]) / np.hypot(dx, dy)
+    return _vehicle_frame(point[0] - xy[0], point[1] - xy[1], yaw)
+
+
 def vehicle_gaps(records: Sequence[str | bytes]) -> np.ndarray:
     """(N,) bumper-to-bumper gap in metres to the nearest vehicle in the path ahead, inf if none.
 
