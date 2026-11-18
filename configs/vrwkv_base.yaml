@@ -39,10 +39,8 @@ model:
     core: rwkv
     embed_dim: 768
     n_layers: 12
-    n_heads: 12
     ffn_dim: 3072
     dropout: 0.1
-    rwkv_version: 7
   fusion:
     visual_dim: 768
     nav_embed_dim: 64

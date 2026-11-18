@@ -1,37 +1,37 @@
-"""RWKV-6 temporal encoder for sequential visual token processing.
+"""RWKV-4-style temporal encoder with data-dependent decay.
 
-Implements a pure-PyTorch RWKV-6 simplified block and stacks N of them to
-encode visual token sequences with recurrent temporal memory.
+The memory is one number per channel, as in RWKV-4. RWKV-6 and RWKV-7 keep a matrix per
+head instead, so this is neither of them.
 
 Architecture per block:
-  1. Time-mixing (RWKV-6):
+  1. Time-mixing:
      - Token shift: each of r, k, v, w gets its own learned per-channel lerp
-       between the current token and the previous-position token.  The
-       previous-position token at t=0 is seeded from the carried shift-state.
+       between the current token and the previous-position token.
      - Data-dependent decay: per-token w_t = exp(-exp(W_w(xw) + w_log))
        gives each channel its own learned decay rate that varies with content.
-     - WKV recurrence (sequential, pure PyTorch):
-         s_t  = w_t * s_{t-1} + exp(k_t) * v_t
-         y_t  = r_t * (exp(u) * exp(k_t) * v_t + s_{t-1})
-       where s is a per-channel running sum and u is a learned bonus for the
-       current position (preventing the model from ignoring the current token).
+     - WKV memory: an average of the values seen so far, weighted by their keys.
+         a_t  = w_t * a_{t-1} + exp(k_t) * v_t
+         b_t  = w_t * b_{t-1} + exp(k_t)
+         y_t  = r_t * (a_{t-1} + exp(u + k_t) * v_t) / (b_{t-1} + exp(u + k_t))
+       where u is a learned bonus for the current frame. Both sums are stored divided
+       by exp(p), with p the largest log weight so far, and accumulated in fp32, so a
+       large key cannot overflow them.
      - Output: W_o(y_t)
   2. Channel-mixing: squared-ReLU gated FFN with its own token shift.
 
 Carried state per layer, so that how a sequence is cut into calls does not
 change the output:
   - time-mixing shift: the last normalised input of the previous call,
-  - WKV: the running sum s,
+  - WKV memory: (a, b, p),
   - channel-mixing shift: the last normalised input of its own token shift.
 
 References:
   RWKV-4: Peng et al., 2023 (arXiv:2305.13048)
-  RWKV-6: BlinkDL/RWKV-LM (open source, 2024)
   Vision-RWKV: Duan et al., ICLR 2025 (arXiv:2403.02308)
 
 Input:  (B, T, embed_dim) — per-frame tokens
 Output: (B, T, embed_dim) — per-frame feature vectors
-State:  list[Tensor(B, embed_dim)] — three tensors per layer
+State:  list of tensors, three per layer: (B, D) shift, (B, 3, D) WKV memory, (B, D) shift
 """
 
 from __future__ import annotations
@@ -42,13 +42,37 @@ import torch.nn as nn
 from src.models.config import RWKVEncoderConfig
 from src.models.temporal import TemporalCore, TemporalState
 
-# Three (B, D) tensors per encoder layer: time-mixing shift, WKV sum, channel-mixing shift.
 RWKVState = TemporalState
-STATE_PARTS = 3
+STATE_PARTS = 3  # tensors per layer: time-mixing shift, WKV memory, channel-mixing shift
+NO_HISTORY = -1e30  # log weight of an empty WKV memory
+MAX_LOG_DECAY_RATE = 10.0  # the memory is already gone at this rate; keeps exp() finite
+
+WKVMemory = tuple[torch.Tensor, torch.Tensor, torch.Tensor]
+
+
+def _add_frame(memory: WKVMemory, k: torch.Tensor, v: torch.Tensor) -> WKVMemory:
+    """Add a value of log weight `k` to (a, b, p), rescaling to the larger log weight."""
+    a, b, p = memory
+    top = torch.maximum(p, k)
+    old, new = torch.exp(p - top), torch.exp(k - top)
+    return old * a + new * v, old * b + new, top
+
+
+def wkv_step(
+    k: torch.Tensor,
+    v: torch.Tensor,
+    log_decay: torch.Tensor,
+    bonus: torch.Tensor,
+    memory: WKVMemory,
+) -> tuple[torch.Tensor, WKVMemory]:
+    """One frame of the WKV memory: the weighted average now, and the memory for the next frame."""
+    a, b, _ = _add_frame(memory, bonus + k, v)
+    decayed = (memory[0], memory[1], memory[2] + log_decay)
+    return a / b, _add_frame(decayed, k, v)
 
 
 class RWKVBlock(nn.Module):
-    """Single RWKV-6 block: token-shifted time-mixing + channel-mixing.
+    """Single block: token-shifted time-mixing + channel-mixing.
 
     Args:
         config:    RWKV encoder configuration.
@@ -67,9 +91,8 @@ class RWKVBlock(nn.Module):
         self.ln1 = nn.LayerNorm(D)
         self.ln2 = nn.LayerNorm(D)
 
-        # ── RWKV-6 time-mixing ───────────────────────────────────────
+        # ── Time-mixing ──────────────────────────────────────────────
         # Per-channel lerp coefficients: how much to blend current vs prev token.
-        # Separate lerp for each signal (r, k, v, w) — the RWKV-6 feature vs v4.
         self.lerp_r = nn.Parameter(torch.full((D,), 0.5))
         self.lerp_k = nn.Parameter(torch.full((D,), 0.5))
         self.lerp_v = nn.Parameter(torch.full((D,), 0.5))
@@ -81,14 +104,13 @@ class RWKVBlock(nn.Module):
         self.W_v = nn.Linear(D, D, bias=False)
         self.W_o = nn.Linear(D, D, bias=False)
 
-        # Data-dependent decay (RWKV-6): a small network maps shifted input
-        # to a per-token log-decay, offset by a learnable per-channel baseline.
+        # Data-dependent decay: a linear map of the shifted input gives a per-token
+        # log-decay rate, offset by a learnable per-channel baseline.
         # Final decay w_t = exp(-exp(W_w(xw) + w_log)) is always in (0, 1).
         self.W_w = nn.Linear(D, D, bias=False)
         self.w_log = nn.Parameter(torch.full((D,), -1.0))
 
         # Current-position bonus: prevents the model ignoring the current token.
-        # exp(u) scales the key-value contribution at position t before state decay.
         self.u = nn.Parameter(torch.zeros(D))
 
         # ── Channel-mixing (squared-ReLU gated FFN) ──────────────────
@@ -101,16 +123,18 @@ class RWKVBlock(nn.Module):
         self.dropout = nn.Dropout(config.dropout)
 
     def initial_state(self, batch_size: int, device: torch.device) -> RWKVState:
-        """Zeros for the time-mixing shift, the WKV sum and the channel-mixing shift."""
+        """The state before the first frame: empty shifts and an empty WKV memory."""
         size = (batch_size, self.config.embed_dim)
-        return [torch.zeros(size, device=device) for _ in range(STATE_PARTS)]
+        memory = torch.zeros((batch_size, 3, self.config.embed_dim), device=device)
+        memory[:, 2] = NO_HISTORY
+        return [torch.zeros(size, device=device), memory, torch.zeros(size, device=device)]
 
     def forward(
         self,
         x: torch.Tensor,
         state: RWKVState | None = None,
     ) -> tuple[torch.Tensor, RWKVState]:
-        """Process a clip through this RWKV-6 block.
+        """Process a clip through this block.
 
         Args:
             x:     (B, T, D) token sequence for this clip.
@@ -123,12 +147,12 @@ class RWKVBlock(nn.Module):
         if x.ndim != 3:
             raise ValueError(f"RWKVBlock expected 3D input, got shape {tuple(x.shape)}")
 
-        B, T, D = x.shape
-        device, dtype = x.device, x.dtype
+        B, T, _ = x.shape
+        wide = torch.promote_types(x.dtype, torch.float32)  # memory is never kept in bf16
 
         if state is None:
-            state = self.initial_state(B, device)
-        time_shift, s, channel_shift = state
+            state = self.initial_state(B, x.device)
+        time_shift, wkv_memory, channel_shift = state
 
         # ── Time-mixing ──────────────────────────────────────────────
         h = self.ln1(x)
@@ -146,31 +170,22 @@ class RWKVBlock(nn.Module):
         r = torch.sigmoid(self.W_r(xr))  # receptance gate  (B, T, D)
         k = self.W_k(xk)  # key              (B, T, D)
         v = self.W_v(xv)  # value            (B, T, D)
+        decay_rate = self.W_w(xw)  # log-decay rate   (B, T, D)
 
-        # Data-dependent per-token decay: always ∈ (0, 1).
-        # Inner exp maps anything to ℝ+; outer -exp maps that to ℝ-; outer exp → (0,1).
-        # Cast to float32 before exp() — fp16 overflows to inf when input > ~11,
-        # which causes NaN in subsequent recurrence steps under AMP autocast.
-        w = torch.exp(-torch.exp((self.W_w(xw) + self.w_log).float())).to(dtype)  # (B, T, D)
+        with torch.autocast(x.device.type, enabled=False):
+            k, v, r = k.to(wide), v.to(wide), r.to(wide)
+            rate = (decay_rate.to(wide) + self.w_log).clamp(max=MAX_LOG_DECAY_RATE)
+            log_decay = -torch.exp(rate)  # w_t = exp(log_decay) is always in (0, 1)
 
-        # WKV recurrence — sequential over the T dimension.
-        # s: (B, D) running exponentially-decayed sum, carried across calls.
-        # y_t = r_t * (bonus * k_t * v_t + s_{t-1})
-        # s_t =  w_t * s_{t-1} + k_t * v_t
-        ek = torch.exp(k.float()).to(dtype)  # key: cast to fp32 to prevent overflow
-        eu = torch.exp(self.u.float()).to(dtype)  # bonus: same reason
-        s = s.to(dtype)
-        y_parts: list[torch.Tensor] = []
-        for t in range(T):
-            wt = w[:, t, :]
-            kt = ek[:, t, :]
-            vt = v[:, t, :]
-            rt = r[:, t, :]
-            kv = kt * vt  # (B, D)
-            y_parts.append(rt * (eu * kv + s))
-            s = wt * s + kv
+            a, b, p = wkv_memory.to(wide).unbind(dim=1)
+            memory: WKVMemory = (a, b, p)
+            averages: list[torch.Tensor] = []
+            for t in range(T):
+                average, memory = wkv_step(k[:, t], v[:, t], log_decay[:, t], self.u, memory)
+                averages.append(average)
+            y = r * torch.stack(averages, dim=1)
 
-        time_out = self.W_o(torch.stack(y_parts, dim=1))  # (B, T, D)
+        time_out = self.W_o(y)  # (B, T, D)
         x = x + self.dropout(time_out)
 
         # ── Channel-mixing ───────────────────────────────────────────
@@ -185,11 +200,11 @@ class RWKVBlock(nn.Module):
         channel_out = r2 * self.W_cm_v(k2)
         x = x + self.dropout(channel_out)
 
-        return x, [h[:, -1, :], s, h2[:, -1, :]]
+        return x, [h[:, -1, :].to(wide), torch.stack(memory, dim=1), h2[:, -1, :].to(wide)]
 
 
 class RWKVEncoder(TemporalCore):
-    """Stacked RWKV-6 blocks for temporal encoding of visual sequences.
+    """Stacked RWKV-4-style blocks for temporal encoding of visual sequences.
 
     Args:
         config: RWKV encoder configuration.

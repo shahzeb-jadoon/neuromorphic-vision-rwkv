@@ -39,10 +39,8 @@ class RWKVEncoderConfig:
     core: str = "rwkv"  # rwkv | gru
     embed_dim: int = 768
     n_layers: int = 12
-    n_heads: int = 12  # For multi-head state in RWKV-7
     ffn_dim: int = 3072  # Feed-forward hidden dimension (4x embed)
     dropout: float = 0.1
-    rwkv_version: int = 7  # 6 or 7 (fallback to 6 if 7 fails)
 
 
 @dataclass

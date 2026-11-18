@@ -210,6 +210,16 @@ skipped, leaving the weights, optimizer, schedule and EMA as they were, and is l
 (`episode file:start frame`). After `optimization.max_nonfinite_steps` (10) skipped steps in a
 row the run saves a crash checkpoint and stops.
 
+## Temporal core since Phase 2
+
+The RWKV core is RWKV-4-style with data-dependent decay. Each layer carries its time-mixing
+shift, WKV memory and channel-mixing shift between calls, so one call over a clip and one
+`step` per frame give the same result, and the memory is a normalised average kept in fp32.
+The two paths agree to 2e-6 in fp32. Under bf16 they agree only to rounding (0.008 on features
+of standard deviation 1), because GPU rounding depends on how frames are batched, so driving
+runs in fp32. The April run was trained on the earlier core. Its checkpoints and the model scores above can
+only be reproduced from tag `v0.2.0-p1`.
+
 ---
 
 ## Other local runs (not reported)
