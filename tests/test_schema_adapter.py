@@ -97,6 +97,20 @@ def test_timeout_loses_its_final_stop_unless_an_excerpt(tmp_path: Path) -> None:
         assert schema_adapter.usable_frames(f) == 60
 
 
+def test_an_episode_without_usable_frames_reads_empty(tmp_path: Path) -> None:
+    from scripts.build_testbed_cache import build_episode
+
+    src = make_episode(tmp_path, version=3, n_frames=54)
+    with h5py.File(src, "r+") as f:
+        f[S.METADATA_GROUP].attrs[S.META_COLLISION_FRAME] = 53
+    cache = tmp_path / "cache" / src.name
+    cache.parent.mkdir()
+    build_episode(src, cache, height=8, width=24, quality=90, stride=2)
+    for path in (src, cache):
+        with h5py.File(path, "r") as f:
+            assert [len(a) for a in schema_adapter.read_labels(f, fps=10)] == [0, 0, 0]
+
+
 def test_invalid_nav_command_is_rejected(tmp_path: Path) -> None:
     path = make_episode(tmp_path, version=3)
     with h5py.File(path, "r+") as f:

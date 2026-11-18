@@ -52,11 +52,11 @@ On the v3 testbed training split, with 32-frame clips and the April run's stride
 | Clips | Reachable | Drawn in 50 epochs | Turning share of drawn frames |
 | --- | ---: | ---: | ---: |
 | Fixed, every 512 frames | 6.70% | 6.70% | 14.3% |
-| Random starts | 99.99% | 95.75% | 11.8% |
-| Random starts, turn-weighted | 99.99% | 90.77% | 32.5% |
-| Episode-ordered, batch 4 | — | 99.98% | 11.9% |
+| Random starts | 100.00% | 95.75% | 11.8% |
+| Random starts, turn-weighted | 100.00% | 90.77% | 32.5% |
+| Episode-ordered, batch 4 | — | 99.99% | 11.9% |
 
-The unreachable 0.01% are five episodes shorter than a clip. With the base config's
+The 63 frames no clip can reach (0.005%) are in four episodes shorter than a clip. With the base config's
 stride of 16 (85,184 clips per epoch) the weighted sampler draws 99.98% of frames.
 
 For training that carries the model's state from one clip to the next,

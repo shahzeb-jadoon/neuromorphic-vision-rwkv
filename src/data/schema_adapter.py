@@ -89,7 +89,7 @@ def _step(f: h5py.File, fps: int | None) -> int:
 
 def _rows(f: h5py.File, name: str, start: int, end: int, step: int) -> np.ndarray:
     """Signal `name` at frames [start, end), `step` rows apart."""
-    return np.asarray(f[name][start * step : (end - 1) * step + 1 : step])
+    return np.asarray(f[name][start * step : end * step : step])
 
 
 def _usable_end(f: h5py.File) -> int:
