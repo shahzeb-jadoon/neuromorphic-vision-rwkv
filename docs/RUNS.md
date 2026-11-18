@@ -238,6 +238,14 @@ mark, set before the run, is 80% and above the random-backbone control.
 
 The golden subset has too few turning frames for this check (515 frames from 10 windows).
 
+## Checkpoint selection since Phase 2
+
+`best.pt` is the checkpoint with the lowest validation `control_score`, the mean of two errors
+pooled over every scored frame: `moving_control_mae` on moving frames and `turn_control_mae` on
+moving frames with |expert steering| above 0.1. Each is the absolute error averaged over steering
+and acceleration. Burn-in, stationary and excluded frames do not count. The total loss chose the
+April checkpoint, whose steering was no better than always steering straight.
+
 ---
 
 ## Other local runs (not reported)

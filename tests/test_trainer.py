@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import csv
+import math
 from collections.abc import Iterator
 from pathlib import Path
 from typing import cast
@@ -12,7 +13,7 @@ import torch
 
 from src.data.driving_dataset import DrivingSequenceDataset
 from src.training.config import load_training_config
-from src.training.trainer import NonFiniteTraining, Trainer
+from src.training.trainer import ControlError, NonFiniteTraining, Trainer
 
 
 def make_trainer(data_dir: Path, out: Path, device: str = "cpu") -> Trainer:
@@ -90,6 +91,51 @@ def test_training_aborts_after_too_many_non_finite_steps_in_a_row(trainer: Train
     with pytest.raises(NonFiniteTraining, match="3 steps in a row"):
         trainer._train_step(poisoned)
     assert all(p.isfinite().all() for p in trainer.model.parameters())
+
+
+def test_control_error_pools_the_frames_that_count() -> None:
+    target = torch.tensor([[[0.0, 0.0], [0.5, 0.0], [0.5, 0.0], [0.5, 0.0]]])
+    errors = torch.tensor([[[0.0, 0.2], [0.4, -0.8], [0.9, 0.9], [0.9, 0.9]]])
+    # moving straight, moving turn, stationary turn, burn-in or excluded
+    weight = torch.tensor([[1.0, 1.0, 0.1, 0.0]])
+
+    error = ControlError()
+    error.add(target + errors, target, weight)
+    error.add(torch.tensor([[[0.2, 0.8]]]), torch.zeros(1, 1, 2), torch.ones(1, 1))
+
+    metrics = error.metrics()
+    assert metrics["moving_control_mae"] == pytest.approx((0.1 + 0.6 + 0.5) / 3)
+    assert metrics["turn_control_mae"] == pytest.approx(0.6)
+    assert metrics["control_score"] == pytest.approx(0.5)
+
+
+def test_control_score_without_turns_is_the_moving_error() -> None:
+    error = ControlError()
+    error.add(torch.full((1, 2, 2), 0.2), torch.zeros(1, 2, 2), torch.ones(1, 2))
+    metrics = error.metrics()
+    assert math.isnan(metrics["turn_control_mae"])
+    assert metrics["control_score"] == pytest.approx(0.2)
+
+
+def test_a_score_that_is_not_a_number_never_becomes_the_best(trainer: Trainer) -> None:
+    error = ControlError()
+    error.add(torch.zeros(1, 2, 2), torch.zeros(1, 2, 2), torch.full((1, 2), 0.1))
+    score = error.metrics()["control_score"]
+
+    assert math.isnan(score) and not trainer._is_better(score)
+    trainer.best_metric = 0.5
+    assert trainer._is_better(0.4) and not trainer._is_better(0.6)
+
+
+def test_validation_logs_the_score_that_selects_checkpoints(trainer: Trainer) -> None:
+    monitored = trainer.cfg.checkpoint.monitor_metric.split("/", maxsplit=1)[-1]
+    metrics = trainer.evaluate()
+    assert monitored == "control_score" and math.isfinite(metrics[monitored])
+
+    trainer.logger.log_metrics("val", 1, 0, metrics)
+    with trainer.logger.metrics_path.open(encoding="utf-8", newline="") as f:
+        row = next(csv.DictReader(f))
+    assert float(row["control_score"]) == pytest.approx(metrics["control_score"])
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="bf16 autocast is used on CUDA only")

@@ -80,7 +80,7 @@ checkpoint:
   save_every_steps: 1000
   save_every_epochs: 1
   keep_last_n: 1
-  monitor_metric: val/total_loss
+  monitor_metric: val/control_score
   monitor_mode: min
 
 logging:

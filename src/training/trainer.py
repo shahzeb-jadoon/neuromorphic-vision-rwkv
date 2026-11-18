@@ -25,6 +25,7 @@ from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
 
 from src.data.driving_dataset import DrivingSequenceDataset, driving_worker_init_fn
+from src.eval.metrics import TURN_THRESHOLD
 from src.models import VisionRWKVDriver
 from src.training.checkpointing import CheckpointManager, capture_rng_state, restore_rng_state
 from src.training.config import (
@@ -119,6 +120,38 @@ class NonFiniteTraining(RuntimeError):
     """Too many training steps in a row had a non-finite loss or gradient."""
 
 
+class ControlError:
+    """Mean absolute control error of moving and of turning frames, pooled over batches."""
+
+    def __init__(self) -> None:
+        self.moving_error, self.moving_frames = 0.0, 0
+        self.turning_error, self.turning_frames = 0.0, 0
+
+    def add(self, pred: torch.Tensor, target: torch.Tensor, frame_weight: torch.Tensor) -> None:
+        """Score a batch; stationary, burn-in and excluded frames do not count."""
+        error = (pred.float() - target).abs().mean(dim=-1)
+        moving = frame_weight > DrivingSequenceDataset.STATIONARY_LOSS_WEIGHT
+        turning = moving & (target[..., 0].abs() > TURN_THRESHOLD)
+        self.moving_error += float(error[moving].sum())
+        self.moving_frames += int(moving.sum())
+        self.turning_error += float(error[turning].sum())
+        self.turning_frames += int(turning.sum())
+
+    def metrics(self) -> dict[str, float]:
+        """Both errors and their mean, the score that selects checkpoints.
+
+        Without turning frames the score is the moving error; without moving frames it is NaN.
+        """
+        nan = float("nan")
+        moving = self.moving_error / self.moving_frames if self.moving_frames else nan
+        turning = self.turning_error / self.turning_frames if self.turning_frames else nan
+        return {
+            "moving_control_mae": moving,
+            "turn_control_mae": turning,
+            "control_score": 0.5 * (moving + turning) if self.turning_frames else moving,
+        }
+
+
 class CSVRunLogger:
     """CSV + TensorBoard (+ optional W&B) experiment logger."""
 
@@ -135,6 +168,9 @@ class CSVRunLogger:
         "distill_loss",
         "steer_mae",
         "accel_mae",
+        "moving_control_mae",
+        "turn_control_mae",
+        "control_score",
         "lr",
         "grad_norm",
         "rss_main_mib",
@@ -196,6 +232,9 @@ class CSVRunLogger:
             "distill_loss": metrics.get("distill_loss", float("nan")),
             "steer_mae": metrics.get("steer_mae", float("nan")),
             "accel_mae": metrics.get("accel_mae", float("nan")),
+            "moving_control_mae": metrics.get("moving_control_mae", float("nan")),
+            "turn_control_mae": metrics.get("turn_control_mae", float("nan")),
+            "control_score": metrics.get("control_score", float("nan")),
             "lr": metrics.get("lr", float("nan")),
             "grad_norm": metrics.get("grad_norm", float("nan")),
             "rss_main_mib": metrics.get("rss_main_mib", float("nan")),
@@ -484,7 +523,7 @@ class Trainer:
         return (values * frame_weight).sum() / denom
 
     def _compute_losses(
-        self, batch: dict[str, torch.Tensor]
+        self, batch: dict[str, torch.Tensor], control_error: ControlError | None = None
     ) -> tuple[torch.Tensor, dict[str, float]]:
         images = batch["images"].to(self.device, non_blocking=True)
         nav = batch["nav_command"].to(self.device, non_blocking=True)
@@ -501,6 +540,9 @@ class Trainer:
         if burn_in > 0:
             frame_weight = frame_weight.clone()
             frame_weight[:, :burn_in] = 0.0
+
+        if control_error is not None:
+            control_error.add(pred_controls.detach(), target_controls, frame_weight)
 
         control_mse = (pred_controls - target_controls).pow(2).mean(dim=-1)
         control_loss = self._masked_mean(control_mse, frame_weight)
@@ -643,6 +685,8 @@ class Trainer:
         return ckpt_path
 
     def _is_better(self, candidate: float) -> bool:
+        if not math.isfinite(candidate):
+            return False
         if self.best_metric is None:
             return True
         mode = self.cfg.checkpoint.monitor_mode
@@ -672,10 +716,11 @@ class Trainer:
 
         n_batches = 0
         max_batches = int(self.cfg.logging.val_max_batches)
+        control_error = ControlError()
         with torch.no_grad():
             for batch in self.val_loader:
                 with self._autocast():
-                    _, metrics = self._compute_losses(batch)
+                    _, metrics = self._compute_losses(batch, control_error)
                 for key, value in metrics.items():
                     agg[key] += value
                 n_batches += 1
@@ -686,6 +731,7 @@ class Trainer:
             out = {k: float("nan") for k in agg}
         else:
             out = {k: v / n_batches for k, v in agg.items()}
+        out |= control_error.metrics()
 
         if backup is not None:
             ModelEMA.restore(model, backup)
@@ -762,7 +808,8 @@ class Trainer:
                             f"  [val] step {self.global_step}  "
                             f"loss={val_metrics['total_loss']:.3f}  "
                             f"steer_mae={val_metrics['steer_mae']:.4f}  "
-                            f"accel_mae={val_metrics['accel_mae']:.4f}"
+                            f"accel_mae={val_metrics['accel_mae']:.4f}  "
+                            f"control_score={val_metrics['control_score']:.4f}"
                         )
 
                         monitor_name = self.cfg.checkpoint.monitor_metric.split("/", maxsplit=1)[-1]

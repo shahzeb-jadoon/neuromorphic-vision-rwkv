@@ -95,7 +95,7 @@ class CheckpointConfig:
     save_every_steps: int = 500
     save_every_epochs: int = 1
     keep_last_n: int = 5
-    monitor_metric: str = "val/total_loss"
+    monitor_metric: str = "val/control_score"
     monitor_mode: str = "min"  # min | max
 
 
