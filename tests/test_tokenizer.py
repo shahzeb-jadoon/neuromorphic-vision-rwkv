@@ -8,6 +8,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torchvision.models import ResNet18_Weights, resnet18
 
+from scripts.probe_turn_tokens import balanced_accuracy
 from src.models.config import TokenizerConfig
 from src.models.tokenizer import BACKBONE_CHANNELS, BACKBONE_STRIDE, VisionTokenizer
 
@@ -86,6 +87,12 @@ def test_limiting_gradients_keeps_the_tokens(tokenizer: VisionTokenizer) -> None
     with torch.no_grad():
         whole = tokenizer(images)
     assert (tokenizer(images) - whole).abs().max() < 1e-5
+
+
+def test_balanced_accuracy_weighs_both_directions_equally() -> None:
+    left = torch.tensor([True, True, True, False])
+    predicted = torch.tensor([True, True, True, True])
+    assert balanced_accuracy(predicted, left) == 0.5
 
 
 def test_pretrained_weights_reach_the_backbone(

@@ -220,6 +220,24 @@ of standard deviation 1), because GPU rounding depends on how frames are batched
 runs in fp32. The April run was trained on the earlier core. Its checkpoints and the model scores above can
 only be reproduced from tag `v0.2.0-p1`.
 
+## Visual stem since Phase 2
+
+The stem is an ImageNet ResNet-18 with frozen batch norm. Its 512×5×30 feature map is projected,
+given position codes and pooled by 8 learned queries into one token per frame. Only the last 4
+frames of a clip train the backbone; the pooling head trains on every frame.
+
+`python scripts/probe_turn_tokens.py --episodes 250` trains the pooling head alone to tell left
+turns from right on 2,522 frames of 159 testbed episodes, with mirrored copies, and scores 636
+frames of 40 held-out episodes. Scores are balanced accuracy, from one split and seed. The pass
+mark, set before the run, is 80% and above the random-backbone control.
+
+| Backbone | Training | Held-out |
+| --- | --- | --- |
+| ImageNet ResNet-18 | 100.0% | 92.5% |
+| Random ResNet-18 (control) | 97.3% | 85.8% |
+
+The golden subset has too few turning frames for this check (515 frames from 10 windows).
+
 ---
 
 ## Other local runs (not reported)
