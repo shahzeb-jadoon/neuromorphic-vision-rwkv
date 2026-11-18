@@ -225,16 +225,19 @@ class DrivingSequenceDataset(Dataset):
         # Open HDF5 files of this process, least recently used first (see driving_worker_init_fn)
         self._h5_cache: dict[int, h5py.File] = {}
 
-        # Per episode: usable frames, and which of them turn. Fixed clips every `stride`.
+        # Per episode: usable frames, which of them turn, and their navigation commands
+        # (derived from the path, see schema_adapter.commands). Fixed clips every `stride`.
         self.episode_frames: list[int] = []
         self.turning: list[np.ndarray] = []
+        self.commands: list[np.ndarray] = []
         self.clips: list[ClipKey] = []
         for ep_idx, ep_path in enumerate(self.episode_files):
             with h5py.File(ep_path, "r") as f:
                 schema_adapter.check_supported(f, ep_path.name)
-                steering = schema_adapter.read_labels(f, fps)[0]
+                steering, _, command = schema_adapter.read_labels(f, fps)
             self.episode_frames.append(len(steering))
             self.turning.append(turn_frames(steering))
+            self.commands.append(command.astype(np.int8))
             self.clips += [(ep_idx, s) for s in range(0, len(steering) - seq_len + 1, stride)]
 
         if not self.clips:
@@ -303,7 +306,7 @@ class DrivingSequenceDataset(Dataset):
                     them, resizing in uint8 before conversion to float.
                 controls: (seq_len, 2) float32 [steering, acceleration]
                     acceleration = throttle - brake  ∈ [-1, 1]
-                nav_command: (seq_len,) int64  (RoadOption values, 0-indexed)
+                nav_command: (seq_len,) int64  (RoadOption derived from the path, 0-indexed)
                 velocity: (seq_len, 3) float32  (z-score normalised)
                 loss_weight: (seq_len,) float32 — per-frame weight
                     (1.0 for moving frames, 0.1 for stationary)
@@ -332,11 +335,8 @@ class DrivingSequenceDataset(Dataset):
         acceleration = throttle - brake
         controls = torch.stack([steering, acceleration], dim=-1)
 
-        # Remap RoadOption values 1-6 → 0-5 for nn.Embedding(6, dim).
-        # Schema v3 values ∈ {1..4} (LEFT..LANEFOLLOW), extended to {1..6}
-        # with CHANGELANELEFT=5, CHANGELANERIGHT=6 via extrapolation or
-        # future expert collections.
-        nav_cmd = torch.from_numpy(w.nav_command.copy()).long() - 1
+        # The command derived from the path (RoadOption 1-6), 0-indexed for nn.Embedding(6, dim).
+        nav_cmd = torch.from_numpy(self.commands[ep_idx][start:end]).long() - 1
         velocity = torch.from_numpy(w.velocity.copy())
 
         # Per-frame loss weight: down-weight stationary frames.

@@ -164,6 +164,15 @@ class TestNormalization:
         got = train_dataset[len(train_dataset) - 1]["future_waypoints"]
         assert got.dtype == torch.float32 and np.array_equal(got.numpy(), expected)
 
+    def test_commands_are_derived_from_the_path(
+        self, train_dataset: DrivingSequenceDataset
+    ) -> None:
+        ep_idx, start = train_dataset.clips[-1]
+        with h5py.File(train_dataset.episode_files[ep_idx], "r") as f:
+            derived = schema_adapter.commands(f, train_dataset.fps)
+        got = train_dataset[len(train_dataset) - 1]["nav_command"] + 1
+        assert got.tolist() == derived[start : start + train_dataset.seq_len].tolist()
+
 
 class TestSplit:
     """Verify train/val split properties."""

@@ -5,7 +5,15 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from src.data.labels import ego_waypoints, usable_end
+from src.data.labels import (
+    LANEFOLLOW,
+    LEFT,
+    RIGHT,
+    TURN_APPROACH,
+    ego_waypoints,
+    path_commands,
+    usable_end,
+)
 
 OFFSETS = (5, 10, 15, 20)
 
@@ -67,3 +75,48 @@ def test_a_timeout_loses_its_final_stop() -> None:
     speed = np.r_[np.ones(50), np.zeros(10), np.ones(30), np.full(70, 0.05)]
     assert usable_end(speed, 20, "timeout", 0) == 90
     assert usable_end(np.zeros(40), 20, "timeout", 0) == 0
+
+
+def drive(turns: list[tuple[float, float]], step: float = 0.25) -> tuple[np.ndarray, np.ndarray]:
+    """Rows every `step` metres along straights and arcs: (length m, heading change deg)."""
+    heading = [0.0]
+    for length, change in turns:
+        n = int(round(length / step))
+        heading += list(heading[-1] + change * np.arange(1, n + 1) / n)
+    psi = np.radians(heading)
+    xy = np.cumsum(np.c_[np.cos(psi), np.sin(psi)] * step, axis=0)
+    return np.c_[xy, np.zeros(len(xy))], np.degrees(psi)
+
+
+@pytest.mark.parametrize("sign, command", [(1, RIGHT), (-1, LEFT)])
+def test_a_junction_turn_is_announced_until_it_ends(sign: int, command: int) -> None:
+    arc = np.pi / 2 * 10  # 90 degrees at a 10 m radius
+    position, yaw = drive([(60, 0), (arc, sign * 90), (60, 0)])
+    s = np.arange(len(yaw)) * 0.25
+    got = path_commands(position, yaw)
+    turn_end = 60 + arc
+    assert set(got[(s > 60 - TURN_APPROACH + 2) & (s < turn_end - 1)]) == {command}
+    assert set(got[(s < 60 - TURN_APPROACH - 3) | (s > turn_end + 3)]) == {LANEFOLLOW}
+
+
+def test_a_road_curve_is_lane_following() -> None:
+    position, yaw = drive([(40, 0), (np.pi / 3 * 60, 60), (40, 0)])  # 60 degrees, 60 m radius
+    assert set(path_commands(position, yaw)) == {LANEFOLLOW}
+
+
+def test_waiting_before_a_turn_keeps_its_command() -> None:
+    position, yaw = drive([(60, 0), (np.pi / 2 * 10, -90), (40, 0)])
+    wait = int(
+        (60 - TURN_APPROACH / 2) / 0.25
+    )  # stand still for 400 rows halfway along the approach
+    position = np.insert(position, wait, np.repeat(position[wait : wait + 1], 400, axis=0), axis=0)
+    yaw = np.insert(yaw, wait, np.full(400, yaw[wait]))
+    assert set(path_commands(position, yaw)[wait : wait + 400]) == {LEFT}
+
+
+def test_close_turns_the_same_way_share_one_command() -> None:
+    arc = np.pi / 2 * 10
+    position, yaw = drive([(60, 0), (arc, -90), (35, 0), (arc, -90), (60, 0)])
+    s = np.arange(len(yaw)) * 0.25
+    got = path_commands(position, yaw)
+    assert set(got[(s > 60 - TURN_APPROACH + 2) & (s < 60 + 2 * arc + 35 - 1)]) == {LEFT}

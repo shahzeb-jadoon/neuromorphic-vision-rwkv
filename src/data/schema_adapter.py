@@ -14,8 +14,10 @@ stored images): frame k is signal row k * (recorded fps / `fps`). Labels therefo
 from the full-rate signals at the instants of the frames read, whether the images are
 raw or cached. Images are resized in uint8, one frame at a time; cached JPEGs first
 decode at the smallest DCT scale that covers the requested size. Only an episode's usable
-frames (src.data.labels.usable_end) are read for training, and a nav command outside
-RoadOption 1-6 there is an error, never clamped.
+frames (src.data.labels.usable_end) are read for training. The navigation command is
+derived from the path driven (src.data.labels.path_commands), since the recorded one can
+end before the turn it announces; a recorded command outside RoadOption 1-6 is still an
+error, never clamped, as it marks a corrupt file.
 """
 
 from __future__ import annotations
@@ -46,7 +48,7 @@ class Window:
     steering: np.ndarray  # (T,) float32
     throttle: np.ndarray  # (T,) float32
     brake: np.ndarray  # (T,) float32
-    nav_command: np.ndarray  # (T,) RoadOption 1..6
+    nav_command: np.ndarray  # (T,) RoadOption 1..6 as recorded; training uses commands()
     velocity: np.ndarray  # (T, 3) float32, m/s, world frame
     target_speed: np.ndarray  # (T,) float32, km/h
     driving_mode: np.ndarray  # (T,) DrivingMode 1..8
@@ -127,6 +129,12 @@ def nav_commands(f: h5py.File, fps: int | None = None) -> np.ndarray:
     return nav[:: _step(f, fps)]
 
 
+def commands(f: h5py.File, fps: int | None = None) -> np.ndarray:
+    """Navigation command (RoadOption) of every usable frame, from the path driven."""
+    every_row = labels.path_commands(f[S.POSITION][()], f[S.ROTATION][:, 1])
+    return every_row[: _usable_end(f) : _step(f, fps)]
+
+
 def _decode(jpeg: np.ndarray, size: tuple[int, int] | None) -> np.ndarray:
     """A cached JPEG as (H, W, 3) uint8, decoded at the smallest DCT scale (1, 1/2, 1/4 or
     1/8) that is still at least `size` (height, width)."""
@@ -190,8 +198,10 @@ def read_window(
 
 
 def read_labels(f: h5py.File, fps: int | None = None) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Steering, acceleration (throttle - brake) and nav command over the usable frames."""
-    nav = nav_commands(f, fps)
+    """Steering, acceleration (throttle - brake) and navigation command (`commands`) over
+    the usable frames; raises on a recorded command outside RoadOption 1-6."""
+    nav_commands(f)
+    nav = commands(f, fps)
     step, n = _step(f, fps), len(nav)
     steering = _rows(f, S.STEERING, 0, n, step)
     acceleration = _rows(f, S.THROTTLE, 0, n, step) - _rows(f, S.BRAKE, 0, n, step)

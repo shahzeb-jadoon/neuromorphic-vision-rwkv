@@ -49,7 +49,8 @@ def scan_episode(path: Path) -> dict[str, Any]:
         with h5py.File(path, "r") as f:
             images = f[S.IMAGES]
             n_usable = schema_adapter.usable_frames(f)
-            steering, _, nav = schema_adapter.read_labels(f)
+            steering = schema_adapter.read_labels(f)[0]
+            nav = schema_adapter.nav_commands(f)
             nonfinite = 0
             for name, ds in f.items():
                 if isinstance(ds, h5py.Dataset) and name != S.IMAGES and ds.dtype.kind == "f":

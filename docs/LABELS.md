@@ -13,7 +13,7 @@ A 20 Hz recording and its 10 Hz training cache therefore give identical targets.
 | Target | Definition |
 | --- | --- |
 | `controls` | Steering in [−1, 1] and acceleration = throttle − brake in [−1, 1], as the expert applied them |
-| `nav_command` | RoadOption 1–6 minus one: LEFT 0, RIGHT 1, STRAIGHT 2, LANEFOLLOW 3, CHANGELANELEFT 4, CHANGELANERIGHT 5. Any other value is an error, never clamped |
+| `nav_command` | RoadOption minus one, derived from the path driven ([below](#navigation-commands)): LEFT 0, RIGHT 1, LANEFOLLOW 3; STRAIGHT (2) and the lane changes (4, 5) do not occur. A recorded command outside 1–6 is still an error, never clamped |
 | `future_waypoints` | Positions 5, 10, 15 and 20 frames (0.5–2 s) ahead, in the vehicle's frame at that frame: x forward, y to the right, metres |
 | `target_speed` | The expert's target speed divided by 120 km/h |
 | `driving_mode` | The expert's mode 1–8 minus one; the v6 YieldStop is folded into StopSignStop |
@@ -35,6 +35,27 @@ Clips are taken only from an episode's usable frames:
 
 On the v3 dataset these rules drop 5.3% of frames: 183,966 stuck frames and 9,021 around
 collisions.
+
+## Navigation commands
+
+The recorded commands of v3 often end before the turn they announce
+([DATA_V3.md](DATA_V3.md#known-limitations)), so training derives the command from the
+path the vehicle drove (`path_commands` in `labels.py`). Along the distance travelled, a
+turn is a stretch curving one way by at least 1°/m that peaks above 3°/m (a radius under
+19 m) and changes the heading by 45° or more: v3's junction turns peak near 6°/m, its road
+curves below 2°/m. The command is LEFT or RIGHT from 30 m before a turn until the turn
+ends, and LANEFOLLOW elsewhere; turns the same way whose commands would come within 10 m
+share one. Measured along the distance travelled, a command holds however long the
+vehicle waits before its turn.
+
+Going straight through a junction cannot be told from following the lane, so STRAIGHT
+becomes LANEFOLLOW. At driving time the agent has to derive its command the same way,
+from the planned route: `path_commands` takes any path with headings.
+
+On every recorded row of v3, the derived commands start where the recorded ones do (median
+1 m later: the expert also announced turns about 30 m ahead) but last until the turn
+ends. While moving, LANEFOLLOW covers 6.7% of the frames that steer by 0.5 or more instead
+of 32.7%, and 97.4% of the turning frames under a derived turn command steer its way.
 
 ## Clip sampling
 
