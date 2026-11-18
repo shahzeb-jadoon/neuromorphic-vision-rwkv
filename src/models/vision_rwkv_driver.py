@@ -9,6 +9,7 @@ Composes:
 Input:
     images:      (B, T, 3, H, W)  — RGB camera frames
     nav_command: (B, T)            — navigation command per frame (0-5)
+    speed:       (B, T)            — normalised ego speed per frame
     state:       optional TemporalState — recurrent hidden state
 
 Output:
@@ -118,7 +119,7 @@ class VisionRWKVDriver(nn.Module):
     This is the top-level model that chains:
     1. VisionTokenizer:  images → one token per frame
     2. TemporalCore:     frame tokens → temporal features
-    3. NavigationFusion: temporal features + nav → fused features
+    3. NavigationFusion: temporal features + nav + speed → fused features
     4. PolicyHead:       fused features → control predictions
     5. Auxiliary heads:  fused features → speed, mode, waypoint predictions
 
@@ -145,6 +146,7 @@ class VisionRWKVDriver(nn.Module):
         self,
         images: torch.Tensor,
         nav_command: torch.Tensor,
+        speed: torch.Tensor,
         state: TemporalState | None = None,
     ) -> tuple[torch.Tensor, TemporalState, dict[str, torch.Tensor]]:
         """End-to-end forward pass from images to controls.
@@ -152,6 +154,7 @@ class VisionRWKVDriver(nn.Module):
         Args:
             images:      (B, T, 3, H, W) RGB camera frames, normalized [0, 1].
             nav_command: (B, T) integer navigation commands (0=follow, 1=left, etc.).
+            speed:       (B, T) ego speed, normalised as in the dataset's `speed` field.
             state:       Optional recurrent state from previous forward call.
                          If None, initialized to zeros.
 
@@ -165,7 +168,7 @@ class VisionRWKVDriver(nn.Module):
         """
         tokens = self.tokenizer(images)
         features, new_state = self.encoder(tokens, state)
-        fused = self.fusion(features, nav_command)
+        fused = self.fusion(features, nav_command, speed)
         controls = self.policy_head(fused)
 
         aux: dict[str, torch.Tensor] = {
@@ -180,10 +183,13 @@ class VisionRWKVDriver(nn.Module):
         self,
         image: torch.Tensor,
         nav_command: torch.Tensor,
+        speed: torch.Tensor,
         state: TemporalState | None = None,
     ) -> tuple[torch.Tensor, TemporalState, dict[str, torch.Tensor]]:
-        """`forward` for one frame: (B, 3, H, W) and (B), with no time axis in the outputs."""
-        controls, state, aux = self(image.unsqueeze(1), nav_command.unsqueeze(1), state)
+        """`forward` for one frame: (B, 3, H, W), (B) and (B), with no time axis in the outputs."""
+        controls, state, aux = self(
+            image.unsqueeze(1), nav_command.unsqueeze(1), speed.unsqueeze(1), state
+        )
         return controls.squeeze(1), state, {k: v.squeeze(1) for k, v in aux.items()}
 
     def initial_state(self, batch_size: int, device: torch.device | None = None) -> TemporalState:

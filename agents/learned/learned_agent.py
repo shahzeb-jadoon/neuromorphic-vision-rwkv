@@ -41,6 +41,7 @@ try:
 except ImportError:
     CARLA_AVAILABLE = False
 
+from src.data.driving_dataset import MAX_SPEED_MS
 from src.models import VisionRWKVDriver
 from src.training.config import load_training_config
 
@@ -311,7 +312,11 @@ class LearnedAgent:
         images = self._preprocess(panoramic)                              # (1, 1, 3, H, W)
         nav_cmd = torch.tensor([[nav_cmd_idx]], device=self.device)       # (1, 1)
 
-        controls, self.state, _ = self.model(images, nav_cmd, self.state)
+        vel = self.vehicle.get_velocity()
+        speed_norm = float(np.hypot(vel.x, vel.y)) / MAX_SPEED_MS
+        speed = torch.tensor([[speed_norm]], device=self.device)          # (1, 1)
+
+        controls, self.state, _ = self.model(images, nav_cmd, speed, self.state)
 
         steer = float(controls[0, 0, 0])
         accel = float(controls[0, 0, 1])
@@ -322,7 +327,6 @@ class LearnedAgent:
         # Minimum speed nudge: prevent getting permanently stuck.
         # The model was trained on expert data that never sat still deliberately,
         # so it may output near-zero accel when stationary at green lights.
-        vel = self.vehicle.get_velocity()
         speed_kmh = (vel.x**2 + vel.y**2 + vel.z**2) ** 0.5 * 3.6
         if speed_kmh < self.min_speed_kmh and brake < 0.05:
             throttle = max(throttle, 0.15)

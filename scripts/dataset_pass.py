@@ -51,6 +51,7 @@ def problems(sample: dict[str, torch.Tensor], seq_len: int) -> list[str]:
         "controls": (t, 2),
         "nav_command": (t,),
         "velocity": (t, 3),
+        "speed": (t,),
         "loss_weight": (t,),
         "target_speed": (t,),
         "driving_mode": (t,),

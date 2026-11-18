@@ -140,7 +140,7 @@ def main() -> None:
 
         imgs = torch.randn(2, 4, 3, H, W, device=device)
         nav = torch.zeros(2, 4, dtype=torch.long, device=device)
-        out, _, _ = model(imgs, nav)
+        out, _, _ = model(imgs, nav, torch.zeros(2, 4, device=device))
         assert out.shape == (2, 4, 2), f"unexpected shape {out.shape}"
         print(f"  {ok} forward pass on {device} — output shape {tuple(out.shape)}")
     except Exception as e:

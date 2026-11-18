@@ -17,7 +17,10 @@ import torch
 from src.data import driving_dataset, labels, schema_adapter
 from src.data import hdf5_schema as S
 from src.data.driving_dataset import (
+    MAX_SPEED_MS,
     TURN_WEIGHT,
+    VELOCITY_MEAN,
+    VELOCITY_STD,
     WAYPOINT_OFFSETS,
     DrivingSequenceDataset,
     EpisodeOrderedSampler,
@@ -74,6 +77,15 @@ class TestDatasetShapes:
     def test_velocity_shape(self, train_dataset: DrivingSequenceDataset) -> None:
         item = train_dataset[0]
         assert item["velocity"].shape == (16, 3)
+
+    def test_speed_is_the_normalised_horizontal_speed(
+        self, train_dataset: DrivingSequenceDataset
+    ) -> None:
+        item = train_dataset[0]
+        velocity = item["velocity"] * VELOCITY_STD + VELOCITY_MEAN
+        expected = velocity[:, :2].norm(dim=-1) / MAX_SPEED_MS
+        assert item["speed"].shape == (16,)
+        assert torch.allclose(item["speed"], expected, atol=1e-5)
 
     def test_images_shape_with_resize(self, toy_data_dir: Path) -> None:
         ds = DrivingSequenceDataset(

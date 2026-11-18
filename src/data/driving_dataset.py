@@ -43,6 +43,9 @@ VELOCITY_STD = torch.tensor([4.864434, 3.784082, 0.128879])
 # To recover km/h at inference: speed_pred_kmh = model_output * MAX_SPEED_KMH
 MAX_SPEED_KMH: float = 120.0
 
+# The model's ego speed input is the horizontal speed in m/s divided by this.
+MAX_SPEED_MS: float = MAX_SPEED_KMH / 3.6
+
 # Every episode is read at this frame rate, the rate of the cached and v7 images.
 FPS = 10
 
@@ -317,6 +320,7 @@ class DrivingSequenceDataset(Dataset):
                     acceleration = throttle - brake  ∈ [-1, 1]
                 nav_command: (seq_len,) int64  (RoadOption derived from the path, 0-indexed)
                 velocity: (seq_len, 3) float32  (z-score normalised)
+                speed: (seq_len,) float32  (horizontal speed / MAX_SPEED_MS, a model input)
                 loss_weight: (seq_len,) float32 — per-frame weight
                     (1.0 for moving frames, 0.1 for stationary, 0 for frames kept out
                     of the loss: labels.misplaced_stops)
@@ -392,6 +396,7 @@ class DrivingSequenceDataset(Dataset):
             "controls": controls,
             "nav_command": nav_cmd,
             "velocity": velocity,
+            "speed": speed / MAX_SPEED_MS,
             "loss_weight": loss_weight,
             "target_speed": target_speed_t,
             "driving_mode": driving_mode_t,

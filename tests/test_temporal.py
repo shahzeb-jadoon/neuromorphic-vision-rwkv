@@ -103,11 +103,14 @@ def test_memory_changes_the_output(core: TemporalCore) -> None:
 def test_driver_one_call_equals_stepping_every_frame(driver: VisionRWKVDriver) -> None:
     images = torch.rand(2, FRAMES, 3, 32, 64)
     commands = torch.randint(0, 6, (2, FRAMES))
-    controls, _, aux = driver(images, commands)
+    speed = torch.rand(2, FRAMES)
+    controls, _, aux = driver(images, commands, speed)
 
     state = None
     for t in range(FRAMES):
-        step_controls, state, step_aux = driver.step(images[:, t], commands[:, t], state)
+        step_controls, state, step_aux = driver.step(
+            images[:, t], commands[:, t], speed[:, t], state
+        )
         assert (controls[:, t] - step_controls).abs().max() < TOLERANCE
         assert all((aux[k][:, t] - v).abs().max() < TOLERANCE for k, v in step_aux.items())
 

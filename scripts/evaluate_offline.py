@@ -46,8 +46,10 @@ def collect(
         for batch in tqdm(loader, desc="validation batches"):
             images = batch["images"].to(device)
             nav = batch["nav_command"].to(device)
-            pred, _, _ = model(images, nav)
-            mirrored, _, _ = model(images.flip(-1), nav)  # also swaps the left and right panels
+            speed = batch["speed"].to(device)
+            pred, _, _ = model(images, nav, speed)
+            # flipping also swaps the left and right panels
+            mirrored, _, _ = model(images.flip(-1), nav, speed)
             weight = batch["loss_weight"].clone()
             weight[:, :burn_in] = 0.0
             parts["pred"].append(pred.cpu().numpy())

@@ -96,9 +96,9 @@ def test_training_aborts_after_too_many_non_finite_steps_in_a_row(trainer: Train
 def test_training_runs_in_bf16(toy_data_dir: Path, tmp_path: Path) -> None:
     t = make_trainer(toy_data_dir, tmp_path, "cuda")
     batch = next(iter(t.train_loader))
-    images, nav = batch["images"].cuda(), batch["nav_command"].cuda()
+    images, nav, speed = batch["images"].cuda(), batch["nav_command"].cuda(), batch["speed"].cuda()
     with t._autocast():
-        controls, _, _ = t.model(images, nav)
+        controls, _, _ = t.model(images, nav, speed)
     assert controls.dtype == torch.bfloat16
     assert t._train_step(batch) is not None
     t.logger.close()

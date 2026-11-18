@@ -46,6 +46,8 @@ model:
     visual_dim: 64
     nav_embed_dim: 16
     n_nav_commands: 6
+    speed_embed_dim: 16
+    speed_dropout: 0.5
     fused_dim: 64
     dropout: 0.0
   policy_head:

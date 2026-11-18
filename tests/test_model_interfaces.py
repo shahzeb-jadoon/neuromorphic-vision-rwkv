@@ -10,6 +10,8 @@ Verifies that:
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 import pytest
 import torch
 
@@ -150,7 +152,7 @@ class TestNavigationFusion:
         module = NavigationFusion(config)
         visual = torch.randn(1, 4, config.visual_dim)
         nav = torch.zeros(1, 4, dtype=torch.long)
-        out = module(visual, nav)
+        out = module(visual, nav, torch.zeros(1, 4))
         assert out.shape == (1, 4, config.fused_dim)
 
     def test_fusion_nav_embedding_size(self) -> None:
@@ -158,6 +160,52 @@ class TestNavigationFusion:
         module = NavigationFusion(config)
         assert module.nav_embedding.num_embeddings == 5
         assert module.nav_embedding.embedding_dim == 64
+
+    def test_fusion_refuses_a_speed_of_the_wrong_shape(self) -> None:
+        config = FusionConfig(visual_dim=8, fused_dim=8)
+        nav = torch.zeros(1, 4, dtype=torch.long)
+        with pytest.raises(ValueError, match="speed must be"):
+            NavigationFusion(config)(torch.randn(1, 4, 8), nav, torch.zeros(1, 4, 1))
+
+
+class TestSpeedDropout:
+    """Training hides the ego speed from whole clips; driving always sees it."""
+
+    @staticmethod
+    def fuse(
+        p: float, training: bool, speed: torch.Tensor, clips: int = 400
+    ) -> tuple[NavigationFusion, torch.Tensor]:
+        torch.manual_seed(0)
+        config = FusionConfig(visual_dim=8, nav_embed_dim=4, fused_dim=8, dropout=0.0)
+        module = NavigationFusion(replace(config, speed_dropout=p)).train(training)
+        visual = torch.randn(clips, 6, 8)
+        return module, module(visual, torch.zeros(clips, 6, dtype=torch.long), speed)
+
+    def test_speed_reaches_the_output_when_shown(self) -> None:
+        _, slow = self.fuse(0.0, True, torch.zeros(400, 6))
+        _, fast = self.fuse(0.0, True, torch.ones(400, 6))
+        assert (slow - fast).abs().max() > 1e-3
+
+    def test_hidden_speed_cannot_reach_the_output(self) -> None:
+        _, slow = self.fuse(1.0, True, torch.zeros(400, 6))
+        _, fast = self.fuse(1.0, True, torch.ones(400, 6))
+        assert torch.equal(slow, fast)
+
+    def test_driving_never_hides_the_speed(self) -> None:
+        _, shown = self.fuse(0.0, False, torch.ones(400, 6))
+        _, driving = self.fuse(1.0, False, torch.ones(400, 6))
+        assert torch.equal(shown, driving)
+
+    def test_about_half_of_the_clips_hide_it_for_all_their_frames(self) -> None:
+        speed = torch.ones(400, 6)
+        _, hidden = self.fuse(1.0, True, speed)
+        _, shown = self.fuse(0.0, True, speed)
+        _, mixed = self.fuse(0.5, True, speed)
+
+        is_hidden = (mixed == hidden).all(-1)
+        is_shown = (mixed == shown).all(-1)
+        assert (is_hidden.all(1) ^ is_shown.all(1)).all()
+        assert 0.4 < is_hidden.all(1).float().mean() < 0.6
 
 
 # ── Policy Head tests ────────────────────────────────────────────────
@@ -211,7 +259,7 @@ class TestVisionRWKVDriver:
         model = VisionRWKVDriver(ModelConfig())
         images = torch.randn(1, 4, 3, 320, 1920)
         nav = torch.zeros(1, 4, dtype=torch.long)
-        controls, state, aux = model(images, nav)
+        controls, state, aux = model(images, nav, torch.zeros(1, 4))
         assert controls.shape == (1, 4, 2)
         assert len(state) == model.config.encoder.n_layers * STATE_PARTS
         assert "speed" in aux and "mode_logits" in aux and "future_waypoints" in aux

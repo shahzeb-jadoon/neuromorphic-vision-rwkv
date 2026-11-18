@@ -17,6 +17,7 @@ A 20 Hz recording and its 10 Hz training cache therefore give identical targets.
 | `target_point` | The path 30 m ahead, in the vehicle's frame: x forward, y to the right, metres ([below](#target-point)); an input, not a target |
 | `future_waypoints` | Positions 5, 10, 15 and 20 frames (0.5–2 s) ahead, in the vehicle's frame at that frame: x forward, y to the right, metres |
 | `waypoint_mask` | False where a waypoint lies past the end of the recording, so is clamped to its last position: such waypoints are left out of the waypoint loss, while the frame's other targets stay. In v3 these are the last 2 s of the 684 completed episodes, which stop at the frame budget mid-drive: 13,680 frames (0.8%) |
+| `speed` | The vehicle's horizontal speed divided by 120 km/h; an input, not a target. Training hides it from half of the clips, which see a learned "unknown speed" instead |
 | `target_speed` | The expert's target speed divided by 120 km/h |
 | `driving_mode` | The expert's mode 1–8 minus one; the v6 YieldStop is folded into StopSignStop |
 | `situation` | Which of eleven situations hold, several at once: junctions, turning, red lights, stop signs, and vehicles and pedestrians in the path ([below](#situations)) |
