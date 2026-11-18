@@ -64,6 +64,30 @@ def test_training_does_not_change_batch_norm(tokenizer: VisionTokenizer) -> None
     assert buffers and all(torch.equal(v, buffers[k]) for k, v in tokenizer.named_buffers())
 
 
+def test_only_the_last_frames_train_the_backbone(tokenizer: VisionTokenizer) -> None:
+    images = torch.randn(1, 6, 3, H, W, requires_grad=True)
+    tokenizer(images).sum().backward()
+    assert images.grad is not None
+    reach = images.grad.abs().flatten(2).sum(dim=2)[0]
+    last = tokenizer.config.grad_frames
+    assert (reach[:-last] == 0).all() and (reach[-last:] > 0).all()
+
+
+def test_early_frames_still_train_the_pooling(tokenizer: VisionTokenizer) -> None:
+    tokenizer(torch.randn(1, 6, 3, H, W))[:, 0].sum().backward()
+    assert tokenizer.to_frame.weight.grad is not None
+    assert tokenizer.to_frame.weight.grad.abs().sum() > 0
+    backbone_grad = next(tokenizer.backbone.parameters()).grad
+    assert backbone_grad is None or not backbone_grad.any()
+
+
+def test_limiting_gradients_keeps_the_tokens(tokenizer: VisionTokenizer) -> None:
+    images = torch.randn(2, 6, 3, H, W)
+    with torch.no_grad():
+        whole = tokenizer(images)
+    assert (tokenizer(images) - whole).abs().max() < 1e-5
+
+
 def test_pretrained_weights_reach_the_backbone(
     tokenizer: VisionTokenizer, monkeypatch: pytest.MonkeyPatch
 ) -> None:

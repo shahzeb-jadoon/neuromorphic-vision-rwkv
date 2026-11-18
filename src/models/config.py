@@ -26,6 +26,7 @@ class TokenizerConfig:
     pretrained: bool = True  # start training from the ImageNet weights
     n_queries: int = 8  # learned queries that pool the feature map
     n_heads: int = 4  # attention heads of the pooling
+    grad_frames: int = 4  # last frames of a clip whose gradients reach the backbone
 
 
 @dataclass

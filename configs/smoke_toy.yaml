@@ -35,6 +35,7 @@ model:
     pretrained: false
     n_queries: 8
     n_heads: 4
+    grad_frames: 4
   encoder:
     core: rwkv
     embed_dim: 64

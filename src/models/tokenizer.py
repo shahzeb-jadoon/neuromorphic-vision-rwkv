@@ -97,7 +97,18 @@ class VisionTokenizer(nn.Module):
             raise ValueError(f"VisionTokenizer expected 5D input, got shape {tuple(images.shape)}")
 
         batch, steps = images.shape[:2]
-        return self.pool_features(self.backbone(images.flatten(0, 1))).view(batch, steps, -1)
+        return self.pool_features(self._backbone_features(images)).view(batch, steps, -1)
+
+    def _backbone_features(self, images: torch.Tensor) -> torch.Tensor:
+        """Features of every frame; only each clip's last frames train the backbone."""
+        batch, steps = images.shape[:2]
+        frozen = steps - self.config.grad_frames
+        if frozen <= 0 or not torch.is_grad_enabled():
+            return cast(torch.Tensor, self.backbone(images.flatten(0, 1)))
+        with torch.no_grad():
+            early = self.backbone(images[:, :frozen].flatten(0, 1)).unflatten(0, (batch, frozen))
+        late = self.backbone(images[:, frozen:].flatten(0, 1)).unflatten(0, (batch, steps - frozen))
+        return torch.cat([early, late], dim=1).flatten(0, 1)
 
     def pool_features(self, features: torch.Tensor) -> torch.Tensor:
         """(N, 512, rows, cols) backbone features to (N, embed_dim) frame tokens."""
