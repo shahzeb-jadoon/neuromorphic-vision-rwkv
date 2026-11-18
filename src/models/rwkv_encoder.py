@@ -18,13 +18,11 @@ Architecture per block:
      - Output: W_o(y_t)
   2. Channel-mixing: squared-ReLU gated FFN with its own token shift.
 
-Carried state per layer: (B, embed_dim) — the "shift state" (last-position
-pre-LN hidden vector).  It seeds the token-shift at the first position of
-the next forward call, preserving local context across clip boundaries.
-
-The WKV running sum s resets to zero at each forward call.  Full cross-clip
-WKV state carry can be added later (TBPTT upgrade) without changing the
-public API; the state argument would become a 2-tuple per layer.
+Carried state per layer, so that how a sequence is cut into calls does not
+change the output:
+  - time-mixing shift: the last normalised input of the previous call,
+  - WKV: the running sum s,
+  - channel-mixing shift: the last normalised input of its own token shift.
 
 References:
   RWKV-4: Peng et al., 2023 (arXiv:2305.13048)
@@ -33,7 +31,7 @@ References:
 
 Input:  (B, T, embed_dim) — per-frame tokens
 Output: (B, T, embed_dim) — per-frame feature vectors
-State:  list[Tensor(B, embed_dim)] — one shift-state tensor per layer
+State:  list[Tensor(B, embed_dim)] — three tensors per layer
 """
 
 from __future__ import annotations
@@ -44,15 +42,13 @@ import torch.nn as nn
 from src.models.config import RWKVEncoderConfig
 from src.models.temporal import TemporalCore, TemporalState
 
-# Type alias: one (B, D) shift-state tensor per encoder layer.
+# Three (B, D) tensors per encoder layer: time-mixing shift, WKV sum, channel-mixing shift.
 RWKVState = TemporalState
+STATE_PARTS = 3
 
 
 class RWKVBlock(nn.Module):
     """Single RWKV-6 block: token-shifted time-mixing + channel-mixing.
-
-    State carried across clips is the shift state — the last-position
-    pre-LN hidden vector used to seed the lerp at t=0 of the next clip.
 
     Args:
         config:    RWKV encoder configuration.
@@ -104,22 +100,25 @@ class RWKVBlock(nn.Module):
 
         self.dropout = nn.Dropout(config.dropout)
 
+    def initial_state(self, batch_size: int, device: torch.device) -> RWKVState:
+        """Zeros for the time-mixing shift, the WKV sum and the channel-mixing shift."""
+        size = (batch_size, self.config.embed_dim)
+        return [torch.zeros(size, device=device) for _ in range(STATE_PARTS)]
+
     def forward(
         self,
         x: torch.Tensor,
-        state: torch.Tensor | None = None,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
+        state: RWKVState | None = None,
+    ) -> tuple[torch.Tensor, RWKVState]:
         """Process a clip through this RWKV-6 block.
 
         Args:
             x:     (B, T, D) token sequence for this clip.
-            state: (B, D) shift-state from the previous forward call,
-                   or None to start from zeros.
+            state: This layer's state after the previous call, or None to start from zeros.
 
         Returns:
             output:    (B, T, D) processed tokens.
-            new_state: (B, D) shift-state for the next forward call
-                       (the last-position pre-LN hidden vector).
+            new_state: This layer's state after the last frame.
         """
         if x.ndim != 3:
             raise ValueError(f"RWKVBlock expected 3D input, got shape {tuple(x.shape)}")
@@ -128,16 +127,14 @@ class RWKVBlock(nn.Module):
         device, dtype = x.device, x.dtype
 
         if state is None:
-            state = torch.zeros(B, D, device=device, dtype=dtype)
-        if state.shape != (B, D):
-            raise ValueError(f"state shape mismatch: expected {(B, D)}, got {tuple(state.shape)}")
+            state = self.initial_state(B, device)
+        time_shift, s, channel_shift = state
 
         # ── Time-mixing ──────────────────────────────────────────────
         h = self.ln1(x)
 
-        # Token shift: prepend carried state as the virtual t=-1 token.
-        # h_prev[b, 0, :] = state[b, :],  h_prev[b, t, :] = h[b, t-1, :]  for t > 0
-        h_prev = torch.cat([state.unsqueeze(1), h[:, :-1, :]], dim=1)  # (B, T, D)
+        # Token shift: prepend the carried token as the virtual t=-1 token.
+        h_prev = torch.cat([time_shift.to(h.dtype).unsqueeze(1), h[:, :-1, :]], dim=1)  # (B, T, D)
 
         # RWKV-6: separate lerp for each projection input.
         # lerp_r ∈ ℝ^D is unconstrained; optimizer keeps it near reasonable values.
@@ -157,12 +154,12 @@ class RWKVBlock(nn.Module):
         w = torch.exp(-torch.exp((self.W_w(xw) + self.w_log).float())).to(dtype)  # (B, T, D)
 
         # WKV recurrence — sequential over the T dimension.
-        # s: (B, D) running exponentially-decayed sum (resets each forward call).
+        # s: (B, D) running exponentially-decayed sum, carried across calls.
         # y_t = r_t * (bonus * k_t * v_t + s_{t-1})
         # s_t =  w_t * s_{t-1} + k_t * v_t
         ek = torch.exp(k.float()).to(dtype)  # key: cast to fp32 to prevent overflow
         eu = torch.exp(self.u.float()).to(dtype)  # bonus: same reason
-        s = torch.zeros(B, D, device=device, dtype=dtype)
+        s = s.to(dtype)
         y_parts: list[torch.Tensor] = []
         for t in range(T):
             wt = w[:, t, :]
@@ -176,13 +173,9 @@ class RWKVBlock(nn.Module):
         time_out = self.W_o(torch.stack(y_parts, dim=1))  # (B, T, D)
         x = x + self.dropout(time_out)
 
-        # Shift state for the next forward call.
-        new_state = h[:, -1, :]  # (B, D) — last pre-LN hidden, not detached;
-        # callers can .detach() when implementing TBPTT clip boundaries.
-
         # ── Channel-mixing ───────────────────────────────────────────
         h2 = self.ln2(x)
-        h2_prev = torch.cat([state.unsqueeze(1), h2[:, :-1, :]], dim=1)
+        h2_prev = torch.cat([channel_shift.to(h2.dtype).unsqueeze(1), h2[:, :-1, :]], dim=1)
 
         xk2 = h2 + (h2_prev - h2) * self.lerp_cm_k
         xr2 = h2 + (h2_prev - h2) * self.lerp_cm_r
@@ -192,7 +185,7 @@ class RWKVBlock(nn.Module):
         channel_out = r2 * self.W_cm_v(k2)
         x = x + self.dropout(channel_out)
 
-        return x, new_state
+        return x, [h[:, -1, :], s, h2[:, -1, :]]
 
 
 class RWKVEncoder(TemporalCore):
@@ -211,19 +204,8 @@ class RWKVEncoder(TemporalCore):
         self.ln_out = nn.LayerNorm(config.embed_dim)
 
     def initial_state(self, batch_size: int, device: torch.device) -> RWKVState:
-        """Zero-initialised shift-state for all layers.
-
-        Args:
-            batch_size: Number of sequences B.
-            device:     Target device.
-
-        Returns:
-            List of N_layers zero tensors, each (B, embed_dim).
-        """
-        return [
-            torch.zeros(batch_size, self.config.embed_dim, device=device)
-            for _ in range(self.config.n_layers)
-        ]
+        """State at the start of a sequence, `STATE_PARTS` tensors per layer."""
+        return [part for block in self.blocks for part in block.initial_state(batch_size, device)]
 
     def forward(
         self,
@@ -234,11 +216,11 @@ class RWKVEncoder(TemporalCore):
 
         Args:
             x:     (B, T, embed_dim) per-frame tokens.
-            state: Per-layer shift states, or None for zero initialisation.
+            state: State after the previous call, or None to start a sequence.
 
         Returns:
             features:  (B, T, embed_dim) per-frame feature vectors.
-            new_state: Updated per-layer shift states.
+            new_state: State after the last frame.
         """
         if x.ndim != 3:
             raise ValueError(f"RWKVEncoder expected 3D input, got shape {tuple(x.shape)}")
@@ -249,15 +231,14 @@ class RWKVEncoder(TemporalCore):
 
         if state is None:
             state = self.initial_state(batch, x.device)
-        if len(state) != len(self.blocks):
-            raise ValueError(
-                f"state length mismatch: expected {len(self.blocks)}, got {len(state)}"
-            )
+        expected = STATE_PARTS * len(self.blocks)
+        if len(state) != expected:
+            raise ValueError(f"state length mismatch: expected {expected}, got {len(state)}")
 
         hidden = x
-        new_states: RWKVState = []
-        for block, block_state in zip(self.blocks, state):
-            hidden, next_state = block(hidden, block_state)
-            new_states.append(next_state)
+        new_state: RWKVState = []
+        for i, block in enumerate(self.blocks):
+            hidden, layer_state = block(hidden, state[STATE_PARTS * i : STATE_PARTS * (i + 1)])
+            new_state.extend(layer_state)
 
-        return self.ln_out(hidden), new_states
+        return self.ln_out(hidden), new_state

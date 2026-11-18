@@ -20,22 +20,27 @@ FRAMES = 32
 TOLERANCE = 1e-5
 
 
-def gru_config() -> RWKVEncoderConfig:
-    return RWKVEncoderConfig(core="gru", embed_dim=D, n_layers=2, dropout=0.1)
+def core_config(name: str) -> RWKVEncoderConfig:
+    return RWKVEncoderConfig(core=name, embed_dim=D, n_layers=2, ffn_dim=64, dropout=0.1)
+
+
+@pytest.fixture(params=["gru", "rwkv"])
+def core_name(request: pytest.FixtureRequest) -> str:
+    return str(request.param)
 
 
 @pytest.fixture
-def core() -> TemporalCore:
+def core(core_name: str) -> TemporalCore:
     torch.manual_seed(0)
-    return GRUCore(gru_config()).eval()
+    return build_temporal_core(core_config(core_name)).eval()
 
 
 @pytest.fixture
-def driver() -> VisionRWKVDriver:
+def driver(core_name: str) -> VisionRWKVDriver:
     torch.manual_seed(0)
     config = ModelConfig(
         tokenizer=TokenizerConfig(img_height=32, img_width=64, embed_dim=D),
-        encoder=gru_config(),
+        encoder=core_config(core_name),
         fusion=FusionConfig(visual_dim=D, nav_embed_dim=8, fused_dim=D),
         policy_head=PolicyHeadConfig(input_dim=D, hidden_dims=(16,)),
     )
@@ -97,7 +102,7 @@ def test_unknown_core_is_refused() -> None:
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a GPU")
 def test_gru_trains_under_bf16_autocast() -> None:
-    core = GRUCore(gru_config()).cuda()
+    core = GRUCore(core_config("gru")).cuda()
     x = torch.randn(2, FRAMES, D, device="cuda", dtype=torch.bfloat16)
     with torch.autocast("cuda", dtype=torch.bfloat16):
         features, state = core(x)

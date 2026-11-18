@@ -22,7 +22,7 @@ from src.models.config import (
 )
 from src.models.fusion import NavigationFusion
 from src.models.policy_head import PolicyHead
-from src.models.rwkv_encoder import RWKVBlock, RWKVEncoder
+from src.models.rwkv_encoder import STATE_PARTS, RWKVBlock, RWKVEncoder
 from src.models.tokenizer import PatchEmbedding, QShift, VisionTokenizer
 from src.models.vision_rwkv_driver import VisionRWKVDriver
 
@@ -147,7 +147,7 @@ class TestRWKVEncoder:
         config = RWKVEncoderConfig(n_layers=4, embed_dim=128)
         encoder = RWKVEncoder(config)
         state = encoder.initial_state(batch_size=2, device=torch.device("cpu"))
-        assert len(state) == 4
+        assert len(state) == 4 * STATE_PARTS
         assert state[0].shape == (2, 128)
 
     def test_encoder_forward_shape(self) -> None:
@@ -156,7 +156,7 @@ class TestRWKVEncoder:
         x = torch.randn(1, 4, 64)
         out, state = encoder(x)
         assert out.shape == (1, 4, 64)
-        assert len(state) == 2
+        assert len(state) == 2 * STATE_PARTS
         assert state[0].shape == (1, 64)
 
 
@@ -239,7 +239,7 @@ class TestVisionRWKVDriver:
         nav = torch.zeros(1, 4, dtype=torch.long)
         controls, state, aux = model(images, nav)
         assert controls.shape == (1, 4, 2)
-        assert len(state) == model.config.encoder.n_layers
+        assert len(state) == model.config.encoder.n_layers * STATE_PARTS
         assert "speed" in aux and "mode_logits" in aux and "future_waypoints" in aux
 
     def test_model_initial_state(self) -> None:
@@ -251,7 +251,7 @@ class TestVisionRWKVDriver:
         )
         model = VisionRWKVDriver(config)
         state = model.initial_state(batch_size=2, device=torch.device("cpu"))
-        assert len(state) == 3
+        assert len(state) == 3 * STATE_PARTS
         assert state[0].shape == (2, 384)
 
     def test_model_parameter_count(self) -> None:
