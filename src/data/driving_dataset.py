@@ -316,6 +316,8 @@ class DrivingSequenceDataset(Dataset):
                 future_waypoints: (seq_len, 4, 2) float32  (positions at t+5, t+10,
                     t+15, t+20 frames in the vehicle's frame at t: x forward,
                     y right, metres; for aux loss)
+                waypoint_mask: (seq_len, 4) bool  (False where a waypoint lies past
+                    the end of the recording and is clamped; left out of the loss)
         """
         ep_idx, start = key if isinstance(key, tuple) else self.clips[key]
         if not 0 <= start <= self.episode_frames[ep_idx] - self.seq_len:
@@ -365,6 +367,10 @@ class DrivingSequenceDataset(Dataset):
         future_waypoints = torch.from_numpy(
             labels.ego_waypoints(w.position, w.yaw, WAYPOINT_OFFSETS)
         )  # (T, K, 2): x forward, y right, metres
+        # A waypoint past the end of the recording is clamped to its last position, which
+        # is not where the vehicle went: it is kept out of the waypoint loss.
+        ahead = np.arange(len(w.yaw))[:, None] + np.asarray(WAYPOINT_OFFSETS)
+        waypoint_mask = torch.from_numpy(ahead < len(w.position))
 
         sample = {
             "images": images,
@@ -375,6 +381,7 @@ class DrivingSequenceDataset(Dataset):
             "target_speed": target_speed_t,
             "driving_mode": driving_mode_t,
             "future_waypoints": future_waypoints,
+            "waypoint_mask": waypoint_mask,
         }
         if self.augment and torch.rand(1).item() < 0.5:
             sample = mirror(sample)

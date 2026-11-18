@@ -512,9 +512,9 @@ class Trainer:
             mode_loss = torch.zeros((), device=self.device)
 
         wp_target = batch["future_waypoints"].to(self.device, non_blocking=True).float()
-        wp_pred = aux["future_waypoints"]
-        wp_l1 = (wp_pred - wp_target).abs().mean(dim=(-1, -2))
-        waypoint_loss = self._masked_mean(wp_l1, frame_weight)
+        wp_mask = batch["waypoint_mask"].to(self.device, non_blocking=True).float()
+        wp_l1 = (aux["future_waypoints"] - wp_target).abs().mean(dim=-1)
+        waypoint_loss = self._masked_mean(wp_l1, frame_weight.unsqueeze(-1) * wp_mask)
 
         distill_loss = torch.zeros((), device=self.device)
         if self.teacher is not None:

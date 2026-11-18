@@ -14,6 +14,7 @@ import pytest
 import torch
 
 from src.data import driving_dataset, labels, schema_adapter
+from src.data import hdf5_schema as S
 from src.data.driving_dataset import (
     TURN_WEIGHT,
     WAYPOINT_OFFSETS,
@@ -163,6 +164,17 @@ class TestNormalization:
         expected = labels.ego_waypoints(w.position, w.yaw, WAYPOINT_OFFSETS)
         got = train_dataset[len(train_dataset) - 1]["future_waypoints"]
         assert got.dtype == torch.float32 and np.array_equal(got.numpy(), expected)
+
+    def test_waypoints_past_the_recording_are_masked(
+        self, train_dataset: DrivingSequenceDataset
+    ) -> None:
+        ep_idx, start = train_dataset.clips[-1]
+        with h5py.File(train_dataset.episode_files[ep_idx], "r") as f:
+            per_frame = int(f[S.METADATA_GROUP].attrs[S.META_FPS]) // train_dataset.fps
+            recorded = -(-f[S.POSITION].shape[0] // per_frame)
+        ahead = start + np.arange(train_dataset.seq_len)[:, None] + np.array(WAYPOINT_OFFSETS)
+        mask = train_dataset[len(train_dataset) - 1]["waypoint_mask"].numpy()
+        assert np.array_equal(mask, ahead < recorded) and mask.any() and not mask.all()
 
     def test_commands_are_derived_from_the_path(
         self, train_dataset: DrivingSequenceDataset

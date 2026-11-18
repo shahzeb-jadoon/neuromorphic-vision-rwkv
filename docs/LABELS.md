@@ -15,6 +15,7 @@ A 20 Hz recording and its 10 Hz training cache therefore give identical targets.
 | `controls` | Steering in [−1, 1] and acceleration = throttle − brake in [−1, 1], as the expert applied them |
 | `nav_command` | RoadOption minus one, derived from the path driven ([below](#navigation-commands)): LEFT 0, RIGHT 1, LANEFOLLOW 3; STRAIGHT (2) and the lane changes (4, 5) do not occur. A recorded command outside 1–6 is still an error, never clamped |
 | `future_waypoints` | Positions 5, 10, 15 and 20 frames (0.5–2 s) ahead, in the vehicle's frame at that frame: x forward, y to the right, metres |
+| `waypoint_mask` | False where a waypoint lies past the end of the recording, so is clamped to its last position: such waypoints are left out of the waypoint loss, while the frame's other targets stay. In v3 these are the last 2 s of the 684 completed episodes, which stop at the frame budget mid-drive: 13,680 frames (0.8%) |
 | `target_speed` | The expert's target speed divided by 120 km/h |
 | `driving_mode` | The expert's mode 1–8 minus one; the v6 YieldStop is folded into StopSignStop |
 | `loss_weight` | 0.1 for a stationary frame, otherwise 1 (below) |
