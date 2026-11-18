@@ -100,6 +100,7 @@ addopts = "--strict-markers -v"
 markers = [
     "online: requires a running CARLA server (deselect with '-m not online')",
     "gold: runs on the golden subset in data/golden; skipped without it (`make gold`)",
+    "overfit: memorises a golden window, minutes on a GPU (`make overfit`)",
 ]
 
 # ── Coverage ─────────────────────────────────────────────────────────

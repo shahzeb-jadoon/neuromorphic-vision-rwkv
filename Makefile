@@ -1,7 +1,7 @@
 # ── Neuromorphic Vision-RWKV for Autonomous Driving ──────────────────
 # Convenience targets for common development tasks.
 
-.PHONY: test gold lint format typecheck ci clean analyze train tune help setup lock lock-macos env-check smoke
+.PHONY: test gold overfit lint format typecheck ci clean analyze train tune help setup lock lock-macos env-check smoke
 
 help:  ## Show this help message
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | \
@@ -48,7 +48,10 @@ test:  ## Run offline tests with coverage (no CARLA needed)
 	pytest tests/ -v -m "not online and not gold" --cov=src/ --cov-report=term-missing --cov-config=pyproject.toml
 
 gold:  ## Run the tests on real recorded windows (needs data/golden)
-	pytest tests/ -v -m gold --no-cov
+	pytest tests/ -v -m "gold and not overfit" --no-cov
+
+overfit:  ## Memorise one recorded window on a GPU (needs data/golden)
+	pytest tests/test_overfit.py -v -s -m overfit --no-cov
 
 test-online:  ## Run CARLA integration tests (requires live CARLA server)
 	pytest tests/ -v -m online

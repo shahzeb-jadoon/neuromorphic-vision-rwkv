@@ -1,0 +1,108 @@
+# A short run: one epoch over the episodes in DATA_DIR, in clips that do not overlap.
+# Judged with scripts/evaluate_offline.py against the baseline that sees only the target point.
+# On the golden subset: --set dataset.data_dir=data/golden
+
+run:
+  output_root: runs/short
+  name_prefix: short
+  run_name: null
+  tags: [short]
+  seed: 42
+  deterministic: true
+  resume: never
+  device: auto
+
+dataset:
+  data_dir: ""
+  seq_len: 32
+  stride: 32
+  fps: 10
+  val_fraction: 0.2
+  batch_size: 8
+  num_workers: 4
+  pin_memory: true
+  weighted_sampling: true
+  augment_train: true
+  resize_height: 160
+  resize_width: 960
+
+model:
+  tokenizer:
+    img_height: 160
+    img_width: 960
+    embed_dim: 384
+    pretrained: true
+    n_queries: 8
+    n_heads: 4
+    grad_frames: 4
+  encoder:
+    core: rwkv
+    embed_dim: 384
+    n_layers: 6
+    ffn_dim: 1536
+    dropout: 0.1
+  fusion:
+    visual_dim: 384
+    nav_embed_dim: 64
+    n_nav_commands: 6
+    speed_embed_dim: 64
+    speed_dropout: 0.5
+    target_embed_dim: 64
+    fused_dim: 384
+    dropout: 0.1
+  policy_head:
+    input_dim: 384
+    hidden_dims: [256, 64]
+    n_outputs: 2
+    dropout: 0.1
+  seq_len: 32
+  burn_in: 8
+  batch_size: 8
+
+optimization:
+  epochs: 1
+  learning_rate: 3.0e-4
+  weight_decay: 1.0e-2
+  gradient_clip: 1.0
+  amp: true
+  max_nonfinite_steps: 10
+  ema_decay: 0.0
+  compile_encoder: false
+
+scheduler:
+  name: cosine
+  warmup_steps: 50
+  min_lr_ratio: 0.1
+
+loss:
+  burn_in: 8
+  control_weight: 1.0
+  speed_weight: 0.1
+  mode_weight: 0.1
+  waypoint_weight: 0.5
+
+distillation:
+  enabled: false
+  teacher_checkpoint: ""
+  weight: 0.2
+
+checkpoint:
+  save_every_steps: 100000
+  save_every_epochs: 100
+  keep_last_n: 2
+  monitor_metric: val/control_score
+  monitor_mode: min
+
+logging:
+  log_every_steps: 10
+  val_every_steps: 500
+  use_tensorboard: false
+  use_wandb: false
+  plot_on_finish: false
+  val_max_batches: 200
+
+runtime_overrides:
+  enabled: false
+
+quantization:
+  export_dynamic_int8: false

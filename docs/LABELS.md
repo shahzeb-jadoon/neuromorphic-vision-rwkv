@@ -57,6 +57,15 @@ Such a stop and the 5 s before it keep their frames, so clips still show them an
 stateful model still sees them, but their loss weight is 0, so no target is learned from
 them. The v3 testbed has 75 stops past the line and 47 short of it: 30,583 frames (1.78%).
 
+## Steering spikes
+
+The v3 expert's steering sometimes jumps for a single frame and returns. On the testbed,
+2.12% of moving frames lie more than 0.1 from the 5-frame running median of their episode's
+steering (per episode: median 2.09%, 95th percentile 4.86%), and 360 frames jump by more than
+1.0. Nearly identical images then carry different targets, so no model can fit them. Training
+keeps them for now. Their cause is not yet known: the expert's injected steering noise
+(standard deviation 0.001) is far too small to explain them.
+
 ## Navigation commands
 
 The recorded commands of v3 often end before the turn they announce
