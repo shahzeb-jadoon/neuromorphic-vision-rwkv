@@ -1,7 +1,8 @@
 # Training targets
 
-How a sample's targets are computed from an episode's raw signals, in
-`src/data/labels.py`, `src/data/schema_adapter.py` and `src/data/driving_dataset.py`.
+How a sample's targets are computed from an episode's raw signals, and which clips
+training draws, in `src/data/labels.py`, `src/data/schema_adapter.py` and
+`src/data/driving_dataset.py`.
 
 ## Per frame
 
@@ -30,6 +31,28 @@ Clips are taken only from an episode's usable frames:
 
 On the v3 dataset these rules drop 5.3% of frames: 183,966 stuck frames and 9,021 around
 collisions.
+
+## Clip sampling
+
+Each training epoch draws as many clips as the dataset's fixed clips (one every `stride`
+frames), with replacement, and a drawn clip may start at any usable frame (`get_sampler`
+in `driving_dataset.py`). Validation and evaluation use the fixed clips. A clip's chance
+is 1 + 5 × its share of turning frames (|steering| > 0.1), so a clip that turns
+throughout is six times as likely as one that never does. Weighting by navigation
+command instead, as the April run did, barely helps: LEFT and RIGHT also cover the
+approach to a junction, and turning frames rose only from 12% to 17% of the frames drawn.
+
+On the v3 testbed training split, with 32-frame clips and the April run's stride of 512
+(`scripts/sampling_report.py --stride 512`):
+
+| Clips | Reachable | Drawn in 50 epochs | Turning share of drawn frames |
+| --- | ---: | ---: | ---: |
+| Fixed, every 512 frames | 6.70% | 6.70% | 14.3% |
+| Random starts | 99.99% | 95.75% | 11.8% |
+| Random starts, turn-weighted | 99.99% | 90.77% | 32.5% |
+
+The unreachable 0.01% are five episodes shorter than a clip. With the base config's
+stride of 16 (85,184 clips per epoch) the weighted sampler draws 99.98% of frames.
 
 ## Stationary weighting
 

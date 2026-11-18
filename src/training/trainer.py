@@ -356,15 +356,13 @@ class Trainer:
             resize_width=dcfg.resize_width,
         )
 
-        sampler = train_ds.get_sampler() if dcfg.weighted_sampling else None
         # prefetch_factor=2 is the PyTorch default (each worker prefetches 2 batches).
         # Lower to 1 to halve DataLoader RAM at the cost of slightly lower GPU utilisation.
         pf = 2 if dcfg.num_workers > 0 else None
         train_loader = DataLoader(
             train_ds,
             batch_size=dcfg.batch_size,
-            shuffle=sampler is None,
-            sampler=sampler,
+            sampler=train_ds.get_sampler(weighted=dcfg.weighted_sampling),
             num_workers=dcfg.num_workers,
             pin_memory=dcfg.pin_memory,
             persistent_workers=dcfg.num_workers > 0,

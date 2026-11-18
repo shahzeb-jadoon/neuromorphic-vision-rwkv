@@ -14,7 +14,13 @@ import pytest
 import torch
 
 from src.data import labels, schema_adapter
-from src.data.driving_dataset import WAYPOINT_OFFSETS, DrivingSequenceDataset, mirror
+from src.data.driving_dataset import (
+    TURN_WEIGHT,
+    WAYPOINT_OFFSETS,
+    DrivingSequenceDataset,
+    RandomClipSampler,
+    mirror,
+)
 
 
 @pytest.fixture
@@ -252,17 +258,45 @@ class TestAugmentation:
 
 
 class TestSampler:
-    """Verify weighted sampler works."""
+    """The training sampler draws clips that may start at any usable frame."""
 
-    def test_sampler_creates(self, train_dataset: DrivingSequenceDataset) -> None:
-        sampler = train_dataset.get_sampler()
-        assert len(sampler) == len(train_dataset)
+    def test_random_starts_reach_every_usable_frame(self, toy_data_dir: Path) -> None:
+        ds = DrivingSequenceDataset(
+            toy_data_dir, seq_len=16, stride=32, val_fraction=0.34, seed=42, augment=False
+        )
+        fixed = [np.zeros(n, bool) for n in ds.episode_frames]
+        for e, s in ds.clips:
+            fixed[e][s : s + ds.seq_len] = True
+        seen = [np.zeros(n, bool) for n in ds.episode_frames]
+        sampler = ds.get_sampler()
+        torch.manual_seed(0)
+        for _ in range(2500):
+            for e, s in sampler:
+                seen[e][s : s + ds.seq_len] = True
+        assert len(sampler) == len(ds) and not all(f.all() for f in fixed)
+        assert all(s.all() for s in seen)
 
-    def test_sampler_iterates(self, train_dataset: DrivingSequenceDataset) -> None:
-        sampler = train_dataset.get_sampler()
-        indices = list(iter(sampler))
-        assert len(indices) == len(train_dataset)
-        assert all(0 <= i < len(train_dataset) for i in indices)
+    def test_clips_are_weighted_by_their_turning_frames(
+        self, train_dataset: DrivingSequenceDataset
+    ) -> None:
+        turning, n = train_dataset.turning[0], train_dataset.seq_len
+        starts = range(len(turning) - n + 1)
+        expected = [1 + TURN_WEIGHT * turning[s : s + n].mean() for s in starts]
+        weights = train_dataset.get_sampler().weights
+        assert np.allclose(weights[: len(expected)], expected) and len(set(expected)) > 1
+        assert set(train_dataset.get_sampler(weighted=False).weights.tolist()) == {1.0}
+
+    def test_episodes_too_short_for_a_clip_are_skipped(self) -> None:
+        sampler = RandomClipSampler([np.ones(2), np.ones(0), np.ones(3)], num_samples=200)
+        assert set(sampler) == {(0, 0), (0, 1), (2, 0), (2, 1), (2, 2)}
+
+    def test_a_clip_key_reads_that_clip(self, train_dataset: DrivingSequenceDataset) -> None:
+        by_index = train_dataset[3]
+        by_key = train_dataset[train_dataset.clips[3]]
+        assert all(torch.equal(by_key[k], by_index[k]) for k in by_index)
+        overrun = train_dataset.episode_frames[0] - train_dataset.seq_len + 1
+        with pytest.raises(IndexError, match="overruns"):
+            train_dataset[(0, overrun)]
 
 
 class TestDataLoader:
@@ -270,7 +304,7 @@ class TestDataLoader:
 
     def test_batch_loading(self, train_dataset: DrivingSequenceDataset) -> None:
         loader = torch.utils.data.DataLoader(
-            train_dataset, batch_size=2, shuffle=True, num_workers=0
+            train_dataset, batch_size=2, sampler=train_dataset.get_sampler(), num_workers=0
         )
         batch = next(iter(loader))
         assert batch["images"].shape == (2, 16, 3, 320, 1920)

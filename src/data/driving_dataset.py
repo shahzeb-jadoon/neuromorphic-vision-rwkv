@@ -13,6 +13,7 @@ to one sample format. Images are 3-camera panoramas (H, 3 * W_cam, 3).
 from __future__ import annotations
 
 import warnings
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
@@ -20,9 +21,10 @@ import h5py
 import numpy as np
 import torch
 import torch.nn.functional as F
-from torch.utils.data import Dataset, WeightedRandomSampler
+from torch.utils.data import Dataset, Sampler
 
 from src.data import labels, schema_adapter
+from src.eval.metrics import turn_frames
 
 # ImageNet normalization constants
 IMAGENET_MEAN = torch.tensor([0.485, 0.456, 0.406]).view(3, 1, 1)
@@ -49,6 +51,12 @@ WAYPOINT_OFFSETS = (5, 10, 15, 20)
 # two lane changes; STRAIGHT and LANEFOLLOW stay.
 MIRRORED_COMMAND = torch.tensor([1, 0, 2, 3, 5, 4])
 
+# A training clip's sampling weight is 1 + TURN_WEIGHT x its share of turning frames
+# (|steering| > 0.1); see docs/LABELS.md.
+TURN_WEIGHT = 5.0
+
+ClipKey = tuple[int, int]  # (episode index, start frame)
+
 
 def mirror(sample: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
     """The sample as it would be recorded in a left-right mirror image of the world.
@@ -66,16 +74,45 @@ def mirror(sample: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
     }
 
 
+class RandomClipSampler(Sampler[ClipKey]):
+    """Clips that may start at any usable frame, drawn with replacement.
+
+    `weights[e][s]` is the relative chance of episode e's clip starting at frame s. Each
+    epoch draws fresh starts, so every usable frame can be seen, not only those of the
+    dataset's fixed clips.
+    """
+
+    def __init__(self, weights: list[np.ndarray], num_samples: int) -> None:
+        self.weights = torch.from_numpy(np.concatenate(weights))
+        self.first = np.cumsum([0] + [len(w) for w in weights])  # first flat index of each episode
+        self.num_samples = num_samples
+
+    def __len__(self) -> int:
+        return self.num_samples
+
+    def keys(self, flat: np.ndarray) -> list[ClipKey]:
+        """The clip of each index into the episodes' starts, concatenated."""
+        episodes = np.searchsorted(self.first, flat, side="right") - 1
+        return list(zip(episodes.tolist(), (flat - self.first[episodes]).tolist()))
+
+    def __iter__(self) -> Iterator[ClipKey]:
+        yield from self.keys(
+            torch.multinomial(self.weights, self.num_samples, replacement=True).numpy()
+        )
+
+
 class DrivingSequenceDataset(Dataset):
     """Dataset that returns fixed-length sequential clips from driving episodes.
 
-    Each __getitem__ call returns a contiguous clip of `seq_len` frames from
-    a single episode. Clips are sampled by sliding a window over each episode.
+    Each __getitem__ call returns a contiguous clip of `seq_len` frames from a single
+    episode: by index, one of the fixed clips every `stride` frames (`clips`); by
+    (episode, start) key, the clip a sampler chose.
 
     Args:
         data_dir: Path to directory containing episode HDF5 files.
         seq_len: Number of frames per clip (default: 32).
-        stride: Stride between clip start positions within an episode (default: 16).
+        stride: Frames between the fixed clips; also sets the clips per epoch drawn by
+            `get_sampler` (default: 16).
         split: One of "train" or "val" (default: "train").
         val_fraction: Fraction of episodes reserved for validation (default: 0.2).
         seed: Random seed for reproducible train/val split (default: 42).
@@ -148,71 +185,35 @@ class DrivingSequenceDataset(Dataset):
         # Per-worker HDF5 file handle cache (fork-safe via worker_init_fn)
         self._h5_cache: dict[int, h5py.File] = {}
 
-        # Build index of (episode_idx, start_frame) pairs
-        self.clips: list[tuple[int, int]] = []
-        # Per-episode nav command arrays (kept for per-clip weight computation)
-        _episode_nav_arrays: list[np.ndarray] = []
-
+        # Per episode: usable frames, and which of them turn. Fixed clips every `stride`.
+        self.episode_frames: list[int] = []
+        self.turning: list[np.ndarray] = []
+        self.clips: list[ClipKey] = []
         for ep_idx, ep_path in enumerate(self.episode_files):
             with h5py.File(ep_path, "r") as f:
                 schema_adapter.check_supported(f, ep_path.name)
-                # Frames after a collision (vehicle stuck or spinning) are dropped.
-                n_frames = schema_adapter.usable_frames(f)
-                nav_cmds = schema_adapter.nav_commands(f)
-
-            _episode_nav_arrays.append(nav_cmds)
-
-            # Generate clip start positions
-            if n_frames >= seq_len:
-                for start in range(0, n_frames - seq_len + 1, stride):
-                    self.clips.append((ep_idx, start))
+                steering = schema_adapter.read_labels(f)[0]
+            self.episode_frames.append(len(steering))
+            self.turning.append(turn_frames(steering))
+            self.clips += [(ep_idx, s) for s in range(0, len(steering) - seq_len + 1, stride)]
 
         if not self.clips:
             raise ValueError(
                 f"No valid clips found (seq_len={seq_len} may exceed all episode lengths)"
             )
 
-        # Compute per-clip sampling weights (inverse of LaneFollow frequency)
-        self._clip_weights = self._compute_sampling_weights(_episode_nav_arrays)
+    def get_sampler(self, weighted: bool = True) -> RandomClipSampler:
+        """Training sampler: `len(self)` clips per epoch, starting at any usable frame.
 
-    def _compute_sampling_weights(self, episode_nav_arrays: list[np.ndarray]) -> torch.Tensor:
-        """Compute per-clip sampling weights to balance turn distribution.
-
-        Each clip's weight is derived from its own nav command distribution
-        (not the parent episode's), so clips with more turns get genuinely
-        higher sampling probability.
+        Weighted, a clip's chance is 1 + TURN_WEIGHT x its share of turning frames;
+        otherwise every start is equally likely.
         """
         weights = []
-        for ep_idx, start in self.clips:
-            clip_nav = episode_nav_arrays[ep_idx][start : start + self.seq_len]
-            total = len(clip_nav)
-            if total == 0:
-                weights.append(1.0)
-                continue
-            # Weight = inverse of LaneFollow fraction (more turns → higher weight)
-            # Schema v3: LANEFOLLOW=4; schema v2: LaneFollow=0
-            lane_follow = int(np.sum((clip_nav == 4) | (clip_nav == 0)))
-            lane_follow_frac = lane_follow / total
-            weight = 1.0 / max(lane_follow_frac, 0.1)
-            weights.append(weight)
-
-        w = torch.tensor(weights, dtype=torch.float64)
-        w = w / w.sum()  # Normalize
-        return w
-
-    def get_sampler(self) -> WeightedRandomSampler:
-        """Get a WeightedRandomSampler for balanced training.
-
-        Usage:
-            dataset = DrivingSequenceDataset(...)
-            sampler = dataset.get_sampler()
-            loader = DataLoader(dataset, sampler=sampler, ...)
-        """
-        return WeightedRandomSampler(
-            weights=self._clip_weights.tolist(),
-            num_samples=len(self),
-            replacement=True,
-        )
+        for turning in self.turning:
+            count = np.concatenate([[0], np.cumsum(turning)])
+            share = (count[self.seq_len :] - count[: -self.seq_len]) / self.seq_len
+            weights.append(1.0 + TURN_WEIGHT * share if weighted else np.ones_like(share))
+        return RandomClipSampler(weights, len(self))
 
     def _get_h5(self, ep_idx: int) -> h5py.File:
         """Return a cached h5py.File handle for the given episode."""
@@ -248,8 +249,8 @@ class DrivingSequenceDataset(Dataset):
     STATIONARY_SPEED_THRESH: float = 0.14  # ~0.5 km/h
     STATIONARY_LOSS_WEIGHT: float = 0.1
 
-    def __getitem__(self, idx: int) -> dict[str, torch.Tensor]:
-        """Load a single clip.
+    def __getitem__(self, key: int | ClipKey) -> dict[str, torch.Tensor]:
+        """Load the clip `clips[key]`, or the clip (episode, start) a sampler chose.
 
         Returns:
             Dictionary with:
@@ -270,7 +271,9 @@ class DrivingSequenceDataset(Dataset):
                     t+15, t+20 frames in the vehicle's frame at t: x forward,
                     y right, metres; for aux loss)
         """
-        ep_idx, start = self.clips[idx]
+        ep_idx, start = key if isinstance(key, tuple) else self.clips[key]
+        if not 0 <= start <= self.episode_frames[ep_idx] - self.seq_len:
+            raise IndexError(f"clip at frame {start} overruns episode {ep_idx}'s usable frames")
         end = start + self.seq_len
 
         w = schema_adapter.read_window(self._get_h5(ep_idx), start, end, max(WAYPOINT_OFFSETS))

@@ -24,7 +24,7 @@ sha256 of every artifact. Later runs append new entries in the same format.
 | Stop | manual SIGINT (signal 2) at step 10,217, 2026-04-24 21:25 local time |
 | Resume | `config_resolved.yaml` lists `resume: …/checkpoints/latest.pt`, which indicates at least one relaunch with auto-resume. `events.csv` has no `resume` row, so the resume step cannot be confirmed from the logs. |
 | Selected checkpoint | `best.pt`: step 6,000, epoch 8, validation total loss 1.221815 |
-| Post-run findings | Gradient norm is exactly 0 from step 7,780 to 10,217: the fp16 loss scale fell from 1024 (step 6,000) to 2^-75 (step 10,217) through repeated non-finite steps, so weights stopped updating after step ~7,780. Re-evaluated on the validation split, `best.pt` has steering MAE 0.0576 (pooled) against 0.0547 for a constant zero prediction. |
+| Post-run findings | Gradient norm is exactly 0 from step 7,780 to 10,217: the fp16 loss scale fell from 1024 (step 6,000) to 2^-75 (step 10,217) through repeated non-finite steps, so weights stopped updating after step ~7,780. Re-evaluated on the validation split, `best.pt` has steering MAE 0.0576 (pooled) against 0.0547 for a constant zero prediction. Clips started only every 512 frames, so the run could train on about 6% of the training frames ([LABELS.md](LABELS.md#clip-sampling)). |
 
 ### Artifacts
 
