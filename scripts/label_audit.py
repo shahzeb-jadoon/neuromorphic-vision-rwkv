@@ -334,7 +334,7 @@ def sample_frames(
 
 
 def distributions(t: dict[str, np.ndarray]) -> str:
-    fig, (a, b, c) = plt.subplots(1, 3, figsize=(15, 3.6))
+    fig, (a, b, c) = plt.subplots(1, 3, figsize=(17, 3.8), width_ratios=(1, 1.5, 1))
     for cmd in (LEFT, RIGHT, STRAIGHT, LANEFOLLOW):
         m = t["nav"] == cmd
         if m.any():
@@ -347,12 +347,11 @@ def distributions(t: dict[str, np.ndarray]) -> str:
             )
     a.set(yscale="log", xlabel="steering", title="Steering by command")
     a.legend(fontsize=7)
-    modes = [m for m in S.DRIVING_MODE_NAMES if (t["mode"] == m).any()]
-    b.boxplot([t["speed"][t["mode"] == m] * 3.6 for m in modes], showfliers=False)
-    b.set_xticks(
-        range(1, len(modes) + 1), [S.DRIVING_MODE_NAMES[m] for m in modes], rotation=40, fontsize=7
-    )
-    b.set(ylabel="km/h", title="Speed by driving mode")
+    groups = [*t["situation"].T, ~t["situation"].any(axis=1)]
+    b.boxplot([t["speed"][m] * 3.6 for m in groups], showfliers=False)
+    names = [*labels.SITUATIONS, "none of these"]
+    b.set_xticks(range(1, len(names) + 1), names, rotation=40, ha="right", fontsize=7)
+    b.set(ylabel="km/h", title="Speed by situation")
     pick = np.random.default_rng(0).permutation(np.flatnonzero(t["wp_ok"]))[:30000]
     for cmd, colour in ((LANEFOLLOW, "0.6"), (LEFT, "tab:blue"), (RIGHT, "tab:red")):
         m = pick[t["nav"][pick] == cmd]
