@@ -18,6 +18,7 @@ from src.data.driving_dataset import (
     TURN_WEIGHT,
     WAYPOINT_OFFSETS,
     DrivingSequenceDataset,
+    EpisodeOrderedSampler,
     RandomClipSampler,
     mirror,
 )
@@ -297,6 +298,24 @@ class TestSampler:
         overrun = train_dataset.episode_frames[0] - train_dataset.seq_len + 1
         with pytest.raises(IndexError, match="overruns"):
             train_dataset[(0, overrun)]
+
+
+def test_episode_ordered_rows_continue_their_episodes() -> None:
+    frames, n, lanes = [100, 37, 64, 20, 81, 10], 16, 4
+    sampler = EpisodeOrderedSampler(frames, seq_len=n, batch_size=lanes)
+    seen = [np.zeros(f, bool) for f in frames]
+    torch.manual_seed(0)
+    for _ in range(200):
+        keys = list(sampler)
+        assert len(keys) == len(sampler) == 16
+        for lane in range(lanes):
+            row = keys[lane::lanes]
+            for (e0, s0), (e1, s1) in zip(row, row[1:]):
+                assert (e1, s1) == (e0, s0 + n) or (e1 != e0 and s1 < n)
+        for e, s in keys:
+            assert s + n <= frames[e]
+            seen[e][s : s + n] = True
+    assert all(s.all() for s in seen[:5]) and not seen[5].any()
 
 
 class TestDataLoader:

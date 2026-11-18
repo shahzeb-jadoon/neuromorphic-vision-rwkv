@@ -101,6 +101,36 @@ class RandomClipSampler(Sampler[ClipKey]):
         )
 
 
+class EpisodeOrderedSampler(Sampler[ClipKey]):
+    """Consecutive clips of each episode, for training that carries state across clips.
+
+    Row b of every batch follows lane b, a run of whole episodes clip after clip, so a
+    model can carry row b's state into the next batch unless that clip starts a new
+    episode (its start is not the previous clip's end). Each epoch shuffles the episodes
+    and shifts each episode's clip boundaries by a random offset, so every usable frame
+    can be drawn. Use with a DataLoader of the same `batch_size` and no shuffling.
+    """
+
+    def __init__(self, episode_frames: list[int], seq_len: int, batch_size: int) -> None:
+        self.episode_frames = episode_frames
+        self.seq_len = seq_len
+        self.batch_size = batch_size
+        self.steps = sum(n // seq_len for n in episode_frames) // batch_size
+
+    def __len__(self) -> int:
+        return self.steps * self.batch_size
+
+    def __iter__(self) -> Iterator[ClipKey]:
+        stream: list[ClipKey] = []
+        for e in torch.randperm(len(self.episode_frames)).tolist():
+            n = self.episode_frames[e]
+            offset = int(torch.randint(n % self.seq_len + 1, ()))
+            stream += [(e, s) for s in range(offset, n - self.seq_len + 1, self.seq_len)]
+        for t in range(self.steps):
+            for lane in range(self.batch_size):
+                yield stream[lane * self.steps + t]
+
+
 class DrivingSequenceDataset(Dataset):
     """Dataset that returns fixed-length sequential clips from driving episodes.
 

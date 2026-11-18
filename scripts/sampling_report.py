@@ -16,7 +16,7 @@ from collections.abc import Iterable
 import numpy as np
 import torch
 
-from src.data.driving_dataset import ClipKey, DrivingSequenceDataset
+from src.data.driving_dataset import ClipKey, DrivingSequenceDataset, EpisodeOrderedSampler
 from src.training.config import load_training_config
 from src.utils.settings import setting
 
@@ -31,9 +31,19 @@ def frame_counts(ds: DrivingSequenceDataset, keys: Iterable[ClipKey]) -> np.ndar
     return np.cumsum(edges[:-1])
 
 
-def row(name: str, ds: DrivingSequenceDataset, reachable: np.ndarray, drawn: np.ndarray) -> str:
+def row(
+    name: str, ds: DrivingSequenceDataset, drawn: np.ndarray, reachable: np.ndarray | None
+) -> str:
     turning = np.average(np.concatenate(ds.turning), weights=drawn)
-    return f"| {name} | {np.mean(reachable > 0):.2%} | {np.mean(drawn > 0):.2%} | {turning:.1%} |"
+    reach = "—" if reachable is None else f"{np.mean(reachable > 0):.2%}"
+    return f"| {name} | {reach} | {np.mean(drawn > 0):.2%} | {turning:.1%} |"
+
+
+def drawn_in_run(ds: DrivingSequenceDataset, sampler: Iterable[ClipKey], epochs: int) -> np.ndarray:
+    drawn = np.zeros(sum(ds.episode_frames), np.int64)
+    for _ in range(epochs):
+        drawn += frame_counts(ds, sampler)
+    return drawn
 
 
 def main() -> None:
@@ -71,10 +81,10 @@ def main() -> None:
     for weighted, name in ((False, "Random starts"), (True, "Random starts, turn-weighted")):
         sampler = ds.get_sampler(weighted=weighted)
         reachable = frame_counts(ds, sampler.keys(np.flatnonzero(sampler.weights.numpy() > 0)))
-        drawn = np.zeros(usable, np.int64)
-        for _ in range(epochs):
-            drawn += frame_counts(ds, sampler)
-        print(row(name, ds, reachable, drawn))
+        print(row(name, ds, drawn_in_run(ds, sampler, epochs), reachable))
+    ordered = EpisodeOrderedSampler(ds.episode_frames, ds.seq_len, d.batch_size)
+    name = f"Episode-ordered, batch {d.batch_size}, {len(ordered):,} per epoch"
+    print(row(name, ds, drawn_in_run(ds, ordered, epochs), None))
     ds.close()
 
 

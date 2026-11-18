@@ -50,9 +50,16 @@ On the v3 testbed training split, with 32-frame clips and the April run's stride
 | Fixed, every 512 frames | 6.70% | 6.70% | 14.3% |
 | Random starts | 99.99% | 95.75% | 11.8% |
 | Random starts, turn-weighted | 99.99% | 90.77% | 32.5% |
+| Episode-ordered, batch 4 | — | 99.98% | 11.9% |
 
 The unreachable 0.01% are five episodes shorter than a clip. With the base config's
 stride of 16 (85,184 clips per epoch) the weighted sampler draws 99.98% of frames.
+
+For training that carries the model's state from one clip to the next,
+`EpisodeOrderedSampler` gives each batch row whole episodes as consecutive clips; each
+epoch shuffles the episodes and shifts the clip boundaries by a random offset, so every
+frame can be drawn. It covers every episode once per epoch, in order, so it cannot
+favour turns.
 
 ## Stationary weighting
 
