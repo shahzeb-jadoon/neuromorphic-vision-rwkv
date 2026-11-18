@@ -6,6 +6,7 @@ then verify the DataLoader produces correctly shaped and normalized outputs.
 Run with: pytest tests/test_driving_dataset.py -v
 """
 
+import json
 from pathlib import Path
 
 import h5py
@@ -186,6 +187,33 @@ class TestNormalization:
         assert np.array_equal(got["target_point"].numpy(), episode.target_point[clip])
         assert np.array_equal(got["situation"].numpy(), episode.situation[clip])
         assert got["situation"].shape == (train_dataset.seq_len, len(labels.SITUATIONS))
+
+
+def test_a_misplaced_stop_is_kept_out_of_the_loss(tmp_path: Path) -> None:
+    from scripts.create_toy_dataset import generate_episode, save_episode_hdf5
+
+    ep = generate_episode(0, 120, img_h=16, img_w=48, rng=np.random.default_rng(0))
+    path = tmp_path / save_episode_hdf5(ep, tmp_path, episode_idx=0)[0]
+    standing = np.arange(120) >= 60
+    standing[100:] = False
+    with h5py.File(path, "r+") as f:  # 20 Hz: east at 5 m/s, 2 s at a red light, then on
+        f[S.VELOCITY][...] = np.where(standing[:, None], 0.0, [5.0, 0.0, 0.0])
+        x = np.cumsum(~standing) * 0.25
+        f[S.POSITION][...] = np.c_[x, np.zeros(120), np.zeros(120)]
+        f[S.ROTATION][...] = 0.0
+        f[S.TRAFFIC_LIGHT_STATE][...] = 3
+        f[S.TRAFFIC_LIGHT_DISTANCE][...] = 8.0
+        f[S.NEARBY_VEHICLES][...] = "[]"
+    town = ep["metadata"]["town"]
+    line = [[x[60] - 6.0, 0.0, 0.0]]  # the car stands 6 m past its stop line
+    (tmp_path / schema_adapter.JUNCTIONS_FILE).write_text(
+        json.dumps({town: {"junctions": [], "stop_lines": line}})
+    )
+    schema_adapter._junction_file.cache_clear()
+    with DrivingSequenceDataset(tmp_path, seq_len=16, stride=8, split="val") as ds:
+        first = np.concatenate([ds[(0, start)]["loss_weight"].numpy() for start in (0, 16, 32)])
+        last = ds[(0, 44)]["loss_weight"].numpy()  # standing ends at frame 50 (10 Hz)
+    assert (first == 0).all() and (last[:6] == 0).all() and (last[6:] == 1).all()
 
 
 class TestSplit:

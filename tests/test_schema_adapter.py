@@ -136,6 +136,10 @@ def test_labels_need_the_junction_outlines_of_the_town(tmp_path: Path) -> None:
     schema_adapter._junction_file.cache_clear()
     with h5py.File(path, "r") as f, pytest.raises(ValueError, match="no junction outlines"):
         schema_adapter.read_labels(f)
+    junctions.write_text('{"Town01": []}')  # written before stop lines were exported
+    schema_adapter._junction_file.cache_clear()
+    with h5py.File(path, "r") as f, pytest.raises(ValueError, match="no stop lines"):
+        schema_adapter.read_labels(f)
     junctions.unlink()
     schema_adapter._junction_file.cache_clear()
     with h5py.File(path, "r") as f, pytest.raises(FileNotFoundError, match="export_junctions"):

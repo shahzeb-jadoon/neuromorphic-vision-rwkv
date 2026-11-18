@@ -19,7 +19,9 @@ frames (src.data.labels.usable_end) are read for training.
 The navigation command, target point and situations (src.data.labels.route) are derived
 from the path driven and the junction outlines of its town, read from JUNCTIONS_FILE
 beside the episodes (scripts/export_junctions.py), since the recorded command can end
-before the turn it announces. A recorded command outside RoadOption 1-6 is still an
+before the turn it announces. The same file holds the stop lines of the town's traffic
+lights, which find the red-light stops the expert made in the wrong place
+(src.data.labels.misplaced_stops). A recorded command outside RoadOption 1-6 is still an
 error, never clamped, as it marks a corrupt file.
 """
 
@@ -42,7 +44,7 @@ from src.data import labels
 
 SUPPORTED_SCHEMAS = range(3, 7)
 MODE_FOLD = {9: 8}
-JUNCTIONS_FILE = "junctions.json"  # junction outlines per town, beside the episodes
+JUNCTIONS_FILE = "junctions.json"  # junction outlines and stop lines per town, beside the episodes
 
 
 @dataclass(frozen=True)
@@ -136,8 +138,11 @@ def nav_commands(f: h5py.File, fps: int | None = None) -> np.ndarray:
     return nav[:: _step(f, fps)]
 
 
+Junctions = tuple[list[tuple[int, np.ndarray]], np.ndarray]  # outlines by id, (M, 3) stop lines
+
+
 @functools.lru_cache(maxsize=8)
-def _junction_file(directory: str) -> dict[str, list[tuple[int, np.ndarray]]]:
+def _junction_file(directory: str) -> dict[str, Junctions]:
     path = Path(directory) / JUNCTIONS_FILE
     if not path.exists():
         raise FileNotFoundError(
@@ -145,13 +150,19 @@ def _junction_file(directory: str) -> dict[str, list[tuple[int, np.ndarray]]]:
             "that the navigation labels need"
         )
     towns = json.loads(path.read_text(encoding="utf-8"))
+    if any(not isinstance(town, dict) for town in towns.values()):
+        raise ValueError(f"{path} has no stop lines; export it again with export_junctions.py")
     return {
-        town: [(j["id"], np.asarray(j["outline"], np.float64)) for j in junctions]
-        for town, junctions in towns.items()
+        name: (
+            [(j["id"], np.asarray(j["outline"], np.float64)) for j in town["junctions"]],
+            np.asarray(town["stop_lines"], np.float64).reshape(-1, 3),
+        )
+        for name, town in towns.items()
     }
 
 
-def _junctions(f: h5py.File) -> list[tuple[int, np.ndarray]]:
+def _junctions(f: h5py.File) -> Junctions:
+    """The junction outlines and traffic-light stop lines of the episode's town."""
     town = f[S.METADATA_GROUP].attrs.get(S.META_TOWN, "")
     town = town.decode() if isinstance(town, bytes) else str(town)
     towns = _junction_file(str(Path(f.filename).parent))
@@ -235,32 +246,46 @@ class Labels:
     command: np.ndarray  # (N,) RoadOption (src.data.labels.route)
     target_point: np.ndarray  # (N, 2) float32, metres, x forward and y right
     situation: np.ndarray  # (N, len(labels.SITUATIONS)) bool
+    excluded: np.ndarray  # (N,) bool: kept out of the loss (src.data.labels.misplaced_stops)
 
 
 def read_labels(f: h5py.File, fps: int | None = None) -> Labels:
     """Labels of the usable frames read at `fps`; raises on a recorded command outside
     RoadOption 1-6."""
     nav_commands(f)
-    n = f[S.POSITION].shape[0]
-    position = f[S.POSITION][()]
-    path = labels.route(
-        position, f[S.ROTATION][:, 1], labels.junction_ids(position[:, :2], _junctions(f))
-    )
-    # Some v3 files keep traffic_light_distance at the frame budget's length: rows past n
-    # are padding.
+    outlines, stop_lines = _junctions(f)
+    position, yaw = f[S.POSITION][()], f[S.ROTATION][:, 1]
+    path = labels.route(position, yaw, labels.junction_ids(position[:, :2], outlines))
+    step = _step(f, fps)
+    rows = slice(0, _usable_end(f), step)
+    # Usable rows end before the padding that some v3 files keep in traffic_light_distance.
+    speed = np.linalg.norm(f[S.VELOCITY][rows, :2], axis=1)
+    light_state, light_distance = f[S.TRAFFIC_LIGHT_STATE][rows], f[S.TRAFFIC_LIGHT_DISTANCE][rows]
+    vehicle_gap = labels.vehicle_gaps(f[S.NEARBY_VEHICLES][rows])
     situation = labels.situations(
-        path,
-        np.linalg.norm(f[S.VELOCITY][()][:, :2], axis=1),
-        f[S.TRAFFIC_LIGHT_STATE][:n],
-        f[S.TRAFFIC_LIGHT_DISTANCE][:n],
-        f[S.STOP_SIGN_DISTANCE][:n],
-        _fold(f[S.DRIVING_MODE][()]),
+        path[rows],
+        speed,
+        light_state,
+        light_distance,
+        f[S.STOP_SIGN_DISTANCE][rows],
+        vehicle_gap,
+        labels.pedestrian_distances(f[S.NEARBY_PEDESTRIANS][rows]),
     )
-    rows = slice(0, _usable_end(f), _step(f, fps))
+    rate = int(f[S.METADATA_GROUP].attrs[S.META_FPS]) // step
     return Labels(
-        steering=f[S.STEERING][()][rows],
-        acceleration=(f[S.THROTTLE][()] - f[S.BRAKE][()])[rows],
+        steering=f[S.STEERING][rows],
+        acceleration=(f[S.THROTTLE][rows] - f[S.BRAKE][rows]),
         command=path.command[rows],
         target_point=path.target[rows],
-        situation=situation[rows],
+        situation=situation,
+        excluded=labels.misplaced_stops(
+            position[rows],
+            yaw[rows],
+            speed,
+            light_state,
+            light_distance,
+            vehicle_gap,
+            stop_lines,
+            rate,
+        ),
     )

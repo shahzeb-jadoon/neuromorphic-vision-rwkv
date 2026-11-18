@@ -168,18 +168,40 @@ def generate_episode(
     sat_detections = rng.integers(0, 3, size=n_frames).astype(np.int32)
     lateral_detections = rng.integers(0, 4, size=n_frames).astype(np.int32)
 
-    # Nearby vehicles/pedestrians as JSON strings
+    # Nearby vehicles/pedestrians as JSON strings, with the fields the expert records
     nearby_vehicles = []
     nearby_pedestrians = []
     for t in range(n_frames):
-        n_veh = rng.integers(0, 4)
-        vehs = [
-            {"distance": float(rng.uniform(5, 50)), "speed": float(rng.uniform(0, 15))}
-            for _ in range(n_veh)
-        ]
+        vehs = []
+        for _ in range(rng.integers(0, 4)):
+            lon, lat = float(rng.uniform(-40, 40)), float(rng.uniform(-12, 12))
+            vehs.append(
+                {
+                    "distance": max(float(np.hypot(lon, lat)) - 4.5, 0.0),
+                    "longitudinal": lon,
+                    "lateral": lat,
+                    "speed_kmh": float(rng.uniform(0, 40)),
+                    "is_ahead": lon > 0,
+                    "same_direction": bool(rng.random() < 0.7),
+                    "obb_in_lane": bool(lon > 0 and abs(lat) < 2.0),
+                }
+            )
         nearby_vehicles.append(json.dumps(vehs))
-        n_ped = rng.integers(0, 3)
-        peds = [{"distance": float(rng.uniform(3, 30))} for _ in range(n_ped)]
+        peds = []
+        for _ in range(rng.integers(0, 3)):
+            lon, lat = float(rng.uniform(-20, 25)), float(rng.uniform(-8, 8))
+            later = lat + float(rng.uniform(-1.5, 1.5))
+            peds.append(
+                {
+                    "distance": float(np.hypot(lon, lat)),
+                    "longitudinal": lon,
+                    "lateral": lat,
+                    "is_ahead": lon > 0,
+                    "predicted_distance": float(np.hypot(lon, later)),
+                    "predicted_lateral": later,
+                    "predicted_ahead": lon > 0,
+                }
+            )
         nearby_pedestrians.append(json.dumps(peds))
 
     # Metadata
@@ -284,10 +306,10 @@ def save_episode_hdf5(
         for key, value in episode_data["metadata"].items():
             meta.attrs[key] = value
 
-    # Toy towns have no junctions, but the labels need an outline list for every town.
+    # Toy towns have no junctions, but the labels need an entry for every town.
     junctions = output_dir / JUNCTIONS_FILE
     towns = json.loads(junctions.read_text()) if junctions.exists() else {}
-    towns.setdefault(episode_data["metadata"]["town"], [])
+    towns.setdefault(episode_data["metadata"]["town"], {"junctions": [], "stop_lines": []})
     junctions.write_text(json.dumps(towns))
     return filename, episode_hash
 

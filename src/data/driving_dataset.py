@@ -234,6 +234,7 @@ class DrivingSequenceDataset(Dataset):
         self.commands: list[np.ndarray] = []
         self.target_points: list[np.ndarray] = []
         self.situations: list[np.ndarray] = []
+        self.excluded: list[np.ndarray] = []
         self.clips: list[ClipKey] = []
         for ep_idx, ep_path in enumerate(self.episode_files):
             with h5py.File(ep_path, "r") as f:
@@ -245,6 +246,7 @@ class DrivingSequenceDataset(Dataset):
             self.commands.append(episode.command.astype(np.int8))
             self.target_points.append(episode.target_point)
             self.situations.append(episode.situation)
+            self.excluded.append(episode.excluded)
             self.clips += [(ep_idx, s) for s in range(0, n - seq_len + 1, stride)]
 
         if not self.clips:
@@ -316,7 +318,8 @@ class DrivingSequenceDataset(Dataset):
                 nav_command: (seq_len,) int64  (RoadOption derived from the path, 0-indexed)
                 velocity: (seq_len, 3) float32  (z-score normalised)
                 loss_weight: (seq_len,) float32 — per-frame weight
-                    (1.0 for moving frames, 0.1 for stationary)
+                    (1.0 for moving frames, 0.1 for stationary, 0 for frames kept out
+                    of the loss: labels.misplaced_stops)
                 target_speed: (seq_len,) float32  (normalised ∈ [0, 1];
                     multiply by MAX_SPEED_KMH to recover km/h)
                 driving_mode: (seq_len,) int64  (DrivingMode enum, for aux loss)
@@ -327,7 +330,7 @@ class DrivingSequenceDataset(Dataset):
                     the end of the recording and is clamped; left out of the loss)
                 target_point: (seq_len, 2) float32  (the path 30 m ahead in the vehicle's
                     frame: x forward, y right, metres; a route input)
-                situation: (seq_len, 10) bool  (labels.SITUATIONS that hold; several can)
+                situation: (seq_len, 11) bool  (labels.SITUATIONS that hold; several can)
         """
         ep_idx, start = key if isinstance(key, tuple) else self.clips[key]
         if not 0 <= start <= self.episode_frames[ep_idx] - self.seq_len:
@@ -359,6 +362,7 @@ class DrivingSequenceDataset(Dataset):
             torch.tensor(self.STATIONARY_LOSS_WEIGHT),
             torch.tensor(1.0),
         )
+        loss_weight[torch.from_numpy(self.excluded[ep_idx][start:end])] = 0.0
 
         # Z-score normalise velocity
         velocity = (velocity - VELOCITY_MEAN) / VELOCITY_STD.clamp(min=1e-6)

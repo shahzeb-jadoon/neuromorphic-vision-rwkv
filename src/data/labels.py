@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+import json
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, fields
 
 import numpy as np
 from matplotlib.path import Path as Outline
@@ -43,7 +44,7 @@ def ego_waypoints(position: np.ndarray, yaw: np.ndarray, offsets: Sequence[int])
     return _vehicle_frame(d[..., 0], d[..., 1], yaw[:, None])
 
 
-def _vehicle_frame(dx: np.ndarray, dy: np.ndarray, yaw: np.ndarray) -> np.ndarray:
+def _vehicle_frame(dx: np.ndarray, dy: np.ndarray, yaw: np.ndarray | float) -> np.ndarray:
     """World offsets (..., ) as (..., 2) float32: x forward and y right of a vehicle at yaw."""
     psi = np.radians(np.asarray(yaw, np.float64))
     cos, sin = np.cos(psi), np.sin(psi)
@@ -51,8 +52,9 @@ def _vehicle_frame(dx: np.ndarray, dy: np.ndarray, yaw: np.ndarray) -> np.ndarra
 
 
 # Route labels: what the path does at junctions, where it leads, and the situation the
-# vehicle is in. Computed from a path (a driven trajectory or a planned route) and the
-# junction outlines of its town (scripts/export_junctions.py).
+# vehicle is in. Computed from a path (a driven trajectory or a planned route), the junction
+# outlines of its town (scripts/export_junctions.py) and, for situations, the traffic rules
+# and road users the expert recorded around it.
 
 # RoadOption values, with CARLA's meaning: LEFT, RIGHT or STRAIGHT through a junction.
 LEFT, RIGHT, STRAIGHT, LANEFOLLOW = 1, 2, 3, 4
@@ -69,6 +71,12 @@ PATH_STEP = 0.5  # m: resolution of the path's heading
 STANDING_SPEED = 0.14  # m/s (0.5 km/h)
 RULE_AHEAD = 30.0  # m: a red light or stop sign this close ahead is approached or, standing,
 # stopped for; this includes waiting in a queue for it
+VEHICLE_REACH = 25.0  # m, bumper to bumper: a vehicle in the path this close is followed or,
+# standing, stopped for (the expert's shortest following distance)
+VEHICLE_LANE = 1.75  # m: a vehicle centred this close to the line straight ahead is in the path
+PEDESTRIAN_REACH = 15.0  # m: the expert's pedestrian hazard distance
+PEDESTRIAN_LANE = 2.5  # m: a pedestrian this close to the line straight ahead, now or 1 s on, is
+# in the path (the expert's lane half-width)
 
 SITUATIONS = (
     "approaching junction",
@@ -79,10 +87,10 @@ SITUATIONS = (
     "approaching stop sign",
     "stopped at stop sign",
     "following vehicle",
+    "stopped for vehicle",
+    "yielding to pedestrian",
     "stopped for pedestrian",
-    "emergency stop",
 )
-_MODE = {name: code for code, name in S.DRIVING_MODE_NAMES.items()}
 _RED = [code for code, name in S.TRAFFIC_LIGHT_STATE_NAMES.items() if name in ("Yellow", "Red")]
 
 
@@ -103,6 +111,9 @@ class Route:
     turning: np.ndarray  # (N,) bool: the path curves by TURNING_CURVATURE or more here
     target: np.ndarray  # (N, 2) float32: TARGET_DISTANCE ahead along the path, x forward
     # and y right of the vehicle, metres
+
+    def __getitem__(self, rows: slice) -> Route:
+        return Route(*(getattr(self, field.name)[rows] for field in fields(self)))
 
 
 def route(position: np.ndarray, yaw: np.ndarray, junction: np.ndarray) -> Route:
@@ -160,36 +171,148 @@ def route(position: np.ndarray, yaw: np.ndarray, junction: np.ndarray) -> Route:
     return Route(command, approaching, in_junction, turning, target)
 
 
+def vehicle_gaps(records: Sequence[str | bytes]) -> np.ndarray:
+    """(N,) bumper-to-bumper gap in metres to the nearest vehicle in the path ahead, inf if none.
+
+    records: the expert's nearby-vehicle JSON of each row. A vehicle is in the path when its
+    box overlaps the expert's corridor along the route, or its centre lies within
+    VEHICLE_LANE of the line straight ahead, whichever way it is heading.
+    """
+    gaps = np.full(len(records), np.inf)
+    for i, record in enumerate(records):
+        if len(record) > 2:
+            ahead = [
+                v["distance"]
+                for v in json.loads(record)
+                if v["longitudinal"] > 0 and (v["obb_in_lane"] or abs(v["lateral"]) < VEHICLE_LANE)
+            ]
+            gaps[i] = min(ahead, default=np.inf)
+    return gaps
+
+
+def pedestrian_distances(records: Sequence[str | bytes]) -> np.ndarray:
+    """(N,) distance in metres to the nearest pedestrian in the path ahead, inf if none.
+
+    records: the expert's nearby-pedestrian JSON of each row. A pedestrian is in the path when
+    within PEDESTRIAN_LANE of the line straight ahead, now or where its velocity takes it in
+    1 s; its distance is then the nearer of the two.
+    """
+    found = np.full(len(records), np.inf)
+    for i, record in enumerate(records):
+        if len(record) > 2:
+            found[i] = min(
+                (
+                    min(p["distance"], p["predicted_distance"])
+                    for p in json.loads(record)
+                    if (p["is_ahead"] and abs(p["lateral"]) < PEDESTRIAN_LANE)
+                    or (p["predicted_ahead"] and abs(p["predicted_lateral"]) < PEDESTRIAN_LANE)
+                ),
+                default=np.inf,
+            )
+    return found
+
+
 def situations(
     route: Route,
     speed: np.ndarray,
     light_state: np.ndarray,
     light_distance: np.ndarray,
     stop_distance: np.ndarray,
-    mode: np.ndarray,
+    vehicle_gap: np.ndarray,
+    pedestrian_distance: np.ndarray,
 ) -> np.ndarray:
     """(N, len(SITUATIONS)) bool: which situations hold at each row; several can at once.
 
     speed in m/s; light_state as TRAFFIC_LIGHT_STATE_NAMES codes, with light_distance and
-    stop_distance in metres, negative when there is none; mode as DRIVING_MODE_NAMES codes,
-    the expert's own reason for following, stopping for a pedestrian, or its emergency stop
-    (braking for, or standing behind, an obstacle in its path, mostly a stopped vehicle).
+    stop_distance in metres, negative when there is none; vehicle_gap and
+    pedestrian_distance from vehicle_gaps and pedestrian_distances. Each cause comes as a
+    pair, moving and standing: a "stopped" situation always stands still.
     """
     standing = speed < STANDING_SPEED
-    red = np.isin(light_state, _RED) & (light_distance >= 0)
-    sign = stop_distance >= 0
+    red = _red_ahead(light_state, light_distance)
+    sign = (stop_distance >= 0) & (stop_distance <= RULE_AHEAD)
+    vehicle = vehicle_gap <= VEHICLE_REACH
+    pedestrian = pedestrian_distance <= PEDESTRIAN_REACH
     return np.stack(
         [
             route.approaching,
             route.in_junction,
             route.turning,
-            red & ~standing & (light_distance <= RULE_AHEAD),
-            red & standing & (light_distance <= RULE_AHEAD),
-            sign & ~standing & (stop_distance <= RULE_AHEAD),
-            sign & standing & (stop_distance <= RULE_AHEAD),
-            mode == _MODE["VehicleFollowing"],
-            mode == _MODE["PedestrianStop"],
-            mode == _MODE["EmergencyStop"],
+            red & ~standing,
+            red & standing,
+            sign & ~standing,
+            sign & standing,
+            vehicle & ~standing,
+            vehicle & standing,
+            pedestrian & ~standing,
+            pedestrian & standing,
         ],
         axis=1,
     )
+
+
+def _red_ahead(light_state: np.ndarray, light_distance: np.ndarray) -> np.ndarray:
+    return np.isin(light_state, _RED) & (light_distance >= 0) & (light_distance <= RULE_AHEAD)
+
+
+# The expert sometimes stops for a red light in the wrong place: it notices the light late and
+# stops inside the junction, or misjudges the stop line and stops well before it. Those stops,
+# and the approach that led to them, are kept out of training.
+STOP_LINE_REACH = 20.0  # m along the heading: the stop line a standing vehicle is measured from
+STOP_LINE_SIDE = 10.0  # m: lines of the other lanes of the same approach count
+STOP_LINE_HEADING = 30.0  # deg: a line is in the vehicle's direction within this
+PAST_LINE = 4.0  # m: a vehicle centre further past the line stands inside the junction; a
+# correct stop has it within 3 m of the line
+SHORT_OF_LINE = 6.0  # m: further before the line, with nothing in the path, is too early
+MIN_STOP = 2.0  # s: a shorter stop is a pause while creeping up to the line
+STOP_APPROACH = 5.0  # s before a misplaced stop are excluded with it: the expert usually
+# reacts to a red light 5 s before standing
+
+
+def stop_line_ahead(xy: np.ndarray, yaw: float, stop_lines: np.ndarray) -> float | None:
+    """Metres along the heading from a vehicle at xy (world, metres) and CARLA yaw (degrees)
+    to the nearest stop line in its direction, negative once passed; None if there is none
+    within STOP_LINE_REACH. stop_lines: (M, 3) x, y and CARLA yaw of traffic-light stop lines.
+    """
+    local = _vehicle_frame(stop_lines[:, 0] - xy[0], stop_lines[:, 1] - xy[1], yaw)
+    turn = (stop_lines[:, 2] - yaw + 180) % 360 - 180
+    near = (
+        (np.abs(turn) < STOP_LINE_HEADING)
+        & (np.abs(local[:, 1]) < STOP_LINE_SIDE)
+        & (np.abs(local[:, 0]) < STOP_LINE_REACH)
+    )
+    if not near.any():
+        return None
+    along = local[near, 0]
+    return float(along[np.argmin(np.abs(along))])
+
+
+def misplaced_stops(
+    position: np.ndarray,
+    yaw: np.ndarray,
+    speed: np.ndarray,
+    light_state: np.ndarray,
+    light_distance: np.ndarray,
+    vehicle_gap: np.ndarray,
+    stop_lines: np.ndarray,
+    fps: int,
+) -> np.ndarray:
+    """(N,) bool: rows of red-light stops made in the wrong place, and the STOP_APPROACH
+    before each.
+
+    Rows are `fps` apart; position (N, 2+) and yaw (N,) as in route(), the other signals as
+    in situations(). A stop is a run of standing rows, at least MIN_STOP long, that begins at
+    a red or yellow light within RULE_AHEAD with no vehicle in the path; it is misplaced when
+    the vehicle stands more than PAST_LINE past its stop line or more than SHORT_OF_LINE
+    before it.
+    """
+    excluded = np.zeros(len(speed), bool)
+    edges = np.flatnonzero(np.diff(np.r_[0, (speed < STANDING_SPEED).astype(np.int8), 0]))
+    red = _red_ahead(light_state, light_distance)
+    for start, end in zip(edges[::2], edges[1::2]):
+        if end - start < MIN_STOP * fps or not red[start] or vehicle_gap[start] <= VEHICLE_REACH:
+            continue
+        line = stop_line_ahead(position[start, :2], float(yaw[start]), stop_lines)
+        if line is not None and not -PAST_LINE <= line <= SHORT_OF_LINE:
+            excluded[max(start - round(STOP_APPROACH * fps), 0) : end] = True
+    return excluded

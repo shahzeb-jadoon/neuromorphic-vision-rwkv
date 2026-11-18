@@ -57,6 +57,7 @@ COLUMNS = (
     "wp_ok",
     "situation",
     "point",
+    "excluded",
 )
 TURNING = labels.SITUATIONS.index("turning")
 
@@ -93,6 +94,7 @@ def read_episode(path: Path) -> dict[str, Any]:
                 wp_ok=np.arange(n) + max(WAYPOINT_OFFSETS) < len(w.position),
                 situation=episode.situation,
                 point=episode.target_point,
+                excluded=episode.excluded,
             )
     except Exception as e:  # noqa: BLE001 — an unreadable episode is itself a finding
         record["error"] = f"{type(e).__name__}: {e}"
@@ -170,6 +172,13 @@ def findings(t: dict[str, np.ndarray]) -> list[tuple[str, str, np.ndarray]]:
             "Standing still in a driving mode",
             "FollowLane, ApproachingTurn or Turning below 0.5 km/h for 2 s or longer",
             lasting(moving_mode & (t["speed"] < STANDING), ep, 2 * FPS),
+        ),
+        (
+            "Red-light stop in the wrong place",
+            f"Standing more than {labels.PAST_LINE:.0f} m past the stop line, or more than "
+            f"{labels.SHORT_OF_LINE:.0f} m before it with nothing in the path; these and the "
+            f"{labels.STOP_APPROACH:.0f} s before each are kept out of the loss",
+            t["excluded"] & (t["speed"] < STANDING),
         ),
         (
             "Faster than the target speed",
@@ -388,6 +397,7 @@ def main() -> None:
             "Dropped by the label rules",
             f"{1 - total / FPS / max(recorded_s, 1e-9):.1%} of recorded time",
         ],
+        ["Kept out of the loss", f"{t['excluded'].mean():.2%} of usable frames"],
         ["Outcomes", ", ".join(f"{sum(r['status'] == s for _, r in ok)} {s}" for s in statuses)],
     ]
     head = [

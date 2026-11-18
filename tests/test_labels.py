@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+
 import numpy as np
 import pytest
 
@@ -17,9 +19,12 @@ from src.data.labels import (
     Route,
     ego_waypoints,
     junction_ids,
+    misplaced_stops,
+    pedestrian_distances,
     route,
     situations,
     usable_end,
+    vehicle_gaps,
 )
 
 OFFSETS = (5, 10, 15, 20)
@@ -165,18 +170,19 @@ def test_target_point_lies_ahead_along_the_path() -> None:
     assert np.allclose(target, [20 + 10 * np.sin(1.0), 10 - 10 * np.cos(1.0)], atol=0.1)
 
 
-def test_situations_follow_the_rules_and_the_expert() -> None:
+def test_situations_pair_each_cause_moving_and_standing() -> None:
     names = {name: i for i, name in enumerate(SITUATIONS)}
     position, yaw = drive([(10, 0)])
-    r = route_of(position[:8], yaw[:8], [])
-    red, green = 3, 1  # TRAFFIC_LIGHT_STATE_NAMES codes
+    r = route_of(position[:10], yaw[:10], [])
+    red, green, inf = 3, 1, np.inf  # TRAFFIC_LIGHT_STATE_NAMES codes
     got = situations(
         r,
-        speed=np.array([5, 0, 0, 5, 5, 0, 5, 5]),
-        light_state=np.array([red, red, green, red, 0, 0, 0, 0]),
-        light_distance=np.array([25, 28, 10, 40, -1, -1, -1, -1]),
-        stop_distance=np.array([-1, -1, -1, -1, 20, 5, -1, -1]),
-        mode=np.array([1, 4, 1, 1, 1, 8, 5, 7]),
+        speed=np.array([5, 0, 0, 5, 5, 0, 5, 0, 5, 0]),
+        light_state=np.array([red, red, green, red, 0, 0, 0, 0, 0, 0]),
+        light_distance=np.array([25, 28, 10, 40, -1, -1, -1, -1, -1, -1]),
+        stop_distance=np.array([-1, -1, -1, -1, 20, 5, -1, -1, -1, -1]),
+        vehicle_gap=np.array([inf, inf, inf, inf, inf, inf, 20, 4, 30, inf]),
+        pedestrian_distance=np.array([inf] * 8 + [10, 12]),
     )
     expected = [
         {"approaching red light"},
@@ -186,7 +192,68 @@ def test_situations_follow_the_rules_and_the_expert() -> None:
         {"approaching stop sign"},
         {"stopped at stop sign"},
         {"following vehicle"},
-        {"emergency stop"},
+        {"stopped for vehicle"},
+        {"yielding to pedestrian"},
+        {"stopped for pedestrian"},
     ]
     for row, want in zip(got, expected):
         assert {name for name, i in names.items() if row[i]} == want
+
+
+def test_road_users_count_only_in_the_path_ahead() -> None:
+    def vehicle(lon: float, lat: float, gap: float, corridor: bool = False) -> dict:
+        return {"distance": gap, "longitudinal": lon, "lateral": lat, "obb_in_lane": corridor}
+
+    def walker(lat: float, later: float, ahead: bool = True) -> dict:
+        return {
+            "distance": 10.0,
+            "lateral": lat,
+            "is_ahead": ahead,
+            "predicted_distance": 9.5,
+            "predicted_lateral": later,
+            "predicted_ahead": ahead,
+        }
+
+    vehicles = [
+        [],
+        [vehicle(12, 0.5, 7.5), vehicle(8, 3.5, 3.5)],  # ahead, and in the next lane
+        [vehicle(9, -6, 4.0, corridor=True)],  # across the corridor of a turn
+        [vehicle(-6, 0, 1.5)],  # behind
+    ]
+    assert vehicle_gaps([json.dumps(v) for v in vehicles]).tolist() == [np.inf, 7.5, 4.0, np.inf]
+    walkers = [[walker(1.0, 1.0)], [walker(4.0, 2.0)], [walker(4.0, 4.5)], [walker(0, 0, False)]]
+    got = pedestrian_distances([json.dumps(w) for w in walkers])
+    assert got.tolist() == [9.5, 9.5, np.inf, np.inf]  # in the lane, stepping in, pavement, behind
+
+
+@pytest.mark.parametrize(
+    "stand, seconds, light, gap, misplaced",
+    [
+        (99.5, 3, 3, np.inf, False),  # at the line
+        (106.0, 3, 3, np.inf, True),  # 6 m past it, inside the junction
+        (92.0, 3, 3, np.inf, True),  # 8 m short with nothing in the path
+        (92.0, 1, 3, np.inf, False),  # a pause while creeping up to the line
+        (92.0, 3, 3, 4.0, False),  # 8 m short, queueing behind a vehicle
+        (106.0, 3, 1, np.inf, False),  # not a red-light stop
+    ],
+)
+def test_a_red_light_stop_in_the_wrong_place_is_excluded_with_its_approach(
+    stand: float, seconds: int, light: int, gap: float, misplaced: bool
+) -> None:
+    fps = 10  # 6 s at 10 m/s, standing at x = stand, then 3 s on
+    still = seconds * fps
+    x = np.r_[stand - 60 + np.arange(60.0), np.full(still, stand), stand + np.arange(1, 31.0)]
+    speed = np.r_[np.full(60, 10.0), np.zeros(still), np.full(30, 10.0)]
+    lines = np.array([[100.0, 1.75, 0.0], [104.0, 6.0, 90.0]])  # this lane's, the cross street's
+    got = misplaced_stops(
+        np.c_[x, np.zeros_like(x)],
+        np.zeros_like(x),
+        speed,
+        np.full(len(x), light),
+        np.full(len(x), 8.0),
+        np.full(len(x), gap),
+        lines,
+        fps,
+    )
+    rows = np.arange(len(x))
+    assert np.array_equal(got, misplaced & (rows >= 10) & (rows < 60 + still))

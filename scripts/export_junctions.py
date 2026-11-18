@@ -1,9 +1,11 @@
-"""Export the junction areas of CARLA towns, for labels that need to know where junctions are.
+"""Export the junctions of CARLA towns, for labels that need to know where junctions are.
 
 Loads each town in a running CARLA server (CARLA_HOST, CARLA_PORT), samples its driving
 lanes inside every junction every 0.5 m, widens them by half a lane on each side and writes
-the convex outline of each junction (world x, y in metres) to OUT.json. Loading a town
-replaces the server's world; the town loaded before is loaded again at the end.
+the convex outline of each junction (world x, y in metres) to OUT.json, with the stop line
+of every lane a traffic light controls (world x, y in metres and CARLA yaw in degrees, from
+the light's stop waypoints). Loading a town replaces the server's world; the town loaded
+before is loaded again at the end.
 
 usage: python scripts/export_junctions.py OUT.json [--towns Town01 Town03 ...]
 """
@@ -43,6 +45,16 @@ def junction_outlines(world_map: carla.Map) -> dict[int, list[list[float]]]:
     return outlines
 
 
+def stop_lines(world: carla.World) -> list[tuple[float, float, float]]:
+    return sorted(
+        {
+            (round(t.location.x, 2), round(t.location.y, 2), round(t.rotation.yaw, 1))
+            for light in world.get_actors().filter("traffic.traffic_light*")
+            for t in (w.transform for w in light.get_stop_waypoints())
+        }
+    )
+
+
 def main() -> None:
     p = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
@@ -57,9 +69,13 @@ def main() -> None:
     towns = {}
     try:
         for town in args.towns:
-            outlines = junction_outlines(client.load_world(town).get_map())
-            towns[town] = [{"id": j, "outline": o} for j, o in sorted(outlines.items())]
-            print(f"{town}: {len(outlines)} junctions", flush=True)
+            world = client.load_world(town)
+            outlines, lines = junction_outlines(world.get_map()), stop_lines(world)
+            towns[town] = {
+                "junctions": [{"id": j, "outline": o} for j, o in sorted(outlines.items())],
+                "stop_lines": [list(line) for line in lines],
+            }
+            print(f"{town}: {len(outlines)} junctions, {len(lines)} stop lines", flush=True)
     finally:
         client.load_world(before)
     args.out.parent.mkdir(parents=True, exist_ok=True)

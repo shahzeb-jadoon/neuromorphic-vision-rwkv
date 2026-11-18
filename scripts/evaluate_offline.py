@@ -77,9 +77,10 @@ def train_labels(episodes: list[Path], fps: int) -> tuple[np.ndarray, np.ndarray
     for path in tqdm(episodes, desc="training labels"):
         with h5py.File(path, "r") as f:
             episode = schema_adapter.read_labels(f, fps)
-        steer.append(episode.steering)
-        accel.append(episode.acceleration)
-        nav.append(episode.command - 1)
+        kept = ~episode.excluded
+        steer.append(episode.steering[kept])
+        accel.append(episode.acceleration[kept])
+        nav.append(episode.command[kept] - 1)
     return np.concatenate(steer), np.concatenate(accel), np.concatenate(nav)
 
 

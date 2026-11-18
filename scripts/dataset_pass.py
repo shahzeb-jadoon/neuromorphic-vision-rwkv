@@ -76,9 +76,10 @@ def problems(sample: dict[str, torch.Tensor], seq_len: int) -> list[str]:
     if not ((sample["driving_mode"] >= 0) & (sample["driving_mode"] < N_DRIVING_MODES)).all():
         found.append(f"driving_mode {sample['driving_mode'].tolist()}")
     if not torch.isin(
-        sample["loss_weight"], torch.tensor([DrivingSequenceDataset.STATIONARY_LOSS_WEIGHT, 1.0])
+        sample["loss_weight"],
+        torch.tensor([0.0, DrivingSequenceDataset.STATIONARY_LOSS_WEIGHT, 1.0]),
     ).all():
-        found.append("loss_weight not 0.1 or 1")
+        found.append("loss_weight not 0, 0.1 or 1")
     return found
 
 
