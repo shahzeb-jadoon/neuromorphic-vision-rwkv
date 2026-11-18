@@ -13,7 +13,7 @@ import torch
 
 from src.data.driving_dataset import DrivingSequenceDataset
 from src.training.config import load_training_config
-from src.training.trainer import ControlError, NonFiniteTraining, Trainer
+from src.training.trainer import ControlError, NonFiniteTraining, StepTimes, Trainer
 
 
 def make_trainer(data_dir: Path, out: Path, device: str = "cpu") -> Trainer:
@@ -100,6 +100,15 @@ def test_training_gives_the_policy_the_speed_and_target_point(trainer: Trainer) 
     trainer._compute_losses(batch)
     assert torch.equal(seen[0][2], batch["speed"])
     assert torch.equal(seen[0][3], batch["target_point"])
+
+
+def test_step_times_average_the_steps_since_the_last_report() -> None:
+    times = StepTimes()
+    times.add(1.0, 3.0)
+    times.add(3.0, 5.0)
+    assert times.report() == {"data_wait_s": 2.0, "train_step_s": 4.0}
+    times.add(0.5, 0.25)
+    assert times.report() == {"data_wait_s": 0.5, "train_step_s": 0.25}
 
 
 def test_control_error_pools_the_frames_that_count() -> None:

@@ -6,8 +6,8 @@ Usage:
 
 Fails (exit code 1) when the run directory is missing, when any logged loss is
 not finite, when every logged gradient norm is zero (the failure mode of the
-April 2026 run), when no validation pass was logged, or when no checkpoint was
-written.
+April 2026 run), when step times were not logged, when no validation pass was
+logged, or when no checkpoint was written.
 """
 
 from __future__ import annotations
@@ -18,6 +18,7 @@ import sys
 from pathlib import Path
 
 LOSS_FIELDS = ("total_loss", "control_loss", "speed_loss", "mode_loss", "waypoint_loss")
+TIME_FIELDS = ("data_wait_s", "train_step_s")
 
 
 def check_run(run_dir: Path) -> list[str]:
@@ -41,6 +42,12 @@ def check_run(run_dir: Path) -> list[str]:
             value = float(row[name])
             if not math.isfinite(value):
                 problems.append(f"non-finite {row['split']} {name} at step {row['step']}")
+
+    for row in train:
+        for name in TIME_FIELDS:
+            value = float(row[name])
+            if not (math.isfinite(value) and value >= 0.0):
+                problems.append(f"bad {name} {row[name]!r} at step {row['step']}")
 
     grad_norms = [float(r["grad_norm"]) for r in train]
     if grad_norms and not any(g > 0.0 for g in grad_norms if math.isfinite(g)):

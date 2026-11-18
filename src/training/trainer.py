@@ -152,6 +152,24 @@ class ControlError:
         }
 
 
+class StepTimes:
+    """Mean seconds per step spent waiting for data and training, since the last report."""
+
+    def __init__(self) -> None:
+        self.waiting, self.training, self.steps = 0.0, 0.0, 0
+
+    def add(self, waiting: float, training: float) -> None:
+        self.waiting += waiting
+        self.training += training
+        self.steps += 1
+
+    def report(self) -> dict[str, float]:
+        steps = max(self.steps, 1)
+        times = {"data_wait_s": self.waiting / steps, "train_step_s": self.training / steps}
+        self.waiting, self.training, self.steps = 0.0, 0.0, 0
+        return times
+
+
 class CSVRunLogger:
     """CSV + TensorBoard (+ optional W&B) experiment logger."""
 
@@ -173,6 +191,8 @@ class CSVRunLogger:
         "control_score",
         "lr",
         "grad_norm",
+        "data_wait_s",
+        "train_step_s",
         "rss_main_mib",
         "rss_worker_max_mib",
     ]
@@ -237,6 +257,8 @@ class CSVRunLogger:
             "control_score": metrics.get("control_score", float("nan")),
             "lr": metrics.get("lr", float("nan")),
             "grad_norm": metrics.get("grad_norm", float("nan")),
+            "data_wait_s": metrics.get("data_wait_s", float("nan")),
+            "train_step_s": metrics.get("train_step_s", float("nan")),
             "rss_main_mib": metrics.get("rss_main_mib", float("nan")),
             "rss_worker_max_mib": max(
                 (v for k, v in metrics.items() if k.startswith("rss_worker")), default=float("nan")
@@ -751,6 +773,7 @@ class Trainer:
             resume_epoch = self.current_epoch
             steps_per_epoch = len(self.train_loader)
             total_steps = (target_epochs - self.current_epoch) * steps_per_epoch
+            step_times = StepTimes()
 
             for epoch in range(self.current_epoch, target_epochs):
                 self.current_epoch = epoch
@@ -762,9 +785,12 @@ class Trainer:
                     dynamic_ncols=True,
                     leave=True,
                 )
+                wait_start = time.time()
                 for batch_idx, batch in pbar:
+                    waited = time.time() - wait_start
                     if epoch == resume_epoch and batch_idx < self.resume_batch_in_epoch:
                         pbar.update()
+                        wait_start = time.time()
                         continue
 
                     self.global_step += 1
@@ -774,6 +800,7 @@ class Trainer:
                     t_step_start = time.time()
                     metrics = self._train_step(batch)
                     step_secs = time.time() - t_step_start
+                    step_times.add(waited, step_secs)
 
                     if metrics is not None:
                         steps_done = self.global_step - (resume_epoch * steps_per_epoch)
@@ -791,7 +818,7 @@ class Trainer:
 
                     logging_step = self.global_step % max(1, self.cfg.logging.log_every_steps) == 0
                     if metrics is not None and logging_step:
-                        metrics |= loader_rss_mib(self.train_loader)
+                        metrics |= loader_rss_mib(self.train_loader) | step_times.report()
                         self.logger.log_metrics(
                             "train", self.global_step, self.current_epoch, metrics
                         )
@@ -836,6 +863,8 @@ class Trainer:
                         if self.cfg.logging.plot_on_finish:
                             plot_run_dashboard(self.run_dir)
                         return self.run_dir
+
+                    wait_start = time.time()
 
                 pbar.close()
                 if (epoch + 1) % max(1, self.cfg.checkpoint.save_every_epochs) == 0:
