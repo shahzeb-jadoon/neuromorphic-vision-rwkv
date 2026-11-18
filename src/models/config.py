@@ -11,21 +11,21 @@ from dataclasses import dataclass, field
 
 @dataclass
 class TokenizerConfig:
-    """Configuration for the vision tokenizer (patch embedding + Q-Shift).
+    """Configuration for the vision tokenizer (pretrained CNN + attention pooling).
 
-    The tokenizer converts raw image frames into a sequence of visual
-    tokens suitable for the RWKV encoder.
+    The tokenizer converts raw image frames into one visual token per
+    frame for the temporal core.
 
     Default image size matches the 3-camera panoramic setup:
         3 cameras × 640 px wide × 320 px tall → 1920 × 320 stitched.
     """
 
-    img_height: int = 320
-    img_width: int = 1920
-    in_channels: int = 3
-    patch_size: int = 16  # Divides image into (H/P × W/P) = 20×120 = 2400 patches
-    embed_dim: int = 768  # Dimension of each patch token (384 for debug/ablation)
-    use_qshift: bool = True  # Apply Q-Shift spatial mixing
+    img_height: int = 320  # multiple of 32, the backbone's stride
+    img_width: int = 1920  # multiple of 32
+    embed_dim: int = 768  # Dimension of each frame token (384 for debug/ablation)
+    pretrained: bool = True  # start training from the ImageNet weights
+    n_queries: int = 8  # learned queries that pool the feature map
+    n_heads: int = 4  # attention heads of the pooling
 
 
 @dataclass

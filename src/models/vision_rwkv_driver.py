@@ -116,7 +116,7 @@ class VisionRWKVDriver(nn.Module):
     """End-to-end driving model: Vision-RWKV with navigation fusion.
 
     This is the top-level model that chains:
-    1. VisionTokenizer:  images → patch tokens, averaged into one token per frame
+    1. VisionTokenizer:  images → one token per frame
     2. TemporalCore:     frame tokens → temporal features
     3. NavigationFusion: temporal features + nav → fused features
     4. PolicyHead:       fused features → control predictions
@@ -163,7 +163,7 @@ class VisionRWKVDriver(nn.Module):
                           mode_logits     (B, T, 8)
                           future_waypoints (B, T, K, 2)
         """
-        tokens = self.tokenizer(images).mean(dim=2)
+        tokens = self.tokenizer(images)
         features, new_state = self.encoder(tokens, state)
         fused = self.fusion(features, nav_command)
         controls = self.policy_head(fused)

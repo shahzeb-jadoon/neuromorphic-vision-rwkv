@@ -124,7 +124,7 @@ def main() -> None:
         )
 
         D = 64
-        H, W = 32, 192  # must be multiples of patch_size=16 → 2×12 = 24 patches
+        H, W = 32, 192  # multiples of the backbone's stride of 32
         cfg = ModelConfig(
             tokenizer=TokenizerConfig(img_height=H, img_width=W, embed_dim=D),
             encoder=RWKVEncoderConfig(embed_dim=D, n_layers=2, ffn_dim=256),

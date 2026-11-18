@@ -307,7 +307,10 @@ class Trainer:
         self.device = self._resolve_device(cfg.run.device)
         print(f"[trainer] device: {describe_device(self.device)}")
 
-        self.model = VisionRWKVDriver(cfg.model).to(self.device)
+        self.model = VisionRWKVDriver(cfg.model)
+        if cfg.model.tokenizer.pretrained:
+            self.model.tokenizer.load_pretrained()
+        self.model.to(self.device)
         if cfg.optimization.compile_encoder and self.device.type == "cuda":
             self.model.encoder = torch.compile(  # type: ignore[assignment]
                 self.model.encoder, mode="default"

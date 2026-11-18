@@ -16,7 +16,7 @@ from src.models.fusion import NavigationFusion
 from src.models.policy_head import PolicyHead
 from src.models.rwkv_encoder import RWKVBlock, RWKVEncoder, RWKVState
 from src.models.temporal import GRUCore, TemporalCore, TemporalState
-from src.models.tokenizer import PatchEmbedding, QShift, VisionTokenizer
+from src.models.tokenizer import AttentionPool, VisionTokenizer
 from src.models.vision_rwkv_driver import VisionRWKVDriver
 
 __all__ = [
@@ -24,8 +24,7 @@ __all__ = [
     "VisionRWKVDriver",
     # Sub-modules
     "VisionTokenizer",
-    "PatchEmbedding",
-    "QShift",
+    "AttentionPool",
     "TemporalCore",
     "TemporalState",
     "GRUCore",

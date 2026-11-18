@@ -15,7 +15,7 @@ the next training run.
 | Path | Contents |
 | --- | --- |
 | `src/data/` | Expert data collection, HDF5 episode schema, clip dataset, route generation |
-| `src/models/` | Vision-RWKV driver: tokenizer, RWKV encoder, navigation fusion, policy head |
+| `src/models/` | Vision-RWKV driver: CNN tokenizer, temporal cores, navigation fusion, policy head |
 | `src/training/` | Trainer with checkpointing and resume |
 | `agents/expert/` | Privileged expert driver that records training data |
 | `agents/learned/` | Agent that drives with a trained model |

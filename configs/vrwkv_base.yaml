@@ -31,10 +31,10 @@ model:
   tokenizer:
     img_height: 320
     img_width: 1920
-    in_channels: 3
-    patch_size: 16
     embed_dim: 768
-    use_qshift: true
+    pretrained: true
+    n_queries: 8
+    n_heads: 4
   encoder:
     core: rwkv
     embed_dim: 768

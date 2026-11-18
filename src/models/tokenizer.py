@@ -1,150 +1,59 @@
-"""Vision tokenizer: Patch embedding + Q-Shift spatial mixing.
+"""Vision tokenizer: a pretrained CNN, then attention pooling into one token per frame.
 
-Converts raw image frames into a sequence of visual tokens for the
-RWKV encoder. Each image is divided into non-overlapping patches,
-linearly projected, and optionally spatially mixed via Q-Shift.
-
-Input:  (B, T, 3, H, W) — batch of image sequences
-        Default panoramic: H=320, W=1920 (3 cameras × 640).
-Output: (B, T, N_patches, embed_dim) — patch token sequences
-
-where N_patches = (H / patch_size) * (W / patch_size)
-      Default: (320/16) * (1920/16) = 20 × 120 = 2400 patches.
+Input:  (B, T, 3, H, W) ImageNet-normalised frames, H and W multiples of 32
+Output: (B, T, embed_dim) frame tokens
 """
 
 from __future__ import annotations
 
+from collections import OrderedDict
 from typing import cast
 
 import torch
 import torch.nn as nn
+from torchvision.models import ResNet18_Weights, resnet18
+from torchvision.ops.misc import FrozenBatchNorm2d
 
 from src.models.config import TokenizerConfig
 
+BACKBONE_STRIDE = 32
+BACKBONE_CHANNELS = 512
 
-class PatchEmbedding(nn.Module):
-    """Convert images to patch token sequences via linear projection.
 
-    Splits each image into non-overlapping patches and projects them
-    to the embedding dimension using a strided convolution.
+def grid_positions(rows: int, cols: int, dim: int) -> torch.Tensor:
+    """Sine-cosine codes of a grid's cells, row by row: (rows * cols, dim), half per axis."""
 
-    Args:
-        config: Tokenizer configuration.
-    """
+    def axis(cells: int) -> torch.Tensor:
+        frequencies = 10000.0 ** -torch.linspace(0.0, 1.0, dim // 4)
+        angles = torch.arange(cells)[:, None] * frequencies
+        return torch.cat([angles.sin(), angles.cos()], dim=1)
 
-    def __init__(self, config: TokenizerConfig) -> None:
+    row_codes = axis(rows)[:, None].expand(-1, cols, -1)
+    col_codes = axis(cols)[None].expand(rows, -1, -1)
+    return torch.cat([row_codes, col_codes], dim=-1).flatten(0, 1)
+
+
+class AttentionPool(nn.Module):
+    """Learned queries, each gathering what it needs from a set of tokens."""
+
+    def __init__(self, dim: int, n_queries: int, n_heads: int) -> None:
         super().__init__()
-        self.config = config
-        self.n_patches_h = config.img_height // config.patch_size
-        self.n_patches_w = config.img_width // config.patch_size
-        self.n_patches = self.n_patches_h * self.n_patches_w
+        self.queries = nn.Parameter(torch.randn(n_queries, dim))
+        self.attention = nn.MultiheadAttention(dim, n_heads, batch_first=True)
+        self.norm = nn.LayerNorm(dim)
 
-        # Strided conv = patch extraction + linear projection
-        self.projection = nn.Conv2d(
-            in_channels=config.in_channels,
-            out_channels=config.embed_dim,
-            kernel_size=config.patch_size,
-            stride=config.patch_size,
-        )
-
-        # Learnable position embedding
-        self.position_embedding = nn.Parameter(
-            torch.randn(1, self.n_patches, config.embed_dim) * 0.02
-        )
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """Extract patch embeddings from images.
-
-        Args:
-            x: (B, C, H, W) image tensor, float32, ImageNet-normalized.
-
-        Returns:
-            (B, N_patches, embed_dim) patch tokens with position encoding.
-        """
-        if x.ndim == 5:
-            batch, steps, channels, height, width = x.shape
-            x = x.reshape(batch * steps, channels, height, width)
-        if x.ndim != 4:
-            raise ValueError(f"PatchEmbedding expected 4D or 5D input, got shape {tuple(x.shape)}")
-
-        tokens = self.projection(x)  # (B, D, H/P, W/P)
-        tokens = tokens.flatten(2).transpose(1, 2)  # (B, N_patches, D)
-        return cast(torch.Tensor, tokens + self.position_embedding)
-
-
-class QShift(nn.Module):
-    """Q-Shift spatial token mixing for 2D patch grids.
-
-    Shifts portions of the token embedding channels in 4 spatial
-    directions (up, down, left, right) to enable cross-patch
-    information flow without attention. See RWKV-v5/v6 papers.
-
-    Args:
-        embed_dim: Token embedding dimension.
-        n_patches_h: Number of patches along height.
-        n_patches_w: Number of patches along width.
-    """
-
-    def __init__(self, embed_dim: int, n_patches_h: int, n_patches_w: int) -> None:
-        super().__init__()
-        self.embed_dim = embed_dim
-        self.n_patches_h = n_patches_h
-        self.n_patches_w = n_patches_w
-
-        # Each direction gets 1/4 of the channels
-        assert embed_dim % 4 == 0, f"embed_dim ({embed_dim}) must be divisible by 4 for Q-Shift"
-        self.shift_size = embed_dim // 4
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """Apply Q-Shift spatial mixing.
-
-        Args:
-            x: (B, N_patches, embed_dim) patch tokens.
-
-        Returns:
-            (B, N_patches, embed_dim) spatially mixed tokens.
-        """
-        if x.ndim != 3:
-            raise ValueError(f"QShift expected 3D input, got shape {tuple(x.shape)}")
-        batch, n_patches, embed_dim = x.shape
-        if embed_dim != self.embed_dim:
-            raise ValueError(
-                f"QShift embed_dim mismatch: expected {self.embed_dim}, got {embed_dim}"
-            )
-        expected_patches = self.n_patches_h * self.n_patches_w
-        if n_patches != expected_patches:
-            raise ValueError(
-                f"QShift patch count mismatch: expected {expected_patches}, got {n_patches}"
-            )
-
-        grid = x.view(batch, self.n_patches_h, self.n_patches_w, embed_dim)
-        shift = self.shift_size
-        chunk_up = grid[..., :shift]
-        chunk_down = grid[..., shift : 2 * shift]
-        chunk_left = grid[..., 2 * shift : 3 * shift]
-        chunk_right = grid[..., 3 * shift :]
-
-        up = torch.zeros_like(chunk_up)
-        up[:, :-1, :, :] = chunk_up[:, 1:, :, :]
-
-        down = torch.zeros_like(chunk_down)
-        down[:, 1:, :, :] = chunk_down[:, :-1, :, :]
-
-        left = torch.zeros_like(chunk_left)
-        left[:, :, :-1, :] = chunk_left[:, :, 1:, :]
-
-        right = torch.zeros_like(chunk_right)
-        right[:, :, 1:, :] = chunk_right[:, :, :-1, :]
-
-        mixed = torch.cat([up, down, left, right], dim=-1)
-        return mixed.view(batch, n_patches, embed_dim)
+    def forward(self, tokens: torch.Tensor) -> torch.Tensor:
+        """(N, M, D) tokens to (N, n_queries, D) pooled tokens."""
+        queries = self.queries.expand(tokens.shape[0], -1, -1)
+        pooled, _ = self.attention(queries, tokens, tokens, need_weights=False)
+        return cast(torch.Tensor, self.norm(queries + pooled))
 
 
 class VisionTokenizer(nn.Module):
-    """Complete vision tokenizer: PatchEmbedding + optional Q-Shift.
+    """ResNet-18 feature map, projected, positioned and pooled into a frame token.
 
-    Processes a sequence of images into visual token sequences
-    suitable for the RWKV temporal encoder.
+    Batch norm is frozen: clips are too correlated to estimate it, and a frame must give
+    the same token however it is batched.
 
     Args:
         config: Tokenizer configuration.
@@ -152,36 +61,45 @@ class VisionTokenizer(nn.Module):
 
     def __init__(self, config: TokenizerConfig) -> None:
         super().__init__()
-        self.config = config
-        self.patch_embed = PatchEmbedding(config)
-
-        if config.use_qshift:
-            self.qshift: QShift | None = QShift(
-                embed_dim=config.embed_dim,
-                n_patches_h=self.patch_embed.n_patches_h,
-                n_patches_w=self.patch_embed.n_patches_w,
+        if config.img_height % BACKBONE_STRIDE or config.img_width % BACKBONE_STRIDE:
+            raise ValueError(
+                f"Image size {config.img_height}x{config.img_width} must be multiples of "
+                f"{BACKBONE_STRIDE}"
             )
-        else:
-            self.qshift = None
+        self.config = config
+        layers = resnet18(norm_layer=FrozenBatchNorm2d).named_children()
+        self.backbone: nn.Module = nn.Sequential(
+            OrderedDict((name, m) for name, m in layers if name not in ("avgpool", "fc"))
+        )
+        dim = config.embed_dim
+        self.project = nn.Conv2d(BACKBONE_CHANNELS, dim, kernel_size=1)
+        self.norm = nn.LayerNorm(dim)
+        rows, cols = config.img_height // BACKBONE_STRIDE, config.img_width // BACKBONE_STRIDE
+        self.position = nn.Parameter(grid_positions(rows, cols, dim)[None])
+        self.pool = AttentionPool(dim, config.n_queries, config.n_heads)
+        self.to_frame = nn.Linear(config.n_queries * dim, dim)
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def load_pretrained(self) -> None:
+        """Load the ImageNet weights into the backbone, downloading them on first use."""
+        weights = ResNet18_Weights.IMAGENET1K_V1.get_state_dict(progress=False)
+        self.backbone.load_state_dict({k: v for k, v in weights.items() if not k.startswith("fc.")})
+
+    def forward(self, images: torch.Tensor) -> torch.Tensor:
         """Tokenize a sequence of images.
 
         Args:
-            x: (B, T, C, H, W) image sequence tensor.
+            images: (B, T, C, H, W) image sequence tensor.
 
         Returns:
-            (B, T, N_patches, embed_dim) visual token sequence.
+            (B, T, embed_dim) frame tokens.
         """
-        if x.ndim != 5:
-            raise ValueError(f"VisionTokenizer expected 5D input, got shape {tuple(x.shape)}")
+        if images.ndim != 5:
+            raise ValueError(f"VisionTokenizer expected 5D input, got shape {tuple(images.shape)}")
 
-        batch, steps, channels, height, width = x.shape
-        flat = x.reshape(batch * steps, channels, height, width)
-        tokens = self.patch_embed(flat)  # (B*T, N_patches, D)
-        if self.qshift is not None:
-            tokens = self.qshift(tokens)
-        return cast(
-            torch.Tensor,
-            tokens.reshape(batch, steps, self.patch_embed.n_patches, self.config.embed_dim),
-        )
+        batch, steps = images.shape[:2]
+        return self.pool_features(self.backbone(images.flatten(0, 1))).view(batch, steps, -1)
+
+    def pool_features(self, features: torch.Tensor) -> torch.Tensor:
+        """(N, 512, rows, cols) backbone features to (N, embed_dim) frame tokens."""
+        tokens = self.norm(self.project(features).flatten(2).transpose(1, 2)) + self.position
+        return cast(torch.Tensor, self.to_frame(self.pool(tokens).flatten(1)))

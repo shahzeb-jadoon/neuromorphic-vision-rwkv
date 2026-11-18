@@ -23,7 +23,7 @@ from src.models.config import (
 from src.models.fusion import NavigationFusion
 from src.models.policy_head import PolicyHead
 from src.models.rwkv_encoder import STATE_PARTS, RWKVBlock, RWKVEncoder
-from src.models.tokenizer import PatchEmbedding, QShift, VisionTokenizer
+from src.models.tokenizer import VisionTokenizer
 from src.models.vision_rwkv_driver import VisionRWKVDriver
 
 # ── Config tests ──────────────────────────────────────────────────────
@@ -89,42 +89,16 @@ class TestModelConfig:
 class TestVisionTokenizer:
     """Tests for tokenizer module instantiation and interface."""
 
-    def test_patch_embedding_instantiates(self) -> None:
-        config = TokenizerConfig()
-        module = PatchEmbedding(config)
-        assert isinstance(module, torch.nn.Module)
-
-    def test_qshift_instantiates(self) -> None:
-        n_h = 320 // 16
-        n_w = 1920 // 16
-        module = QShift(embed_dim=384, n_patches_h=n_h, n_patches_w=n_w)
-        assert isinstance(module, torch.nn.Module)
-
     def test_vision_tokenizer_instantiates(self) -> None:
         config = TokenizerConfig()
         module = VisionTokenizer(config)
         assert isinstance(module, torch.nn.Module)
 
-    def test_patch_embedding_forward_shape(self) -> None:
-        module = PatchEmbedding(TokenizerConfig())
-        x = torch.randn(2, 3, 320, 1920)
-        out = module(x)
-        assert out.shape == (2, module.n_patches, 768)
-
-    def test_qshift_forward_shape(self) -> None:
-        n_h = 320 // 16
-        n_w = 1920 // 16
-        module = QShift(embed_dim=384, n_patches_h=n_h, n_patches_w=n_w)
-        n_patches = n_h * n_w
-        x = torch.randn(1, 4, n_patches, 384)
-        out = module(x.view(4, n_patches, 384))
-        assert out.shape == (4, n_patches, 384)
-
     def test_vision_tokenizer_forward_shape(self) -> None:
         module = VisionTokenizer(TokenizerConfig())
         x = torch.randn(1, 4, 3, 320, 1920)
         out = module(x)
-        assert out.shape == (1, 4, (320 // 16) * (1920 // 16), 768)
+        assert out.shape == (1, 4, 768)
 
 
 # ── RWKV Encoder tests ───────────────────────────────────────────────
