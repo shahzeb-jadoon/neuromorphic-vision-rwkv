@@ -30,12 +30,13 @@ class TokenizerConfig:
 
 @dataclass
 class RWKVEncoderConfig:
-    """Configuration for the RWKV temporal encoder.
+    """Configuration for the temporal core.
 
-    Processes sequences of visual tokens through RWKV blocks,
-    maintaining a recurrent state for temporal context.
+    Processes sequences of visual tokens, maintaining a recurrent
+    state for temporal context.
     """
 
+    core: str = "rwkv"  # rwkv | gru
     embed_dim: int = 768
     n_layers: int = 12
     n_heads: int = 12  # For multi-head state in RWKV-7

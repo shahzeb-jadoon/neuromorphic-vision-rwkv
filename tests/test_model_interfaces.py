@@ -153,7 +153,7 @@ class TestRWKVEncoder:
     def test_encoder_forward_shape(self) -> None:
         config = RWKVEncoderConfig(n_layers=2, embed_dim=64)
         encoder = RWKVEncoder(config)
-        x = torch.randn(1, 4, 196, 64)
+        x = torch.randn(1, 4, 64)
         out, state = encoder(x)
         assert out.shape == (1, 4, 64)
         assert len(state) == 2

@@ -1,19 +1,19 @@
 """Vision-RWKV driver model: full pipeline from images to control signals.
 
 Composes:
-    VisionTokenizer → RWKVEncoder → NavigationFusion → PolicyHead
-                                                     → SpeedHead     (auxiliary)
-                                                     → ModeHead      (auxiliary)
-                                                     → WaypointHead  (auxiliary)
+    VisionTokenizer → TemporalCore → NavigationFusion → PolicyHead
+                                                      → SpeedHead     (auxiliary)
+                                                      → ModeHead      (auxiliary)
+                                                      → WaypointHead  (auxiliary)
 
 Input:
     images:      (B, T, 3, H, W)  — RGB camera frames
     nav_command: (B, T)            — navigation command per frame (0-5)
-    state:       optional RWKVState — recurrent hidden state
+    state:       optional TemporalState — recurrent hidden state
 
 Output:
     controls:    (B, T, 2)         — [steering, acceleration]
-    state:       RWKVState         — updated recurrent state
+    state:       TemporalState     — updated recurrent state
     aux:         dict of auxiliary predictions (speed, mode, waypoints)
 
 Acceleration merges throttle and brake into a single axis:
@@ -25,16 +25,29 @@ At inference time, split back:
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import cast
 
 import torch
 import torch.nn as nn
 
-from src.models.config import ModelConfig
+from src.models.config import ModelConfig, RWKVEncoderConfig
 from src.models.fusion import NavigationFusion
 from src.models.policy_head import PolicyHead
-from src.models.rwkv_encoder import RWKVEncoder, RWKVState
+from src.models.rwkv_encoder import RWKVEncoder
+from src.models.temporal import GRUCore, TemporalCore, TemporalState
 from src.models.tokenizer import VisionTokenizer
+
+
+def build_temporal_core(config: RWKVEncoderConfig) -> TemporalCore:
+    """The temporal core named by `config.core`."""
+    cores: dict[str, Callable[[RWKVEncoderConfig], TemporalCore]] = {
+        "rwkv": RWKVEncoder,
+        "gru": GRUCore,
+    }
+    if config.core not in cores:
+        raise ValueError(f"Unknown temporal core '{config.core}', expected one of {list(cores)}")
+    return cores[config.core](config)
 
 
 # ---------------------------------------------------------------------------
@@ -103,8 +116,8 @@ class VisionRWKVDriver(nn.Module):
     """End-to-end driving model: Vision-RWKV with navigation fusion.
 
     This is the top-level model that chains:
-    1. VisionTokenizer:  images → patch tokens
-    2. RWKVEncoder:      patch tokens → temporal features
+    1. VisionTokenizer:  images → patch tokens, averaged into one token per frame
+    2. TemporalCore:     frame tokens → temporal features
     3. NavigationFusion: temporal features + nav → fused features
     4. PolicyHead:       fused features → control predictions
     5. Auxiliary heads:  fused features → speed, mode, waypoint predictions
@@ -118,7 +131,7 @@ class VisionRWKVDriver(nn.Module):
         self.config = config
 
         self.tokenizer = VisionTokenizer(config.tokenizer)
-        self.encoder = RWKVEncoder(config.encoder)
+        self.encoder = build_temporal_core(config.encoder)
         self.fusion = NavigationFusion(config.fusion)
         self.policy_head = PolicyHead(config.policy_head)
 
@@ -132,8 +145,8 @@ class VisionRWKVDriver(nn.Module):
         self,
         images: torch.Tensor,
         nav_command: torch.Tensor,
-        state: RWKVState | None = None,
-    ) -> tuple[torch.Tensor, RWKVState, dict[str, torch.Tensor]]:
+        state: TemporalState | None = None,
+    ) -> tuple[torch.Tensor, TemporalState, dict[str, torch.Tensor]]:
         """End-to-end forward pass from images to controls.
 
         Args:
@@ -144,13 +157,13 @@ class VisionRWKVDriver(nn.Module):
 
         Returns:
             controls: (B, T, 2) predicted [steering, acceleration].
-            state:    Updated RWKVState for the next call.
+            state:    Updated TemporalState for the next call.
             aux:      Dict of auxiliary predictions keyed by name:
                           speed           (B, T, 1)
                           mode_logits     (B, T, 8)
                           future_waypoints (B, T, K, 2)
         """
-        tokens = self.tokenizer(images)
+        tokens = self.tokenizer(images).mean(dim=2)
         features, new_state = self.encoder(tokens, state)
         fused = self.fusion(features, nav_command)
         controls = self.policy_head(fused)
@@ -163,15 +176,25 @@ class VisionRWKVDriver(nn.Module):
 
         return controls, new_state, aux
 
-    def initial_state(self, batch_size: int, device: torch.device | None = None) -> RWKVState:
-        """Create zero-initialized state for the encoder.
+    def step(
+        self,
+        image: torch.Tensor,
+        nav_command: torch.Tensor,
+        state: TemporalState | None = None,
+    ) -> tuple[torch.Tensor, TemporalState, dict[str, torch.Tensor]]:
+        """`forward` for one frame: (B, 3, H, W) and (B), with no time axis in the outputs."""
+        controls, state, aux = self(image.unsqueeze(1), nav_command.unsqueeze(1), state)
+        return controls.squeeze(1), state, {k: v.squeeze(1) for k, v in aux.items()}
+
+    def initial_state(self, batch_size: int, device: torch.device | None = None) -> TemporalState:
+        """Create zero-initialized state for the temporal core.
 
         Args:
             batch_size: Number of samples in the batch.
             device: Target device. Defaults to model's device.
 
         Returns:
-            Zero-initialized RWKVState list.
+            Zero-initialized TemporalState list.
         """
         if device is None:
             device = next(self.parameters()).device

@@ -31,8 +31,8 @@ References:
   RWKV-6: BlinkDL/RWKV-LM (open source, 2024)
   Vision-RWKV: Duan et al., ICLR 2025 (arXiv:2403.02308)
 
-Input:  (B, T, N_patches, embed_dim) — visual token sequences
-Output: (B, T, embed_dim) — per-frame feature vectors (spatial mean-pooled)
+Input:  (B, T, embed_dim) — per-frame tokens
+Output: (B, T, embed_dim) — per-frame feature vectors
 State:  list[Tensor(B, embed_dim)] — one shift-state tensor per layer
 """
 
@@ -42,9 +42,10 @@ import torch
 import torch.nn as nn
 
 from src.models.config import RWKVEncoderConfig
+from src.models.temporal import TemporalCore, TemporalState
 
 # Type alias: one (B, D) shift-state tensor per encoder layer.
-RWKVState = list[torch.Tensor]
+RWKVState = TemporalState
 
 
 class RWKVBlock(nn.Module):
@@ -194,11 +195,8 @@ class RWKVBlock(nn.Module):
         return x, new_state
 
 
-class RWKVEncoder(nn.Module):
+class RWKVEncoder(TemporalCore):
     """Stacked RWKV-6 blocks for temporal encoding of visual sequences.
-
-    Pools the spatial patch dimension via mean, then passes the resulting
-    per-frame sequence through N stacked RWKV-6 blocks.
 
     Args:
         config: RWKV encoder configuration.
@@ -232,20 +230,20 @@ class RWKVEncoder(nn.Module):
         x: torch.Tensor,
         state: RWKVState | None = None,
     ) -> tuple[torch.Tensor, RWKVState]:
-        """Encode a sequence of visual tokens.
+        """Encode a sequence of per-frame tokens.
 
         Args:
-            x:     (B, T, N_patches, embed_dim) visual token sequence.
+            x:     (B, T, embed_dim) per-frame tokens.
             state: Per-layer shift states, or None for zero initialisation.
 
         Returns:
             features:  (B, T, embed_dim) per-frame feature vectors.
             new_state: Updated per-layer shift states.
         """
-        if x.ndim != 4:
-            raise ValueError(f"RWKVEncoder expected 4D input, got shape {tuple(x.shape)}")
+        if x.ndim != 3:
+            raise ValueError(f"RWKVEncoder expected 3D input, got shape {tuple(x.shape)}")
 
-        batch, _, _, embed = x.shape
+        batch, _, embed = x.shape
         if embed != self.config.embed_dim:
             raise ValueError(f"embed_dim mismatch: expected {self.config.embed_dim}, got {embed}")
 
@@ -256,9 +254,7 @@ class RWKVEncoder(nn.Module):
                 f"state length mismatch: expected {len(self.blocks)}, got {len(state)}"
             )
 
-        # Spatial mean-pool: (B, T, N_patches, D) → (B, T, D)
-        hidden = x.mean(dim=2)
-
+        hidden = x
         new_states: RWKVState = []
         for block, block_state in zip(self.blocks, state):
             hidden, next_state = block(hidden, block_state)
