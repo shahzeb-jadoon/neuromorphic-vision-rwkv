@@ -33,6 +33,24 @@ def test_pearson_and_camera_swap_score() -> None:
     assert np.isnan(M.pearson(pred, np.ones(4)))
 
 
+def test_target_point_baseline_reads_the_bearing_of_the_point() -> None:
+    bearings = np.repeat([-0.5, 0.0, 0.5], 10)
+    points = 30.0 * np.column_stack([np.cos(bearings), np.sin(bearings)])
+    steering = np.repeat([-0.4, 0.0, 0.4], 10)
+    lookup = M.fit_target_lookup(steering, points, bins=3)
+
+    query = np.array([[26.3, -14.4], [30.0, 0.0], [26.3, 14.4], [13.2, 7.2]])
+    assert M.predict_by_target(lookup, query) == pytest.approx([-0.4, 0.0, 0.4, 0.4])
+
+
+def test_a_target_point_bin_without_frames_predicts_the_overall_mean() -> None:
+    edges, means = M.fit_target_lookup(
+        np.array([0.2, 0.4]), np.array([[1.0, -1.0], [1.0, 1.0]]), 60
+    )
+    assert len(means) == len(edges) + 1
+    assert means.min() == pytest.approx(0.2) and means.max() == pytest.approx(0.4)
+
+
 def test_per_command_baseline() -> None:
     steer = np.array([0.1, 0.3, -0.2, -0.4])
     means = M.command_means(steer, np.array([1, 1, 2, 2]))

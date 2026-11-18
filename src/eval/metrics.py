@@ -5,6 +5,9 @@ from __future__ import annotations
 import numpy as np
 
 TURN_THRESHOLD = 0.1  # |expert steering| above this counts as a turning frame
+TARGET_BINS = 60  # bearings of the target point told apart by the target point baseline
+
+TargetLookup = tuple[np.ndarray, np.ndarray]  # bin edges of the bearing, the mean of each bin
 
 
 def weighted_mae(pred: np.ndarray, target: np.ndarray, weight: np.ndarray | None = None) -> float:
@@ -52,3 +55,27 @@ def predict_by_command(
     means: dict[int, float], commands: np.ndarray, fallback: float
 ) -> np.ndarray:
     return np.array([means.get(int(c), fallback) for c in commands], dtype=np.float64)
+
+
+def _bearing(points: np.ndarray) -> np.ndarray:
+    return np.asarray(np.arctan2(points[:, 1], points[:, 0]))
+
+
+def fit_target_lookup(
+    values: np.ndarray, points: np.ndarray, bins: int = TARGET_BINS
+) -> TargetLookup:
+    """The mean of `values` per bearing of the (N, 2) target points, in bins of equal share."""
+    bearing = _bearing(points)
+    edges = np.unique(np.quantile(bearing, np.linspace(0.0, 1.0, bins + 1)[1:-1]))
+    index = np.searchsorted(edges, bearing)
+    counts = np.bincount(index, minlength=len(edges) + 1)
+    totals = np.bincount(index, weights=values, minlength=len(edges) + 1)
+    means = np.full(len(counts), float(np.mean(values)))
+    means[counts > 0] = totals[counts > 0] / counts[counts > 0]
+    return edges, means
+
+
+def predict_by_target(lookup: TargetLookup, points: np.ndarray) -> np.ndarray:
+    """What an image-free policy that sees only the target point would output."""
+    edges, means = lookup
+    return means[np.searchsorted(edges, _bearing(points))]

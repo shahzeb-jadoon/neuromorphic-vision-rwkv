@@ -4,7 +4,8 @@ Two protocols are reported:
 - logged: the trainer's validation metric (frame-weighted, burn-in frames excluded,
   averaged over the first `val_max_batches` batches), to check against the run's log;
 - pooled: every validation clip, frames after burn-in, unweighted, for the model and the
-  always-zero, always-mean and per-command-mean baselines, fitted on the training split.
+  always-zero, always-mean, per-command-mean and target-point-only baselines, fitted on the
+  training split. The last sees no images, only the bearing of the target point.
 
 Usage:
     python scripts/evaluate_offline.py --checkpoint runs_fast/<run>/checkpoints/best.pt
@@ -25,7 +26,7 @@ from torch.utils.data import DataLoader
 from tqdm import tqdm
 
 from agents.learned.learned_agent import load_checkpoint
-from src.data import schema_adapter
+from src.data import labels, schema_adapter
 from src.data.driving_dataset import DrivingSequenceDataset, driving_worker_init_fn
 from src.eval import metrics as M
 from src.models import VisionRWKVDriver
@@ -40,7 +41,7 @@ def collect(
 ) -> dict[str, np.ndarray]:
     """Per-frame predictions, on plain and mirrored panoramas, and targets, in loader order."""
     parts: dict[str, list[np.ndarray]] = {
-        k: [] for k in ("pred", "mirrored", "target", "weight", "nav")
+        k: [] for k in ("pred", "mirrored", "target", "weight", "nav", "target_point")
     }
     with torch.no_grad():
         for batch in tqdm(loader, desc="validation batches"):
@@ -58,6 +59,7 @@ def collect(
             parts["target"].append(batch["controls"].numpy())
             parts["weight"].append(weight.numpy())
             parts["nav"].append(batch["nav_command"].numpy())
+            parts["target_point"].append(batch["target_point"].numpy())
     return {k: np.concatenate(v) for k, v in parts.items()}
 
 
@@ -75,8 +77,9 @@ def logged_protocol(c: dict[str, np.ndarray], batch_size: int, max_batches: int)
     return {"batches": n_batches, **{k: float(np.mean(v)) for k, v in per_batch.items()}}
 
 
-def train_labels(episodes: list[Path], fps: int) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    steer, accel, nav = [], [], []
+def train_labels(episodes: list[Path], fps: int) -> dict[str, np.ndarray]:
+    """Labels of the training frames kept in the loss, and which of them are moving."""
+    steer, accel, nav, point, moving = [], [], [], [], []
     for path in tqdm(episodes, desc="training labels"):
         with h5py.File(path, "r") as f:
             episode = schema_adapter.read_labels(f, fps)
@@ -84,7 +87,15 @@ def train_labels(episodes: list[Path], fps: int) -> tuple[np.ndarray, np.ndarray
         steer.append(episode.steering[kept])
         accel.append(episode.acceleration[kept])
         nav.append(episode.command[kept] - 1)
-    return np.concatenate(steer), np.concatenate(accel), np.concatenate(nav)
+        point.append(episode.target_point[kept])
+        moving.append(episode.speed[kept] >= labels.STANDING_SPEED)
+    return {
+        "steer": np.concatenate(steer),
+        "accel": np.concatenate(accel),
+        "nav": np.concatenate(nav),
+        "target_point": np.concatenate(point),
+        "moving": np.concatenate(moving),
+    }
 
 
 def scores(
@@ -157,14 +168,19 @@ def main() -> None:
         "steer": c["target"][after][..., 0].ravel(),
         "accel": c["target"][after][..., 1].ravel(),
         "nav": c["nav"][after].ravel(),
+        "target_point": c["target_point"][after].reshape(-1, 2),
         "weight": c["weight"][after].ravel(),
         "model_steer": c["pred"][after][..., 0].ravel(),
         "model_accel": c["pred"][after][..., 1].ravel(),
         "mirrored_steer": c["mirrored"][after][..., 0].ravel(),
     }
     steer, accel, nav = frames["steer"], frames["accel"], frames["nav"]
-    t_steer, t_accel, t_nav = train_labels(train.episode_files, d.fps)
+    fitted = train_labels(train.episode_files, d.fps)
+    t_steer, t_accel, t_nav = fitted["steer"], fitted["accel"], fitted["nav"]
     mean_s, mean_a = float(t_steer.mean()), float(t_accel.mean())
+    moving, t_point = fitted["moving"], fitted["target_point"][fitted["moving"]]
+    point_steer = M.fit_target_lookup(t_steer[moving], t_point)
+    point_accel = M.fit_target_lookup(t_accel[moving], t_point)
     zeros = np.zeros_like(steer)
     baselines = {
         "model": (frames["model_steer"], frames["model_accel"]),
@@ -173,6 +189,10 @@ def main() -> None:
         "per_command_mean": (
             M.predict_by_command(M.command_means(t_steer, t_nav), nav, mean_s),
             M.predict_by_command(M.command_means(t_accel, t_nav), nav, mean_a),
+        ),
+        "target_point_only": (
+            M.predict_by_target(point_steer, frames["target_point"]),
+            M.predict_by_target(point_accel, frames["target_point"]),
         ),
     }
     weightings = {"training_weights": frames["weight"], "all_frames": None}

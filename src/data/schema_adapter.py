@@ -243,6 +243,7 @@ class Labels:
 
     steering: np.ndarray  # (N,) float32
     acceleration: np.ndarray  # (N,) float32, throttle - brake
+    speed: np.ndarray  # (N,) float32, horizontal, m/s
     command: np.ndarray  # (N,) RoadOption (src.data.labels.route)
     target_point: np.ndarray  # (N, 2) float32, metres, x forward and y right
     situation: np.ndarray  # (N, len(labels.SITUATIONS)) bool
@@ -275,6 +276,7 @@ def read_labels(f: h5py.File, fps: int | None = None) -> Labels:
     return Labels(
         steering=f[S.STEERING][rows],
         acceleration=(f[S.THROTTLE][rows] - f[S.BRAKE][rows]),
+        speed=speed,
         command=path.command[rows],
         target_point=path.target[rows],
         situation=situation,
