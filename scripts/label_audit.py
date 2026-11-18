@@ -2,8 +2,9 @@
 
 Reads every episode's usable frames at the training frame rate through the schema adapter
 and writes OUT_DIR/index.html, a self-contained report, and OUT_DIR/audit.json with its
-numbers: statistics per town, per navigation command and per driving mode; findings,
-where labels contradict each other or the driving, with sample frames of each.
+numbers: statistics per town, per navigation command (as derived from the path, which
+training uses, and against the recorded one) and per driving mode; findings, where labels
+contradict each other or the driving, with sample frames of each.
 
 usage: python scripts/label_audit.py DATA_DIR OUT_DIR [--workers 8] [--samples 6]
 """
@@ -41,7 +42,20 @@ STYLE = (
     "td,th{border:1px solid #ccc;padding:4px 8px;text-align:right}"
     "td:first-child,th:first-child{text-align:left}img{max-width:100%}"
 )
-COLUMNS = ("steer", "throttle", "brake", "nav", "mode", "speed", "target", "wp_x", "wp_y", "wp_ok")
+MOVING = 1.0  # m/s: below this, steering barely changes the path
+COLUMNS = (
+    "steer",
+    "throttle",
+    "brake",
+    "nav",
+    "recorded",
+    "mode",
+    "speed",
+    "target",
+    "wp_x",
+    "wp_y",
+    "wp_ok",
+)
 
 
 def text(value: Any) -> str:
@@ -54,7 +68,7 @@ def read_episode(path: Path) -> dict[str, Any]:
     try:
         with h5py.File(path, "r") as f:
             meta = f[S.METADATA_GROUP].attrs
-            nav = schema_adapter.nav_commands(f, FPS)
+            nav = schema_adapter.read_labels(f, FPS)[2]
             n = len(nav)
             w = schema_adapter.read_window(f, 0, n, max(WAYPOINT_OFFSETS), fps=FPS, images=False)
             far = labels.ego_waypoints(w.position, w.yaw, WAYPOINT_OFFSETS)[:, -1]
@@ -66,6 +80,7 @@ def read_episode(path: Path) -> dict[str, Any]:
                 throttle=w.throttle,
                 brake=w.brake,
                 nav=nav,
+                recorded=w.nav_command,
                 mode=w.driving_mode,
                 speed=np.linalg.norm(w.velocity[:, :2], axis=1),
                 target=w.target_speed,
@@ -112,16 +127,17 @@ def findings(t: dict[str, np.ndarray]) -> list[tuple[str, str, np.ndarray]]:
     turned = np.maximum.reduceat(toward[np.repeat(np.arange(len(starts)), length)] * steer, starts)
     dry = inside & np.isin(value, (LEFT, RIGHT)) & (turned <= TURN_THRESHOLD)
     moving_mode = np.isin(t["mode"], list(MOVING_MODES))
+    moving = t["speed"] >= MOVING
     return [
         (
             "LaneFollow at more than half lock",
-            "LANEFOLLOW while |steering| ≥ 0.5: a junction turn after its command has ended",
-            (nav == LANEFOLLOW) & (np.abs(steer) >= 0.5),
+            "LANEFOLLOW while moving at 1 m/s or more with |steering| ≥ 0.5",
+            moving & (nav == LANEFOLLOW) & (np.abs(steer) >= 0.5),
         ),
         (
             "Turn command, hard steering the other way",
-            "LEFT with steering > 0.3, or RIGHT with steering < −0.3",
-            ((nav == LEFT) & (steer > 0.3)) | ((nav == RIGHT) & (steer < -0.3)),
+            "LEFT with steering > 0.3, or RIGHT with steering < −0.3, while moving",
+            moving & (((nav == LEFT) & (steer > 0.3)) | ((nav == RIGHT) & (steer < -0.3))),
         ),
         (
             "Turn command that never turns",
@@ -206,6 +222,16 @@ def command_rows(t: dict[str, np.ndarray]) -> list[list[str]]:
                 f"{(lengths < 1).mean():.1%}",
             ]
         )
+    return rows
+
+
+def recorded_rows(t: dict[str, np.ndarray]) -> list[list[str]]:
+    """For each recorded command, the share of its frames under each derived command."""
+    rows = []
+    for c in sorted(set(t["recorded"].tolist())):
+        m = t["recorded"] == c
+        cells = [share(t["nav"] == d, m) for d in (LEFT, RIGHT, LANEFOLLOW)]
+        rows.append([S.NAV_COMMAND_NAMES[c], f"{m.mean():.1%}", *cells])
     return rows
 
 
@@ -395,6 +421,9 @@ def main() -> None:
             table([], overview),
             f"<h2>Per town</h2>{table(head, town_rows)}",
             f"<h2>Per command</h2>{table(cmd_head, cmd_rows)}",
+            "<p>Commands are derived from the path driven, as training uses them; below, the "
+            "recorded command against the derived one.</p>",
+            table(["recorded", "frames", "Left", "Right", "LaneFollow"], recorded_rows(t)),
             "<p>The last two shares are of turning frames; the waypoint share counts only frames "
             "whose 2 s waypoint lies inside the episode.</p>",
             f"<h2>Per driving mode</h2>{table(head, mode_rows)}",
@@ -414,6 +443,7 @@ def main() -> None:
         "overview": dict(overview),
         "towns": {r[0]: r[1:] for r in town_rows},
         "commands": {r[0]: r[1:] for r in cmd_rows},
+        "recorded_commands": {r[0]: r[1:] for r in recorded_rows(t)},
         "modes": {r[0]: r[1:] for r in mode_rows},
         "findings": [{k: v for k, v in f.items() if k != "figure"} for f in found],
     }
