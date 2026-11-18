@@ -74,6 +74,17 @@ Town07 episodes were kept separately.
   up. Training uses neither that stop nor the 3 s before a collision
   ([LABELS.md](LABELS.md)).
 
+## Checks at the Phase 1 gate (2026-11-18)
+
+On the testbed cache, with the Phase 1 labels ([LABELS.md](LABELS.md)):
+
+| Check | Result |
+| --- | --- |
+| Every usable frame of both splits read through the dataset (`scripts/dataset_pass.py`) | 0 problems in 53,079 clips covering 99.0% of 1,715,947 frames; the rest are episode tails shorter than a clip |
+| Training frames a clip can reach (`scripts/sampling_report.py --stride 512`) | 100.00% |
+| Loader memory over 30 minutes (`scripts/loader_soak.py`, 4 workers, batches of 8 × 32 frames) | Flat: main process 583 MiB throughout, each worker 505–551 MiB between batches and at most 1.43 GiB while holding one |
+| Label audit (`scripts/label_audit.py`), rendered on both machines | No unreadable episode; identical numbers |
+
 ## Preserved
 
 - Golden subset: 12 windows of 800 frames, two per town (6 completed, 3 timed out,

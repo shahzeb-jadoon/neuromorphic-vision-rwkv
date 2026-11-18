@@ -100,6 +100,9 @@ TensorBoard. `scripts/loader_soak.py` runs a config's training loader for a set 
 checks that memory stays flat. On the raw golden files, with 4 workers and batches of
 8 × 32 frames at 160×960, 30 minutes (884 batches) left the main process at 485 MiB and
 each worker at 367–374 MiB between batches, rising to at most 1.25 GiB while it held one.
+On the testbed cache, which the workers read across 880 episode files, 30 minutes (1,409
+batches) left the main process at 583 MiB and each worker at 505–551 MiB between batches and
+at most 1.43 GiB while it held one.
 
 ## Data drive under WSL
 
