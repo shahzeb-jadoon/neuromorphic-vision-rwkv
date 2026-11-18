@@ -16,6 +16,7 @@ run:
 dataset:
   seq_len: 32
   stride: 16
+  fps: 10
   val_fraction: 0.2
   batch_size: 4
   num_workers: 4

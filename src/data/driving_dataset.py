@@ -44,7 +44,10 @@ VELOCITY_STD = torch.tensor([4.864434, 3.784082, 0.128879])
 # To recover km/h at inference: speed_pred_kmh = model_output * MAX_SPEED_KMH
 MAX_SPEED_KMH: float = 120.0
 
-# Future-waypoint targets: frames ahead of each frame, in the vehicle's frame.
+# Every episode is read at this frame rate, the rate of the cached and v7 images.
+FPS = 10
+
+# Future-waypoint targets: frames ahead of each frame (0.5-2 s), in the vehicle's frame.
 WAYPOINT_OFFSETS = (5, 10, 15, 20)
 
 # Nav command (0-indexed RoadOption) seen in a mirror: LEFT and RIGHT swap, as do the
@@ -143,6 +146,7 @@ class DrivingSequenceDataset(Dataset):
         seq_len: Number of frames per clip (default: 32).
         stride: Frames between the fixed clips; also sets the clips per epoch drawn by
             `get_sampler` (default: 16).
+        fps: Frame rate every episode is read at (default: FPS).
         split: One of "train" or "val" (default: "train").
         val_fraction: Fraction of episodes reserved for validation (default: 0.2).
         seed: Random seed for reproducible train/val split (default: 42).
@@ -160,6 +164,7 @@ class DrivingSequenceDataset(Dataset):
         split: str = "train",
         val_fraction: float = 0.2,
         seed: int = 42,
+        fps: int = FPS,
         augment: bool | None = None,
         resize_height: int | None = None,
         resize_width: int | None = None,
@@ -167,6 +172,7 @@ class DrivingSequenceDataset(Dataset):
         self.data_dir = Path(data_dir)
         self.seq_len = seq_len
         self.stride = stride
+        self.fps = fps
         self.split = split
 
         if VELOCITY_STATS_VERSION == "placeholder_v0":
@@ -190,8 +196,9 @@ class DrivingSequenceDataset(Dataset):
             raise ValueError(f"resize_height must be positive, got {resize_height}")
         if resize_width is not None and resize_width <= 0:
             raise ValueError(f"resize_width must be positive, got {resize_width}")
-        self.resize_height = resize_height
-        self.resize_width = resize_width
+        self.size = (
+            None if resize_height is None or resize_width is None else (resize_height, resize_width)
+        )
 
         # Discover episode files
         all_episodes = sorted(self.data_dir.glob("episode_*.h5"))
@@ -222,7 +229,7 @@ class DrivingSequenceDataset(Dataset):
         for ep_idx, ep_path in enumerate(self.episode_files):
             with h5py.File(ep_path, "r") as f:
                 schema_adapter.check_supported(f, ep_path.name)
-                steering = schema_adapter.read_labels(f)[0]
+                steering = schema_adapter.read_labels(f, fps)[0]
             self.episode_frames.append(len(steering))
             self.turning.append(turn_frames(steering))
             self.clips += [(ep_idx, s) for s in range(0, len(steering) - seq_len + 1, stride)]
@@ -306,7 +313,9 @@ class DrivingSequenceDataset(Dataset):
             raise IndexError(f"clip at frame {start} overruns episode {ep_idx}'s usable frames")
         end = start + self.seq_len
 
-        w = schema_adapter.read_window(self._get_h5(ep_idx), start, end, max(WAYPOINT_OFFSETS))
+        w = schema_adapter.read_window(
+            self._get_h5(ep_idx), start, end, max(WAYPOINT_OFFSETS), fps=self.fps, size=self.size
+        )
 
         # Convert images: uint8 HWC → float32 CHW [0, 1]
         images = torch.from_numpy(w.images.copy()).permute(0, 3, 1, 2).float() / 255.0
@@ -340,13 +349,8 @@ class DrivingSequenceDataset(Dataset):
             images = self._jitter(images)
 
         # Optional on-the-fly resize for resolution ablation experiments.
-        if self.resize_height is not None and self.resize_width is not None:
-            images = F.interpolate(
-                images,
-                size=(self.resize_height, self.resize_width),
-                mode="bilinear",
-                align_corners=False,
-            )
+        if self.size is not None and images.shape[-2:] != self.size:
+            images = F.interpolate(images, size=self.size, mode="bilinear", align_corners=False)
 
         # ImageNet normalization (after augmentation so jitter operates on real intensities)
         images = (images - IMAGENET_MEAN) / IMAGENET_STD

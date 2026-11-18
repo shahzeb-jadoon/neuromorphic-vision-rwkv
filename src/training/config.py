@@ -34,6 +34,7 @@ class DatasetConfig:
     data_dir: str = ""  # empty: DATA_DIR from .env
     seq_len: int = 32
     stride: int = 16
+    fps: int = 10  # every episode is read at this frame rate
     val_fraction: float = 0.2
     batch_size: int = 4
     num_workers: int = 4

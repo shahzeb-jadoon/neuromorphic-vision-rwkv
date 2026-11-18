@@ -1,8 +1,8 @@
 # Environment smoke test: a tiny model trained for one epoch on the toy dataset.
 # Used by `make env-check` to prove that data loading, the forward and backward
 # passes, mixed precision, checkpointing and logging all work in an environment.
-# Toy data: 10 episodes x 100 frames; 16-frame clips with stride 16 give
-# 48 training clips, i.e. 24 optimizer steps at batch size 2.
+# Toy data: 10 episodes x 100 frames at 20 Hz, read at 10 Hz; 16-frame clips with
+# stride 16 give 24 training clips, i.e. 12 optimizer steps at batch size 2.
 
 run:
   output_root: runs/smoke

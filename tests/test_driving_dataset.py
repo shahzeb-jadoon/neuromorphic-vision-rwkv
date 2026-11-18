@@ -151,7 +151,12 @@ class TestNormalization:
         ep_idx, start = train_dataset.clips[-1]
         with h5py.File(train_dataset.episode_files[ep_idx], "r") as f:
             w = schema_adapter.read_window(
-                f, start, start + train_dataset.seq_len, max(WAYPOINT_OFFSETS), images=False
+                f,
+                start,
+                start + train_dataset.seq_len,
+                max(WAYPOINT_OFFSETS),
+                fps=train_dataset.fps,
+                images=False,
             )
         expected = labels.ego_waypoints(w.position, w.yaw, WAYPOINT_OFFSETS)
         got = train_dataset[len(train_dataset) - 1]["future_waypoints"]

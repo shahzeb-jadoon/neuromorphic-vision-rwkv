@@ -3,15 +3,17 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 
 import h5py
 import numpy as np
 import pytest
+import torch
 
 from scripts.create_toy_dataset import generate_episode, save_episode_hdf5
 from src.data import hdf5_schema as S
 from src.data import schema_adapter
-from src.data.driving_dataset import DrivingSequenceDataset
+from src.data.driving_dataset import IMAGENET_MEAN, IMAGENET_STD, DrivingSequenceDataset
 from src.models.vision_rwkv_driver import N_DRIVING_MODES
 
 
@@ -138,6 +140,34 @@ def test_cache_reads_as_a_lower_rate_episode(tmp_path: Path) -> None:
         small = source.reshape(4, 8, 2, 24, 2, 3).mean(axis=(2, 4))
         assert window.images.shape == (4, 8, 24, 3)
         assert np.abs(window.images - small).mean() < 6
+        half = schema_adapter.read_window(c, 2, 6, lookahead=3, size=(4, 12)).images
+        smaller = small.reshape(4, 4, 2, 12, 2, 3).mean(axis=(2, 4))
+        assert half.shape == (4, 4, 12, 3) and np.abs(half - smaller).mean() < 6
+
+
+def test_a_cache_sample_equals_the_raw_sample(tmp_path: Path) -> None:
+    from scripts.build_testbed_cache import build_episode
+
+    (tmp_path / "cache").mkdir()
+    for idx in range(3):
+        src = make_episode(tmp_path, version=3, idx=idx, n_frames=160)
+        with h5py.File(src, "r+") as f:
+            f[S.METADATA_GROUP].attrs[S.META_COLLISION_FRAME] = 150
+        build_episode(src, tmp_path / "cache" / src.name, height=8, width=24, quality=90, stride=2)
+    options: dict[str, Any] = dict(
+        seq_len=8, stride=4, augment=False, resize_height=8, resize_width=24
+    )
+    with (
+        DrivingSequenceDataset(tmp_path, **options) as raw,
+        DrivingSequenceDataset(tmp_path / "cache", **options) as cache,
+    ):
+        assert raw.clips == cache.clips and len(raw) > 10
+        for i in range(len(raw)):
+            a, b = raw[i], cache[i]
+            assert all(torch.equal(a[k], b[k]) for k in a if k != "images"), i
+            pixels = [(s["images"] * IMAGENET_STD + IMAGENET_MEAN) * 255 for s in (a, b)]
+            mse = float(((pixels[0] - pixels[1]) ** 2).mean())
+            assert 10 * np.log10(255**2 / mse) >= 38, i
 
 
 def test_dataset_loads_a_cache(tmp_path: Path) -> None:

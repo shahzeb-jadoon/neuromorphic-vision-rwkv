@@ -7,11 +7,13 @@ dataset sees one format whatever wrote the file:
 - v6 experts also write DrivingMode 9 (YieldStop). The sample format keeps the eight v3
   classes, so YieldStop is folded into StopSignStop: both mean the car stopped for a sign.
 - A training cache (scripts/build_testbed_cache.py) keeps the full-rate signals and one
-  JPEG image every META_IMAGE_STRIDE source frames. It reads as an episode at that lower
-  rate: frame k is source frame k * stride.
+  JPEG image every META_IMAGE_STRIDE signal rows.
 
-Only an episode's usable frames (src.data.labels.usable_end) are read for training, and
-a nav command outside RoadOption 1-6 there is an error, never clamped.
+The readers take `fps`, the rate to read an episode at (by default, the rate of its
+stored images): frame k is signal row k * (recorded fps / `fps`). Labels therefore come
+from the full-rate signals at the instants of the frames read, whether the images are
+raw or cached. Only an episode's usable frames (src.data.labels.usable_end) are read for
+training, and a nav command outside RoadOption 1-6 there is an error, never clamped.
 """
 
 from __future__ import annotations
@@ -65,84 +67,114 @@ def is_cache(f: h5py.File) -> bool:
     return S.IMAGES_JPEG in f
 
 
-def _stride(f: h5py.File) -> int:
-    return int(f[S.METADATA_GROUP].attrs[S.META_IMAGE_STRIDE]) if is_cache(f) else 1
+def _stored_every(f: h5py.File) -> int:
+    """Signal rows per stored image."""
+    return int(f[S.METADATA_GROUP].attrs.get(S.META_IMAGE_STRIDE, 1))
 
 
-def _frames(f: h5py.File) -> int:
-    """Frames with a signal row: every image frame of a cache, the signal length otherwise."""
-    return int(f[S.IMAGES_JPEG].shape[0]) if is_cache(f) else int(f[S.POSITION].shape[0])
+def _step(f: h5py.File, fps: int | None) -> int:
+    """Signal rows per frame read at `fps`."""
+    stored = _stored_every(f)
+    if fps is None:
+        return stored
+    recorded = int(f[S.METADATA_GROUP].attrs[S.META_FPS])
+    rows, rest = divmod(recorded, fps)
+    if rest or rows % stored:
+        raise ValueError(
+            f"{f.filename}: cannot be read at {fps} fps "
+            f"(signals at {recorded} fps, an image every {stored} rows)"
+        )
+    return rows
 
 
-def _rows(f: h5py.File, name: str, start: int, end: int) -> np.ndarray:
-    """Signal `name` at frames [start, end)."""
-    stride = _stride(f)
-    if stride == 1:
-        return np.asarray(f[name][start:end])
-    return np.asarray(f[name][start * stride : (end - 1) * stride + 1 : stride])
+def _rows(f: h5py.File, name: str, start: int, end: int, step: int) -> np.ndarray:
+    """Signal `name` at frames [start, end), `step` rows apart."""
+    return np.asarray(f[name][start * step : (end - 1) * step + 1 : step])
 
 
-def usable_frames(f: h5py.File) -> int:
-    """Frames that make valid targets, at this file's rate. A golden-subset excerpt is
-    used whole: its status and end describe the source episode, not the excerpt."""
+def _usable_end(f: h5py.File) -> int:
+    """End (exclusive) of the signal rows that make valid targets. A golden-subset excerpt
+    is used whole: its status and end describe the source episode, not the excerpt."""
     meta = f[S.METADATA_GROUP].attrs
     speed = np.linalg.norm(f[S.VELOCITY][()], axis=1)
     if S.META_GOLDEN_SOURCE_FILE in meta:
-        end = len(speed)
-    else:
-        end = labels.usable_end(
-            speed,
-            int(meta[S.META_FPS]),
-            str(meta.get(S.META_STATUS, "")),
-            int(meta.get(S.META_COLLISION_FRAME, 0)),
-        )
-    return min(_frames(f), -(-end // _stride(f)))
+        return len(speed)
+    return labels.usable_end(
+        speed,
+        int(meta[S.META_FPS]),
+        str(meta.get(S.META_STATUS, "")),
+        int(meta.get(S.META_COLLISION_FRAME, 0)),
+    )
 
 
-def nav_commands(f: h5py.File) -> np.ndarray:
-    """RoadOption (1-6) of every usable frame; raises on any other value."""
-    nav = _rows(f, S.NAV_COMMAND, 0, usable_frames(f))
+def usable_frames(f: h5py.File, fps: int | None = None) -> int:
+    """Frames that make valid targets, read at `fps`."""
+    return -(-_usable_end(f) // _step(f, fps))
+
+
+def nav_commands(f: h5py.File, fps: int | None = None) -> np.ndarray:
+    """RoadOption (1-6) of every usable frame; raises on any other recorded value."""
+    nav = np.asarray(f[S.NAV_COMMAND][: _usable_end(f)])
     bad = np.flatnonzero(~np.isin(nav, list(S.VALID_NAV_COMMANDS)))
     if bad.size:
         raise ValueError(
             f"{f.filename}: nav command {nav[bad[0]]} at frame {bad[0]} is not a RoadOption 1-6"
         )
-    return nav
+    return nav[:: _step(f, fps)]
 
 
-def read_window(f: h5py.File, start: int, end: int, lookahead: int, images: bool = True) -> Window:
+def _decode(jpeg: np.ndarray, size: tuple[int, int] | None) -> np.ndarray:
+    """A cached JPEG as (H, W, 3) uint8, decoded at the smallest DCT scale (1, 1/2, 1/4 or
+    1/8) that is still at least `size` (height, width)."""
+    image = Image.open(io.BytesIO(jpeg.tobytes()))
+    if size is not None:
+        image.draft("RGB", (size[1], size[0]))
+    return np.asarray(image.convert("RGB"))
+
+
+def read_window(
+    f: h5py.File,
+    start: int,
+    end: int,
+    lookahead: int,
+    *,
+    fps: int | None = None,
+    size: tuple[int, int] | None = None,
+    images: bool = True,
+) -> Window:
+    """Frames [start, end) read at `fps`. `size` lets cached images decode smaller."""
+    step = _step(f, fps)
     if not images:
         pixels = np.empty((0, 0, 0, 3), dtype=np.uint8)
-    elif is_cache(f):
-        pixels = np.stack(
-            [
-                np.asarray(Image.open(io.BytesIO(j.tobytes())).convert("RGB"))
-                for j in f[S.IMAGES_JPEG][start:end]
-            ]
-        )
     else:
-        pixels = f[S.IMAGES][start:end]
-    mode = _rows(f, S.DRIVING_MODE, start, end)
+        every = step // _stored_every(f)
+        first, last = start * every, (end - 1) * every + 1
+        if is_cache(f):
+            pixels = np.stack([_decode(j, size) for j in f[S.IMAGES_JPEG][first:last:every]])
+        else:  # frame by frame: a strided read is far slower on chunked, compressed images
+            pixels = np.stack([f[S.IMAGES][i] for i in range(first, last, every)])
+    mode = _rows(f, S.DRIVING_MODE, start, end, step)
     for written, sample in MODE_FOLD.items():
         mode[mode == written] = sample
+    frames = -(-int(f[S.POSITION].shape[0]) // step)
     return Window(
         images=pixels,
-        steering=_rows(f, S.STEERING, start, end),
-        throttle=_rows(f, S.THROTTLE, start, end),
-        brake=_rows(f, S.BRAKE, start, end),
-        nav_command=_rows(f, S.NAV_COMMAND, start, end),
-        velocity=_rows(f, S.VELOCITY, start, end),
-        target_speed=_rows(f, S.TARGET_SPEED, start, end),
+        steering=_rows(f, S.STEERING, start, end, step),
+        throttle=_rows(f, S.THROTTLE, start, end, step),
+        brake=_rows(f, S.BRAKE, start, end, step),
+        nav_command=_rows(f, S.NAV_COMMAND, start, end, step),
+        velocity=_rows(f, S.VELOCITY, start, end, step),
+        target_speed=_rows(f, S.TARGET_SPEED, start, end, step),
         driving_mode=mode,
-        position=_rows(f, S.POSITION, start, min(end + lookahead, _frames(f))),
-        yaw=_rows(f, S.ROTATION, start, end)[:, 1],
+        position=_rows(f, S.POSITION, start, min(end + lookahead, frames), step),
+        yaw=_rows(f, S.ROTATION, start, end, step)[:, 1],
     )
 
 
-def read_labels(f: h5py.File) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+def read_labels(f: h5py.File, fps: int | None = None) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Steering, acceleration (throttle - brake) and nav command over the usable frames."""
-    nav = nav_commands(f)
-    n = len(nav)
-    steering = _rows(f, S.STEERING, 0, n)
-    acceleration = _rows(f, S.THROTTLE, 0, n) - _rows(f, S.BRAKE, 0, n)
+    nav = nav_commands(f, fps)
+    step, n = _step(f, fps), len(nav)
+    steering = _rows(f, S.STEERING, 0, n, step)
+    acceleration = _rows(f, S.THROTTLE, 0, n, step) - _rows(f, S.BRAKE, 0, n, step)
     return steering, acceleration, nav

@@ -64,6 +64,7 @@ def main() -> None:
         args.data_dir or d.data_dir or setting("DATA_DIR"),
         seq_len=d.seq_len,
         stride=args.stride or d.stride,
+        fps=d.fps,
         val_fraction=d.val_fraction,
         seed=cfg.run.seed,
         augment=False,

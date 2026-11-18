@@ -72,11 +72,11 @@ def logged_protocol(c: dict[str, np.ndarray], batch_size: int, max_batches: int)
     return {"batches": n_batches, **{k: float(np.mean(v)) for k, v in per_batch.items()}}
 
 
-def train_labels(episodes: list[Path]) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+def train_labels(episodes: list[Path], fps: int) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     steer, accel, nav = [], [], []
     for path in tqdm(episodes, desc="training labels"):
         with h5py.File(path, "r") as f:
-            s, a, n = schema_adapter.read_labels(f)
+            s, a, n = schema_adapter.read_labels(f, fps)
         steer.append(s)
         accel.append(a)
         nav.append(n - 1)
@@ -130,6 +130,7 @@ def main() -> None:
         data_dir=args.data_dir or setting("DATA_DIR"),
         seq_len=d.seq_len,
         stride=d.stride,
+        fps=d.fps,
         val_fraction=d.val_fraction,
         seed=cfg.run.seed,
         resize_height=d.resize_height,
@@ -158,7 +159,7 @@ def main() -> None:
         "mirrored_steer": c["mirrored"][after][..., 0].ravel(),
     }
     steer, accel, nav = frames["steer"], frames["accel"], frames["nav"]
-    t_steer, t_accel, t_nav = train_labels(train.episode_files)
+    t_steer, t_accel, t_nav = train_labels(train.episode_files, d.fps)
     mean_s, mean_a = float(t_steer.mean()), float(t_accel.mean())
     zeros = np.zeros_like(steer)
     baselines = {

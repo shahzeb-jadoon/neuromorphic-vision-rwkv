@@ -9,7 +9,7 @@ import numpy as np
 import pytest
 
 from src.data import labels, schema_adapter
-from src.data.driving_dataset import WAYPOINT_OFFSETS
+from src.data.driving_dataset import FPS, WAYPOINT_OFFSETS
 
 pytestmark = pytest.mark.gold
 
@@ -20,8 +20,8 @@ def test_turn_waypoints_bend_the_way_of_the_command(golden_dir: Path) -> None:
     lateral, nav = [], []
     for path in sorted(golden_dir.glob("episode_*.h5")):
         with h5py.File(path, "r") as f:
-            n = schema_adapter.usable_frames(f)
-            w = schema_adapter.read_window(f, 0, n, max(WAYPOINT_OFFSETS), images=False)
+            n = schema_adapter.usable_frames(f, FPS)
+            w = schema_adapter.read_window(f, 0, n, max(WAYPOINT_OFFSETS), fps=FPS, images=False)
         far = labels.ego_waypoints(w.position, w.yaw, WAYPOINT_OFFSETS)[:, -1, 1]
         keep = (np.abs(w.steering) > 0.1) & (np.arange(n) + max(WAYPOINT_OFFSETS) < len(w.position))
         lateral.append(far[keep])

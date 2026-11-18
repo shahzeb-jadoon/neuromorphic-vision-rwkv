@@ -4,13 +4,17 @@ How a sample's targets are computed from an episode's raw signals, and which cli
 training draws, in `src/data/labels.py`, `src/data/schema_adapter.py` and
 `src/data/driving_dataset.py`.
 
+Every episode is read at 10 frames per second (`dataset.fps`): frame k is recorded row
+k × (recording rate / 10), and its targets come from the full-rate signals at that row.
+A 20 Hz recording and its 10 Hz training cache therefore give identical targets.
+
 ## Per frame
 
 | Target | Definition |
 | --- | --- |
 | `controls` | Steering in [−1, 1] and acceleration = throttle − brake in [−1, 1], as the expert applied them |
 | `nav_command` | RoadOption 1–6 minus one: LEFT 0, RIGHT 1, STRAIGHT 2, LANEFOLLOW 3, CHANGELANELEFT 4, CHANGELANERIGHT 5. Any other value is an error, never clamped |
-| `future_waypoints` | Positions 5, 10, 15 and 20 frames ahead, in the vehicle's frame at that frame: x forward, y to the right, metres. Offsets count frames, so they reach 0.25–1 s ahead in 20 Hz recordings and 0.5–2 s in the 10 Hz testbed cache |
+| `future_waypoints` | Positions 5, 10, 15 and 20 frames (0.5–2 s) ahead, in the vehicle's frame at that frame: x forward, y to the right, metres |
 | `target_speed` | The expert's target speed divided by 120 km/h |
 | `driving_mode` | The expert's mode 1–8 minus one; the v6 YieldStop is folded into StopSignStop |
 | `loss_weight` | 0.1 for a stationary frame, otherwise 1 (below) |
