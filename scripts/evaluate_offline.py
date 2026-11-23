@@ -7,6 +7,9 @@ Two protocols are reported:
   always-zero, always-mean, per-command-mean and target-point-only baselines, fitted on the
   training split. The last sees no images, only the bearing of the target point.
 
+The model is also run on mirrored panoramas, and on another clip's panoramas with its own
+command, speed and target point: a model that steers from the images gets worse with them.
+
 Usage:
     python scripts/evaluate_offline.py --checkpoint runs_fast/<run>/checkpoints/best.pt
 """
@@ -39,9 +42,13 @@ LEFT, RIGHT = 0, 1  # nav command indices in the sample format (RoadOption - 1)
 def collect(
     model: VisionRWKVDriver, loader: DataLoader[Any], burn_in: int, device: torch.device
 ) -> dict[str, np.ndarray]:
-    """Per-frame predictions, on plain and mirrored panoramas, and targets, in loader order."""
+    """Per-frame predictions and targets, in loader order.
+
+    Predictions are made on the plain and the mirrored panoramas, and on the panoramas of
+    the clip before in the batch.
+    """
     parts: dict[str, list[np.ndarray]] = {
-        k: [] for k in ("pred", "mirrored", "target", "weight", "nav", "target_point")
+        k: [] for k in ("pred", "mirrored", "other_clip", "target", "weight", "nav", "target_point")
     }
     with torch.no_grad():
         for batch in tqdm(loader, desc="validation batches"):
@@ -52,10 +59,12 @@ def collect(
             pred, _, _ = model(images, nav, speed, target_point)
             # flipping also swaps the left and right panels
             mirrored, _, _ = model(images.flip(-1), nav, speed, target_point)
+            other_clip, _, _ = model(images.roll(1, dims=0), nav, speed, target_point)
             weight = batch["loss_weight"].clone()
             weight[:, :burn_in] = 0.0
             parts["pred"].append(pred.cpu().numpy())
             parts["mirrored"].append(mirrored.cpu().numpy())
+            parts["other_clip"].append(other_clip.cpu().numpy())
             parts["target"].append(batch["controls"].numpy())
             parts["weight"].append(weight.numpy())
             parts["nav"].append(batch["nav_command"].numpy())
@@ -153,14 +162,19 @@ def main() -> None:
     )
     val = DrivingSequenceDataset(split="val", augment=False, **common)
     train = DrivingSequenceDataset(split="train", augment=False, **common)
+    # Each batch takes its clips from across the split, so the clip before is from another
+    # episode; the results are put back in split order for the logged protocol.
+    n_batches = math.ceil(len(val) / d.batch_size)
+    batches = [list(range(b, len(val), n_batches)) for b in range(n_batches)]
     loader = DataLoader(
         val,
-        batch_size=d.batch_size,
-        shuffle=False,
+        batch_sampler=batches,
         num_workers=args.workers,
         worker_init_fn=driving_worker_init_fn,
     )
     c = collect(model, loader, burn_in, device)
+    split_order = np.argsort(np.concatenate(batches))
+    c = {k: v[split_order] for k, v in c.items()}
     logged = logged_protocol(c, d.batch_size, int(cfg.logging.val_max_batches))
 
     after = np.s_[:, burn_in:]
@@ -173,6 +187,8 @@ def main() -> None:
         "model_steer": c["pred"][after][..., 0].ravel(),
         "model_accel": c["pred"][after][..., 1].ravel(),
         "mirrored_steer": c["mirrored"][after][..., 0].ravel(),
+        "other_clip_steer": c["other_clip"][after][..., 0].ravel(),
+        "other_clip_accel": c["other_clip"][after][..., 1].ravel(),
     }
     steer, accel, nav = frames["steer"], frames["accel"], frames["nav"]
     fitted = train_labels(train.episode_files, d.fps)
@@ -184,6 +200,7 @@ def main() -> None:
     zeros = np.zeros_like(steer)
     baselines = {
         "model": (frames["model_steer"], frames["model_accel"]),
+        "other_clip_images": (frames["other_clip_steer"], frames["other_clip_accel"]),
         "always_zero": (zeros, zeros),
         "always_mean": (zeros + mean_s, zeros + mean_a),
         "per_command_mean": (
@@ -197,6 +214,22 @@ def main() -> None:
     }
     weightings = {"training_weights": frames["weight"], "all_frames": None}
     turns = M.turn_frames(steer)
+    pooled: dict[str, dict[str, Any]] = {
+        w_name: {
+            "turn_frame_share": mean_on(turns.astype(float), np.ones_like(turns), w),
+            **{name: scores(ps, pa, steer, accel, w) for name, (ps, pa) in baselines.items()},
+            "mean_steer_on_left": {
+                "expert": mean_on(steer, nav == LEFT, w),
+                "model": mean_on(frames["model_steer"], nav == LEFT, w),
+            },
+            "mean_steer_on_right": {
+                "expert": mean_on(steer, nav == RIGHT, w),
+                "model": mean_on(frames["model_steer"], nav == RIGHT, w),
+            },
+        }
+        for w_name, w in weightings.items()
+    }
+    trained = pooled["training_weights"]
     report = {
         "checkpoint": args.checkpoint,
         "protocol": {
@@ -216,25 +249,13 @@ def main() -> None:
             "train_frames": int(t_steer.size),
         },
         "logged_protocol": logged,
-        "pooled": {
-            w_name: {
-                "turn_frame_share": mean_on(turns.astype(float), np.ones_like(turns), w),
-                **{name: scores(ps, pa, steer, accel, w) for name, (ps, pa) in baselines.items()},
-                "mean_steer_on_left": {
-                    "expert": mean_on(steer, nav == LEFT, w),
-                    "model": mean_on(frames["model_steer"], nav == LEFT, w),
-                },
-                "mean_steer_on_right": {
-                    "expert": mean_on(steer, nav == RIGHT, w),
-                    "model": mean_on(frames["model_steer"], nav == RIGHT, w),
-                },
-            }
-            for w_name, w in weightings.items()
-        },
+        "pooled": pooled,
         "model_behaviour": {
             "camera_swap_score": M.camera_swap_score(
                 frames["model_steer"], frames["mirrored_steer"]
             ),
+            "other_clip_turn_error_ratio": trained["other_clip_images"]["turn_steer_mae"]
+            / trained["model"]["turn_steer_mae"],
             "expert_steer_std": float(np.std(steer)),
         },
     }
@@ -263,8 +284,10 @@ def main() -> None:
                 f"{name:18}{s['steer_mae']:10.4f}{s['turn_steer_mae']:10.4f}"
                 f"{s['turn_sign_accuracy']:10.3f}{s['accel_mae']:10.4f}{s['steer_corr']:8.3f}"
             )
+    behaviour = report["model_behaviour"]
     print(
-        f"\ncamera-swap score {report['model_behaviour']['camera_swap_score']:.3f}; report: {out}"
+        f"\ncamera-swap score {behaviour['camera_swap_score']:.3f}; turn error with other clips' "
+        f"images x{behaviour['other_clip_turn_error_ratio']:.2f}; report: {out}"
     )
 
 
