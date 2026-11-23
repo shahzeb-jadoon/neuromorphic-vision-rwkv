@@ -379,10 +379,14 @@ class Trainer:
             print("[trainer] torch.compile applied to encoder (mode='default')")
         self.teacher: VisionRWKVDriver | None = self._build_teacher_if_needed()
 
+        ocfg = cfg.optimization
+        backbone = list(self.model.tokenizer.backbone.parameters())
+        in_backbone = {id(p) for p in backbone}
+        rest = [p for p in self.model.parameters() if id(p) not in in_backbone]
+        groups = [(rest, 1.0), (backbone, ocfg.backbone_lr_scale)]
         self.optimizer = torch.optim.AdamW(
-            self.model.parameters(),
-            lr=cfg.optimization.learning_rate,
-            weight_decay=cfg.optimization.weight_decay,
+            [{"params": p, "lr": ocfg.learning_rate * s, "lr_scale": s} for p, s in groups],
+            weight_decay=ocfg.weight_decay,
         )
 
         self.train_loader = build_loader(cfg.dataset, cfg.run.seed, "train")
@@ -523,7 +527,7 @@ class Trainer:
         if "optimization.learning_rate" in changes:
             lr = float(changes["optimization.learning_rate"])
             for group in self.optimizer.param_groups:
-                group["lr"] = lr
+                group["lr"] = lr * group["lr_scale"]
 
         self._last_override_version = version
         for key, value in changes.items():

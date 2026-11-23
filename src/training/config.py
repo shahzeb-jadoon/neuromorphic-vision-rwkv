@@ -51,6 +51,9 @@ class OptimizationConfig:
 
     epochs: int = 50
     learning_rate: float = 1e-4
+    # The backbone's frozen batch norm amplifies drift in its weights into a constant offset
+    # that every frame shares; DETR trains its frozen-norm ResNet at a tenth of the rate.
+    backbone_lr_scale: float = 0.1
     weight_decay: float = 1e-2
     gradient_clip: float = 1.0
     amp: bool = True  # bf16 autocast on CUDA; other devices train in fp32

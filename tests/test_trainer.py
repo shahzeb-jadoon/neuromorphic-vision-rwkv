@@ -102,6 +102,15 @@ def test_training_gives_the_policy_the_speed_and_target_point(trainer: Trainer) 
     assert torch.equal(seen[0][3], batch["target_point"])
 
 
+def test_the_backbone_trains_at_a_fraction_of_the_learning_rate(trainer: Trainer) -> None:
+    rest, backbone = trainer.optimizer.param_groups
+    scale = trainer.cfg.optimization.backbone_lr_scale
+    assert scale < 1.0 and backbone["lr"] == pytest.approx(rest["lr"] * scale)
+    in_backbone = {id(p) for p in trainer.model.tokenizer.backbone.parameters()}
+    assert {id(p) for p in backbone["params"]} == in_backbone
+    assert len(rest["params"]) + len(in_backbone) == len(list(trainer.model.parameters()))
+
+
 def test_step_times_average_the_steps_since_the_last_report() -> None:
     times = StepTimes()
     times.add(1.0, 3.0)
