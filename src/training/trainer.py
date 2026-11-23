@@ -152,6 +152,15 @@ class ControlError:
         }
 
 
+def token_spread(tokens: torch.Tensor) -> float:
+    """How much frame tokens vary across frames, relative to their size.
+
+    Near zero when every frame gets the same token, i.e. the model no longer sees the images.
+    """
+    frames = tokens.detach().float().flatten(0, -2)
+    return float(frames.std(dim=0).mean() / frames.abs().mean())
+
+
 class StepTimes:
     """Mean seconds per step spent waiting for data and training, since the last report."""
 
@@ -189,6 +198,7 @@ class CSVRunLogger:
         "moving_control_mae",
         "turn_control_mae",
         "control_score",
+        "token_spread",
         "lr",
         "grad_norm",
         "data_wait_s",
@@ -255,6 +265,7 @@ class CSVRunLogger:
             "moving_control_mae": metrics.get("moving_control_mae", float("nan")),
             "turn_control_mae": metrics.get("turn_control_mae", float("nan")),
             "control_score": metrics.get("control_score", float("nan")),
+            "token_spread": metrics.get("token_spread", float("nan")),
             "lr": metrics.get("lr", float("nan")),
             "grad_norm": metrics.get("grad_norm", float("nan")),
             "data_wait_s": metrics.get("data_wait_s", float("nan")),
@@ -744,21 +755,29 @@ class Trainer:
         n_batches = 0
         max_batches = int(self.cfg.logging.val_max_batches)
         control_error = ControlError()
-        with torch.no_grad():
-            for batch in self.val_loader:
-                with self._autocast():
-                    _, metrics = self._compute_losses(batch, control_error)
-                for key, value in metrics.items():
-                    agg[key] += value
-                n_batches += 1
-                if max_batches > 0 and n_batches >= max_batches:
-                    break
+        spreads: list[float] = []
+        hook = model.tokenizer.register_forward_hook(
+            lambda _module, _inputs, tokens: spreads.append(token_spread(tokens))
+        )
+        try:
+            with torch.no_grad():
+                for batch in self.val_loader:
+                    with self._autocast():
+                        _, metrics = self._compute_losses(batch, control_error)
+                    for key, value in metrics.items():
+                        agg[key] += value
+                    n_batches += 1
+                    if max_batches > 0 and n_batches >= max_batches:
+                        break
+        finally:
+            hook.remove()
 
         if n_batches == 0:
             out = {k: float("nan") for k in agg}
         else:
             out = {k: v / n_batches for k, v in agg.items()}
         out |= control_error.metrics()
+        out["token_spread"] = sum(spreads) / len(spreads) if spreads else float("nan")
 
         if backup is not None:
             ModelEMA.restore(model, backup)
@@ -841,7 +860,8 @@ class Trainer:
                             f"loss={val_metrics['total_loss']:.3f}  "
                             f"steer_mae={val_metrics['steer_mae']:.4f}  "
                             f"accel_mae={val_metrics['accel_mae']:.4f}  "
-                            f"control_score={val_metrics['control_score']:.4f}"
+                            f"control_score={val_metrics['control_score']:.4f}  "
+                            f"token_spread={val_metrics['token_spread']:.3f}"
                         )
 
                         monitor_name = self.cfg.checkpoint.monitor_metric.split("/", maxsplit=1)[-1]

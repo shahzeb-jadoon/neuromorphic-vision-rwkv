@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Check that an environment smoke-training run finished healthily.
+"""Check that a training run, such as the environment smoke run, finished healthily.
 
 Usage:
     python scripts/check_smoke_run.py runs/smoke
@@ -7,7 +7,8 @@ Usage:
 Fails (exit code 1) when the run directory is missing, when any logged loss is
 not finite, when every logged gradient norm is zero (the failure mode of the
 April 2026 run), when step times were not logged, when no validation pass was
-logged, or when no checkpoint was written.
+logged, when no checkpoint was written, or, in a run whose backbone started
+pretrained, when frame tokens stopped depending on the image at a validation.
 """
 
 from __future__ import annotations
@@ -17,8 +18,18 @@ import math
 import sys
 from pathlib import Path
 
+import yaml
+
 LOSS_FIELDS = ("total_loss", "control_loss", "speed_loss", "mode_loss", "waypoint_loss")
 TIME_FIELDS = ("data_wait_s", "train_step_s")
+# On recorded data the pretrained backbone's frame tokens spread 0.12 before training and
+# 3e-5 after the backbone collapse. A random backbone starts near 0.001: nothing to lose.
+MIN_TOKEN_SPREAD = 0.01
+
+
+def starts_pretrained(run_dir: Path) -> bool:
+    with (run_dir / "config_resolved.yaml").open(encoding="utf-8") as fh:
+        return bool(yaml.safe_load(fh)["model"]["tokenizer"]["pretrained"])
 
 
 def check_run(run_dir: Path) -> list[str]:
@@ -48,6 +59,13 @@ def check_run(run_dir: Path) -> list[str]:
             value = float(row[name])
             if not (math.isfinite(value) and value >= 0.0):
                 problems.append(f"bad {name} {row[name]!r} at step {row['step']}")
+
+    for row in val if starts_pretrained(run_dir) else []:
+        spread = float(row["token_spread"])
+        if not spread >= MIN_TOKEN_SPREAD:
+            problems.append(
+                f"frame tokens ignore the image at step {row['step']}: spread {spread:.3g}"
+            )
 
     grad_norms = [float(r["grad_norm"]) for r in train]
     if grad_norms and not any(g > 0.0 for g in grad_norms if math.isfinite(g)):

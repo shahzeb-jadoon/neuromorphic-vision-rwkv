@@ -13,7 +13,7 @@ import torch
 
 from src.data.driving_dataset import DrivingSequenceDataset
 from src.training.config import load_training_config
-from src.training.trainer import ControlError, NonFiniteTraining, StepTimes, Trainer
+from src.training.trainer import ControlError, NonFiniteTraining, StepTimes, Trainer, token_spread
 
 
 def make_trainer(data_dir: Path, out: Path, device: str = "cpu") -> Trainer:
@@ -111,6 +111,11 @@ def test_the_backbone_trains_at_a_fraction_of_the_learning_rate(trainer: Trainer
     assert len(rest["params"]) + len(in_backbone) == len(list(trainer.model.parameters()))
 
 
+def test_token_spread_is_zero_only_when_every_frame_gets_the_same_token() -> None:
+    assert token_spread(torch.ones(2, 3, 4)) == 0.0
+    assert token_spread(torch.randn(2, 3, 4)) > 0.1
+
+
 def test_step_times_average_the_steps_since_the_last_report() -> None:
     times = StepTimes()
     times.add(1.0, 3.0)
@@ -163,6 +168,8 @@ def test_validation_logs_the_score_that_selects_checkpoints(trainer: Trainer) ->
     with trainer.logger.metrics_path.open(encoding="utf-8", newline="") as f:
         row = next(csv.DictReader(f))
     assert float(row["control_score"]) == pytest.approx(metrics["control_score"])
+    assert metrics["token_spread"] > 0.0
+    assert float(row["token_spread"]) == pytest.approx(metrics["token_spread"])
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="bf16 autocast is used on CUDA only")

@@ -8,6 +8,7 @@ Run with: pytest tests/test_scripts.py -v
 
 from __future__ import annotations
 
+import csv
 import json
 import os
 import shutil
@@ -20,9 +21,11 @@ import h5py
 import numpy as np
 import pytest
 
+from scripts.check_smoke_run import check_run
 from src.data import hdf5_schema as S
 from src.data import schema_adapter
 from src.data.driving_dataset import FPS
+from src.training.trainer import CSVRunLogger
 
 # Directory for test outputs
 TEST_OUTPUT_DIR = Path("/tmp/test_scripts_output")
@@ -260,3 +263,22 @@ class TestLabelAudit:
         assert numbers["usable_frames"] == usable and not numbers["errors"]
         assert any(f["frames"] for f in numbers["findings"])
         assert "<h2>Findings</h2>" in (out / "index.html").read_text()
+
+
+@pytest.mark.parametrize(("pretrained", "flat"), [(True, True), (True, False), (False, True)])
+def test_run_check_fails_a_pretrained_run_whose_frame_tokens_went_flat(
+    tmp_path: Path, pretrained: bool, flat: bool
+) -> None:
+    (tmp_path / "logs").mkdir()
+    (tmp_path / "checkpoints").mkdir()
+    (tmp_path / "checkpoints" / "latest.pt").touch()
+    (tmp_path / "config_resolved.yaml").write_text(
+        f"model:\n  tokenizer:\n    pretrained: {str(pretrained).lower()}\n"
+    )
+    row = dict.fromkeys(CSVRunLogger.METRIC_FIELDS, 0.5)
+    with (tmp_path / "logs" / "metrics.csv").open("w", newline="") as fh:
+        writer = csv.DictWriter(fh, fieldnames=CSVRunLogger.METRIC_FIELDS)
+        writer.writeheader()
+        writer.writerow(row | {"split": "train"})
+        writer.writerow(row | {"split": "val", "token_spread": 3e-5 if flat else 0.7})
+    assert bool(check_run(tmp_path)) == (pretrained and flat)
