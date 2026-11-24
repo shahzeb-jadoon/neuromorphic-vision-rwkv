@@ -24,8 +24,8 @@ TOLERANCE = 1e-5
 BF16_TOLERANCE = 0.05  # a few bf16 rounding steps on features of size 3
 
 
-def core_config(name: str) -> RWKVEncoderConfig:
-    return RWKVEncoderConfig(core=name, embed_dim=D, n_layers=2, ffn_dim=64, dropout=0.1)
+def core_config(name: str, n_layers: int = 2) -> RWKVEncoderConfig:
+    return RWKVEncoderConfig(core=name, embed_dim=D, n_layers=n_layers, ffn_dim=64, dropout=0.1)
 
 
 @pytest.fixture(params=["gru", "rwkv"])
@@ -98,6 +98,20 @@ def test_memory_changes_the_output(core: TemporalCore) -> None:
     with_memory, _ = core.step(x[:, 0], state)
     without_memory, _ = core.step(x[:, 0])
     assert (with_memory - without_memory).abs().max() > 1e-3
+
+
+def test_a_fresh_deep_core_passes_on_most_of_a_change_in_its_input(core_name: str) -> None:
+    # Frame tokens share a large part. A plain six-layer GRU stack passed on a twentieth of
+    # what varied between them, and trained that way it stopped responding to the images.
+    torch.manual_seed(0)
+    core = build_temporal_core(core_config(core_name, n_layers=6)).eval()
+    x, y = torch.randn(D) + 0.2 * torch.randn(2, 3, FRAMES, D)
+    (out_x, _), (out_y, _) = core(x), core(y)
+
+    def change(a: torch.Tensor, b: torch.Tensor) -> float:
+        return float((a - b).abs().mean() / a.abs().mean())
+
+    assert change(out_x, out_y) > 0.5 * change(x, y)
 
 
 def test_driver_one_call_equals_stepping_every_frame(driver: VisionRWKVDriver) -> None:

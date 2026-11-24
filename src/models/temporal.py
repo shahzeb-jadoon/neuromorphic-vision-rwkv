@@ -39,19 +39,21 @@ class TemporalCore(nn.Module, ABC):
 
 
 class GRUCore(TemporalCore):
-    """Stacked GRU: the reference that other temporal cores are compared against."""
+    """GRU layers in the RWKV blocks' residual shape: the reference other cores are compared to.
+
+    Each layer reads normalised features and adds its output to them. A plain stack halves
+    the frame-dependent part of its input at every layer, and a large shared offset in the
+    input saturates its gates; trained that way it stopped responding to the images.
+    """
 
     def __init__(self, config: RWKVEncoderConfig) -> None:
         super().__init__()
         self.config = config
-        self.gru = nn.GRU(
-            config.embed_dim,
-            config.embed_dim,
-            config.n_layers,
-            batch_first=True,
-            dropout=config.dropout if config.n_layers > 1 else 0.0,
-        )
-        self.ln_out = nn.LayerNorm(config.embed_dim)
+        dim, layers = config.embed_dim, range(config.n_layers)
+        self.norms = nn.ModuleList(nn.LayerNorm(dim) for _ in layers)
+        self.layers = nn.ModuleList(nn.GRU(dim, dim, batch_first=True) for _ in layers)
+        self.dropout = nn.Dropout(config.dropout)
+        self.ln_out = nn.LayerNorm(dim)
 
     def initial_state(self, batch_size: int, device: torch.device) -> TemporalState:
         size = (batch_size, self.config.embed_dim)
@@ -62,6 +64,11 @@ class GRUCore(TemporalCore):
     ) -> tuple[torch.Tensor, TemporalState]:
         if state is None:
             state = self.initial_state(x.shape[0], x.device)
+        new_state: TemporalState = []
         with torch.autocast(x.device.type, enabled=False):  # memory is always carried in fp32
-            features, last = self.gru(x.float(), torch.stack(state))
-        return self.ln_out(features), list(last.unbind(0))
+            features = x.float()
+            for norm, gru, memory in zip(self.norms, self.layers, state, strict=True):
+                out, last = gru(norm(features), memory.unsqueeze(0))
+                features = features + self.dropout(out)
+                new_state.append(last.squeeze(0))
+        return self.ln_out(features), new_state
