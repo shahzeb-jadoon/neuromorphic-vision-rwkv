@@ -321,7 +321,8 @@ MAE is 0.036 to 0.045 below the lookup's and 0.052 to 0.061 below its own on oth
 images. Mirroring the cameras flips the steering on 2.0% of turns: the direction of a turn
 comes from the target point, the amount of steering from the images. A k-nearest-neighbour
 regression on the target point alone (8 neighbours over the training episodes' moving frames,
-not part of the evaluator) still scores 0.0989, 0.0135 to 0.0185 better than the model.
+since then the evaluator's `target_point_knn` row) still scores 0.0989, 0.0135 to 0.0185
+better than the model.
 
 `short_gru_v2`: the health check failed it, with flat frame tokens from step 500, and its
 output did not change at all with other clips' images or mirrored cameras. Its backbone moved

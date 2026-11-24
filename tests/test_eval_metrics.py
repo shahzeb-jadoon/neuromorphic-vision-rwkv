@@ -43,6 +43,13 @@ def test_target_point_baseline_reads_the_bearing_of_the_point() -> None:
     assert M.predict_by_target(lookup, query) == pytest.approx([-0.4, 0.0, 0.4, 0.4])
 
 
+def test_the_neighbour_baseline_also_reads_how_far_away_the_point_is() -> None:
+    points = np.repeat([[10.0, 5.0], [30.0, 15.0]], 8, axis=0)  # one bearing, two distances
+    values = np.repeat([[0.6, -0.2], [0.2, 0.1]], 8, axis=0)
+    got = M.predict_by_neighbours(values, points, np.array([[11.0, 5.0], [29.0, 15.0]]))
+    assert got == pytest.approx(np.array([[0.6, -0.2], [0.2, 0.1]]))
+
+
 def test_a_target_point_bin_without_frames_predicts_the_overall_mean() -> None:
     edges, means = M.fit_target_lookup(
         np.array([0.2, 0.4]), np.array([[1.0, -1.0], [1.0, 1.0]]), 60

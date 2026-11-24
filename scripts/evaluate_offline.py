@@ -4,8 +4,9 @@ Two protocols are reported:
 - logged: the trainer's validation metric (frame-weighted, burn-in frames excluded,
   averaged over the first `val_max_batches` batches), to check against the run's log;
 - pooled: every validation clip, frames after burn-in, unweighted, for the model and the
-  always-zero, always-mean, per-command-mean and target-point-only baselines, fitted on the
-  training split. The last sees no images, only the bearing of the target point.
+  always-zero, always-mean, per-command-mean and two target-point baselines, fitted on the
+  training split. Those see no images: one reads the bearing of the target point, the other
+  averages the 8 training frames whose target points lie nearest.
 
 The model is also run on mirrored panoramas, and on another clip's panoramas with its own
 command, speed and target point: a model that steers from the images gets worse with them.
@@ -209,6 +210,9 @@ def main() -> None:
     moving, t_point = fitted["moving"], fitted["target_point"][fitted["moving"]]
     point_steer = M.fit_target_lookup(t_steer[moving], t_point)
     point_accel = M.fit_target_lookup(t_accel[moving], t_point)
+    nearest = M.predict_by_neighbours(
+        np.c_[t_steer[moving], t_accel[moving]], t_point, frames["target_point"]
+    )
     zeros = np.zeros_like(steer)
     baselines = {
         "model": (frames["model_steer"], frames["model_accel"]),
@@ -223,6 +227,7 @@ def main() -> None:
             M.predict_by_target(point_steer, frames["target_point"]),
             M.predict_by_target(point_accel, frames["target_point"]),
         ),
+        "target_point_knn": (nearest[:, 0], nearest[:, 1]),
     }
     weightings = {"training_weights": frames["weight"], "all_frames": None}
     turns = M.turn_frames(steer)

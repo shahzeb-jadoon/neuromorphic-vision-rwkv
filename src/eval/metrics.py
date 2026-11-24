@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import numpy as np
+from scipy.spatial import cKDTree  # type: ignore[import-untyped]
 
 TURN_THRESHOLD = 0.1  # |expert steering| above this counts as a turning frame
 TARGET_BINS = 60  # bearings of the target point told apart by the target point baseline
+TARGET_NEIGHBOURS = 8  # training frames averaged by the nearest-neighbour target baseline
 
 TargetLookup = tuple[np.ndarray, np.ndarray]  # bin edges of the bearing, the mean of each bin
 
@@ -79,3 +81,12 @@ def predict_by_target(lookup: TargetLookup, points: np.ndarray) -> np.ndarray:
     """What an image-free policy that sees only the target point would output."""
     edges, means = lookup
     return means[np.searchsorted(edges, _bearing(points))]
+
+
+def predict_by_neighbours(
+    values: np.ndarray, points: np.ndarray, query: np.ndarray, k: int = TARGET_NEIGHBOURS
+) -> np.ndarray:
+    """The mean of `values` (N, C) at the k training target points (N, 2) nearest each query
+    point: an image-free policy that reads the whole target point, not only its bearing."""
+    _, nearest = cKDTree(points).query(query, k=k)
+    return np.asarray(values[nearest.reshape(len(query), -1)].mean(axis=1))
