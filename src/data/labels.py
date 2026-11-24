@@ -66,6 +66,8 @@ MIN_CROSSING = 3.0  # m: a shorter visit only clips a junction's outline
 JUNCTION_GAP = 10.0  # m: a junction's command starts as soon as the previous junction is left
 # if its approach would otherwise begin less than this after it
 TARGET_DISTANCE = 30.0  # m along the path to the target point
+ROUTE_RESOLUTION = 1.0  # m between planned route points, the CARLA leaderboard's spacing
+PROGRESS_WINDOW = 50.0  # m ahead along a planned route searched for the vehicle's nearest point
 TURNING_CURVATURE = 3.0  # deg/m: sharper than v3's road curves (a radius under 19 m)
 PATH_STEP = 0.5  # m: resolution of the path's heading
 STANDING_SPEED = 0.14  # m/s (0.5 km/h)
@@ -169,6 +171,21 @@ def route(position: np.ndarray, yaw: np.ndarray, junction: np.ndarray) -> Route:
     ty = np.interp(ahead, s[moving], xy[moving, 1]) + beyond * np.sin(end)
     target = _vehicle_frame(tx - xy[:, 0], ty - xy[:, 1], yaw)
     return Route(command, approaching, in_junction, turning, target)
+
+
+def route_progress(
+    route: np.ndarray, distance: np.ndarray, index: int, position: np.ndarray
+) -> int:
+    """Index of the planned route point nearest the vehicle, searched ahead of `index`.
+
+    route: (N, 2+) the route's points in order; distance: (N,) metres along it to each point;
+    index: the previous result; position: (2+,) the vehicle's. Progress never moves back, and
+    passing a point at any distance moves it on: dropping only points the vehicle comes near
+    stalls for good once one is missed, and every target point after that lies behind it.
+    """
+    end = int(np.searchsorted(distance, distance[index] + PROGRESS_WINDOW, side="right"))
+    gaps = np.linalg.norm(route[index:end, :2] - position[:2], axis=1)
+    return index + int(np.argmin(gaps))
 
 
 def target_on_route(position: np.ndarray, yaw: float, planned: np.ndarray) -> np.ndarray:

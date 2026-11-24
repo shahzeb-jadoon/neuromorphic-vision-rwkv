@@ -36,15 +36,17 @@ import torch.nn.functional as F
 try:
     import carla
     from agents.navigation.global_route_planner import GlobalRoutePlanner
-    from agents.navigation.local_planner import RoadOption
     CARLA_AVAILABLE = True
 except ImportError:
     CARLA_AVAILABLE = False
 
 from src.data.driving_dataset import MAX_SPEED_MS
-from src.data.labels import TARGET_DISTANCE, target_on_route
+from src.data import labels
+from src.data.labels import ROUTE_RESOLUTION, route_progress, target_on_route
+from src.data.schema_adapter import town_junctions
 from src.models import VisionRWKVDriver
 from src.training.config import load_training_config
+from src.utils.settings import setting
 
 # ---------------------------------------------------------------------------
 # Preprocessing constants — must match src/data/driving_dataset.py exactly
@@ -56,8 +58,8 @@ _RESIZE_W = 960
 _IMAGENET_MEAN = torch.tensor([0.485, 0.456, 0.406]).view(3, 1, 1)
 _IMAGENET_STD  = torch.tensor([0.229, 0.224, 0.225]).view(3, 1, 1)
 
-# RoadOption.LANEFOLLOW = 4 → remapped to 3 (subtract 1, matching training)
-_NAV_LANEFOLLOW = 3
+# LANEFOLLOW, 0-indexed as in training
+_NAV_LANEFOLLOW = labels.LANEFOLLOW - 1
 
 # ---------------------------------------------------------------------------
 # Checkpoint loader — handles torch.compile _orig_mod key prefix
@@ -130,11 +132,6 @@ class LearnedAgent:
         min_speed_kmh:   Minimum speed to enforce via a light throttle nudge.
                          Prevents the model from getting stuck at intersections
                          where expert data has many stationary frames.
-        route_resolution: Sampling resolution (metres) for the GlobalRoutePlanner.
-        waypoint_pop_dist: Distance (metres) at which a route waypoint is
-                           considered "reached" and popped from the queue.
-        nav_lookahead_m:   Look-ahead distance (metres) for choosing the nav
-                           command from the upcoming route segment.
     """
 
     # --- Camera config (must match expert_collector.py EpisodeConfig) ---
@@ -151,9 +148,6 @@ class LearnedAgent:
         checkpoint_path: str,
         device: str = "cuda",
         min_speed_kmh: float = 5.0,
-        route_resolution: float = 2.0,
-        waypoint_pop_dist: float = 5.0,
-        nav_lookahead_m: float = 30.0,
     ) -> None:
         if not CARLA_AVAILABLE:
             raise ImportError("carla package not found — install it or run inside a CARLA Python env")
@@ -163,17 +157,18 @@ class LearnedAgent:
         self.map = self.world.get_map()
         self.device = torch.device(device if torch.cuda.is_available() else "cpu")
         self.min_speed_kmh = min_speed_kmh
-        self.waypoint_pop_dist = waypoint_pop_dist
-        self.nav_lookahead_m = nav_lookahead_m
 
         # Model
         self.model, self.cfg = load_checkpoint(checkpoint_path, self.device)
         self.state = self.model.initial_state(batch_size=1, device=self.device)
 
-        # Route planner
-        self._planner = GlobalRoutePlanner(self.map, sampling_resolution=route_resolution)
+        # Route planner, at the CARLA leaderboard's spacing
+        self._planner = GlobalRoutePlanner(self.map, sampling_resolution=ROUTE_RESOLUTION)
         self._route: List[Tuple] = []
-        self._target_route_points = int(np.ceil(TARGET_DISTANCE / route_resolution)) + 1
+        self._route_xy = np.zeros((0, 2))
+        self._route_distance = np.zeros(0)
+        self._route_command = np.zeros(0, np.int64)
+        self._progress = 0
 
         # Camera queues and actors
         self._cam_queues: List[queue.Queue] = [queue.Queue(maxsize=1) for _ in range(3)]
@@ -214,51 +209,55 @@ class LearnedAgent:
 
     def set_destination(self, destination: "carla.Location") -> None:
         """Plan a route from the current vehicle position to destination."""
-        start = self.vehicle.get_location()
-        self._route = self._planner.trace_route(start, destination)
-        print(f"[LearnedAgent] Route planned: {len(self._route)} waypoints.")
+        self.set_route([self.vehicle.get_location(), destination])
+
+    def set_route(self, keypoints: List["carla.Location"]) -> None:
+        """Plan the route through `keypoints` in order, as the CARLA leaderboard does."""
+        route: List[Tuple] = []
+        for a, b in zip(keypoints, keypoints[1:]):
+            part = self._planner.trace_route(a, b)
+            if route and part and part[0][0].transform.location.distance(
+                route[-1][0].transform.location
+            ) < 0.5 * ROUTE_RESOLUTION:
+                part = part[1:]
+            route += part
+        self._route = route
+        self._route_xy = np.array(
+            [[wp.transform.location.x, wp.transform.location.y] for wp, _ in route]
+        ).reshape(-1, 2)
+        steps = np.linalg.norm(np.diff(self._route_xy, axis=0), axis=1)
+        self._route_distance = np.r_[0.0, np.cumsum(steps)]
+        # Commands as training derives them from a path, with the same junction outlines.
+        town = self.map.name.split("/")[-1].removesuffix("_Opt")
+        outlines, _ = town_junctions(town, setting("DATA_DIR"))
+        yaw = np.array([wp.transform.rotation.yaw for wp, _ in route])
+        junction = labels.junction_ids(self._route_xy, outlines)
+        self._route_command = labels.route(self._route_xy, yaw, junction).command
+        self._progress = 0
+        print(f"[LearnedAgent] Route planned: {len(route)} waypoints.")
+
+    def _update_progress(self) -> None:
+        """Move the route position to the point nearest the vehicle ahead of the last one."""
+        if self._route:
+            loc = self.vehicle.get_location()
+            position = np.array([loc.x, loc.y])
+            self._progress = route_progress(
+                self._route_xy, self._route_distance, self._progress, position
+            )
 
     def _get_nav_command(self) -> int:
-        """Return the current 0-indexed nav command from the planned route.
-
-        Pops waypoints the vehicle has already passed, then looks ahead
-        nav_lookahead_m to find the next non-LaneFollow command.  If the
-        route is empty or only LaneFollow remains, returns _NAV_LANEFOLLOW.
-        """
+        """The 0-indexed command of the route where the vehicle is, derived as in training."""
         if not self._route:
             return _NAV_LANEFOLLOW
-
-        vehicle_loc = self.vehicle.get_location()
-
-        # Pop waypoints that have been passed
-        while len(self._route) > 1:
-            wp, _ = self._route[0]
-            if wp.transform.location.distance(vehicle_loc) < self.waypoint_pop_dist:
-                self._route.pop(0)
-            else:
-                break
-
-        # Look ahead for an upcoming turn command
-        for wp, road_option in self._route:
-            dist = wp.transform.location.distance(vehicle_loc)
-            if dist > self.nav_lookahead_m:
-                break
-            if road_option not in (RoadOption.LANEFOLLOW, RoadOption.VOID):
-                # RoadOption enum values 1-6 → 0-indexed 0-5
-                return max(0, int(road_option) - 1)
-
-        # Default: follow lane
-        _, road_option = self._route[0]
-        return max(0, int(road_option) - 1)
+        return int(self._route_command[self._progress]) - 1
 
     def _get_target_point(self) -> torch.Tensor:
         """The route point TARGET_DISTANCE ahead in the vehicle's frame, (1, 1, 2) metres."""
         transform = self.vehicle.get_transform()
-        planned = [wp.transform.location for wp, _ in self._route[: self._target_route_points]]
         point = target_on_route(
             np.array([transform.location.x, transform.location.y]),
             transform.rotation.yaw,
-            np.array([[loc.x, loc.y] for loc in planned]).reshape(-1, 2),
+            self._route_xy[self._progress + 1 :],
         )
         return torch.from_numpy(point)[None, None].to(self.device)
 
@@ -321,6 +320,7 @@ class LearnedAgent:
             # Cameras haven't produced a frame yet — coast forward gently
             return carla.VehicleControl(throttle=0.2, steer=0.0, brake=0.0)
 
+        self._update_progress()
         nav_cmd_idx = self._get_nav_command()
         images = self._preprocess(panoramic)                              # (1, 1, 3, H, W)
         nav_cmd = torch.tensor([[nav_cmd_idx]], device=self.device)       # (1, 1)

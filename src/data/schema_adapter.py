@@ -161,14 +161,21 @@ def _junction_file(directory: str) -> dict[str, Junctions]:
     }
 
 
+def town_junctions(town: str, directory: str | Path) -> Junctions:
+    """The junction outlines and traffic-light stop lines of `town`, from JUNCTIONS_FILE in
+    `directory`."""
+    towns = _junction_file(str(directory))
+    if town not in towns:
+        path = Path(directory) / JUNCTIONS_FILE
+        raise ValueError(f"{path} has no junction outlines for {town!r}")
+    return towns[town]
+
+
 def _junctions(f: h5py.File) -> Junctions:
     """The junction outlines and traffic-light stop lines of the episode's town."""
     town = f[S.METADATA_GROUP].attrs.get(S.META_TOWN, "")
     town = town.decode() if isinstance(town, bytes) else str(town)
-    towns = _junction_file(str(Path(f.filename).parent))
-    if town not in towns:
-        raise ValueError(f"{f.filename}: {JUNCTIONS_FILE} has no junction outlines for {town!r}")
-    return towns[town]
+    return town_junctions(town, Path(f.filename).parent)
 
 
 def _fold(mode: np.ndarray) -> np.ndarray:

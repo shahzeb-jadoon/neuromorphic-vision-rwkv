@@ -22,6 +22,7 @@ from src.data.labels import (
     misplaced_stops,
     pedestrian_distances,
     route,
+    route_progress,
     situations,
     target_on_route,
     usable_end,
@@ -177,6 +178,18 @@ def test_a_planned_route_gives_the_target_point_of_the_same_path() -> None:
     for t in range(0, len(yaw), 37):
         got = target_on_route(position[t], yaw[t], position[t + 1 :])
         assert np.allclose(got, expected[t], atol=0.05)
+
+
+def test_progress_moves_on_past_a_point_the_vehicle_never_came_near() -> None:
+    planned = np.c_[np.arange(200.0), np.zeros(200)]
+    planned[50, 1] = 8.0  # the vehicle passes this point 8 m away
+    distance = np.r_[0.0, np.cumsum(np.linalg.norm(np.diff(planned, axis=0), axis=1))]
+    index = 0
+    for x in np.arange(0.0, 120.0, 1.4):
+        index = route_progress(planned, distance, index, np.array([x, 0.0]))
+        assert abs(planned[index, 0] - x) <= 1.0 and planned[index, 1] == 0.0
+    assert route_progress(planned, distance, index, np.zeros(2)) == index  # never moves back
+    assert route_progress(planned, distance, 0, np.array([150.0, 0.0])) < 50  # searched 50 m on
 
 
 def test_without_a_route_the_target_point_lies_straight_ahead() -> None:
