@@ -55,5 +55,15 @@ def test_dotlist_override_updates_nested_fields() -> None:
     assert cfg.run.run_name == "unit_test_run"
 
 
+def test_a_rate_written_without_a_decimal_point_is_a_number(tmp_path: Path) -> None:
+    path = tmp_path / "cfg.yaml"
+    path.write_text("optimization:\n  learning_rate: 1e-4\n", encoding="utf-8")
+    cfg = load_training_config(path)
+    assert cfg.optimization.learning_rate == 1e-4
+
+    apply_dotlist_overrides(cfg, {"optimization.learning_rate": yaml.safe_load("1e-5")})
+    assert cfg.optimization.learning_rate == 1e-5 and cfg.model.learning_rate == 1e-5
+
+
 def test_config_file_exists() -> None:
     assert Path("configs/vrwkv_base.yaml").exists()

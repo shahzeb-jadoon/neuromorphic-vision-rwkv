@@ -148,6 +148,14 @@ class TrainingConfig:
     quantization: QuantizationConfig = field(default_factory=QuantizationConfig)
 
 
+def _typed(current: Any, value: Any) -> Any:
+    """`value` as a float where the setting holds one: YAML reads 1e-5, with no decimal point,
+    as text."""
+    if isinstance(current, float) and isinstance(value, str | int) and not isinstance(value, bool):
+        return float(value)
+    return value
+
+
 def _update_dataclass(instance: Any, values: dict[str, Any]) -> None:
     """Recursively update dataclass fields from a dict."""
     allowed = {f.name for f in fields(instance)}
@@ -158,7 +166,7 @@ def _update_dataclass(instance: Any, values: dict[str, Any]) -> None:
         if is_dataclass(current) and isinstance(value, dict):
             _update_dataclass(current, value)
         else:
-            setattr(instance, key, value)
+            setattr(instance, key, _typed(current, value))
 
 
 def _load_yaml(path: str | Path) -> dict[str, Any]:
@@ -217,7 +225,7 @@ def apply_dotlist_overrides(cfg: TrainingConfig, overrides: dict[str, Any]) -> N
         leaf = parts[-1]
         if not hasattr(target, leaf):
             raise ValueError(f"Unknown override path '{path}'")
-        setattr(target, leaf, value)
+        setattr(target, leaf, _typed(getattr(target, leaf), value))
     synchronize_training_config(cfg)
 
 
