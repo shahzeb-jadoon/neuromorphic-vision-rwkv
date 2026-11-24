@@ -8,6 +8,7 @@ from typing import Any
 
 import yaml
 
+from src.data.labels import CAUSES
 from src.models.config import ModelConfig
 
 
@@ -81,6 +82,7 @@ class LossConfig:
     speed_weight: float = 0.1
     mode_weight: float = 0.1
     waypoint_weight: float = 0.5
+    situation_weight: float = 0.0  # > 0 adds a head predicting labels.CAUSES from the images
 
 
 @dataclass
@@ -219,6 +221,7 @@ def synchronize_training_config(cfg: TrainingConfig) -> None:
     cfg.model.weight_decay = cfg.optimization.weight_decay
     cfg.model.max_epochs = cfg.optimization.epochs
     cfg.model.gradient_clip = cfg.optimization.gradient_clip
+    cfg.model.situation_classes = len(CAUSES) if cfg.loss.situation_weight > 0 else 0
 
     if cfg.dataset.resize_height is not None and cfg.dataset.resize_width is not None:
         cfg.model.tokenizer.img_height = cfg.dataset.resize_height

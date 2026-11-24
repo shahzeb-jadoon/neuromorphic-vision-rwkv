@@ -76,6 +76,7 @@ module = [
     "cv2.*",
     "torchvision.*",
     "networkx.*",
+    "sklearn.*",
 ]
 ignore_missing_imports = true
 

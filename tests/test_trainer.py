@@ -9,11 +9,18 @@ from collections.abc import Iterator
 from pathlib import Path
 from typing import cast
 
+import numpy as np
 import pytest
 import torch
 
 from src.data.driving_dataset import DrivingSequenceDataset
-from src.training.config import SchedulerConfig, TrainingConfig, load_training_config
+from src.data.labels import CAUSE_SITUATIONS
+from src.training.config import (
+    SchedulerConfig,
+    TrainingConfig,
+    apply_dotlist_overrides,
+    load_training_config,
+)
 from src.training.trainer import (
     ControlError,
     NonFiniteTraining,
@@ -121,6 +128,24 @@ def test_the_backbone_trains_at_a_fraction_of_the_learning_rate(trainer: Trainer
     in_backbone = {id(p) for p in trainer.model.tokenizer.backbone.parameters()}
     assert {id(p) for p in backbone["params"]} == in_backbone
     assert len(rest["params"]) + len(in_backbone) == len(list(trainer.model.parameters()))
+
+
+def test_a_situation_head_trains_only_when_its_loss_counts(
+    trainer: Trainer, toy_data_dir: Path, tmp_path: Path
+) -> None:
+    batch = next(iter(trainer.train_loader))
+    assert trainer.model.situation_head is None
+    assert trainer._compute_losses(batch)[1]["situation_loss"] == 0.0
+
+    cfg = make_config(toy_data_dir, tmp_path / "situation")
+    apply_dotlist_overrides(cfg, {"loss.situation_weight": 0.2})
+    t = Trainer(cfg)
+    assert t.model.situation_head is not None and t.situation_pos_weight is not None
+    train = cast(DrivingSequenceDataset, t.train_loader.dataset)
+    share = np.concatenate(train.situations)[:, CAUSE_SITUATIONS].any(-1).mean(0)
+    assert int(t.situation_pos_weight.argmax()) == int(share.argmin())  # the rarest weighs most
+    assert t._compute_losses(batch)[1]["situation_loss"] > 0.0
+    t.logger.close()
 
 
 def test_the_learning_rate_follows_the_config_and_the_step_count() -> None:

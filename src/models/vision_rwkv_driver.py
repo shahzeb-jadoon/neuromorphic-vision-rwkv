@@ -142,6 +142,12 @@ class VisionRWKVDriver(nn.Module):
         self.speed_head = SpeedHead(fused_dim)
         self.mode_head = ModeHead(fused_dim)
         self.waypoint_head = WaypointHead(fused_dim)
+        # Sees the images through the temporal core only, so the route inputs cannot answer it.
+        self.situation_head = (
+            nn.Linear(config.encoder.embed_dim, config.situation_classes)
+            if config.situation_classes
+            else None
+        )
 
     def forward(
         self,
@@ -168,6 +174,7 @@ class VisionRWKVDriver(nn.Module):
                           speed           (B, T, 1)
                           mode_logits     (B, T, 8)
                           future_waypoints (B, T, K, 2)
+                          situation_logits (B, T, situation_classes), with a situation head
         """
         tokens = self.tokenizer(images)
         features, new_state = self.encoder(tokens, state)
@@ -179,6 +186,8 @@ class VisionRWKVDriver(nn.Module):
             "mode_logits": self.mode_head(fused),
             "future_waypoints": self.waypoint_head(fused),
         }
+        if self.situation_head is not None:
+            aux["situation_logits"] = self.situation_head(features)
 
         return controls, new_state, aux
 

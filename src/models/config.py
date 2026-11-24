@@ -103,6 +103,8 @@ class ModelConfig:
     encoder: RWKVEncoderConfig = field(default_factory=RWKVEncoderConfig)
     fusion: FusionConfig = field(default_factory=FusionConfig)
     policy_head: PolicyHeadConfig = field(default_factory=PolicyHeadConfig)
+    # Outputs of a head on the temporal features, before the route inputs join; 0: no head.
+    situation_classes: int = 0
 
     # Training hyperparameters
     seq_len: int = 32  # TBPTT sequence length

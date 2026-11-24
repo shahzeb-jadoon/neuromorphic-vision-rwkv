@@ -9,6 +9,8 @@ Two protocols are reported:
 
 The model is also run on mirrored panoramas, and on another clip's panoramas with its own
 command, speed and target point: a model that steers from the images gets worse with them.
+A situation head is scored by its AUROC per cause, on frames after burn-in that count in
+training; answering the same for every frame scores 0.5.
 
 Usage:
     python scripts/evaluate_offline.py --checkpoint runs_fast/<run>/checkpoints/best.pt
@@ -25,6 +27,7 @@ from typing import Any, cast
 import h5py
 import numpy as np
 import torch
+from sklearn.metrics import roc_auc_score
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
@@ -56,7 +59,7 @@ def collect(
             nav = batch["nav_command"].to(device)
             speed = batch["speed"].to(device)
             target_point = batch["target_point"].to(device)
-            pred, _, _ = model(images, nav, speed, target_point)
+            pred, _, aux = model(images, nav, speed, target_point)
             # flipping also swaps the left and right panels
             mirrored, _, _ = model(images.flip(-1), nav, speed, target_point)
             other_clip, _, _ = model(images.roll(1, dims=0), nav, speed, target_point)
@@ -69,6 +72,11 @@ def collect(
             parts["weight"].append(weight.numpy())
             parts["nav"].append(batch["nav_command"].numpy())
             parts["target_point"].append(batch["target_point"].numpy())
+            if "situation_logits" in aux:
+                probability = torch.sigmoid(aux["situation_logits"].float()).cpu().numpy()
+                causes = batch["situation"][..., labels.CAUSE_SITUATIONS].any(-1).numpy()
+                parts.setdefault("situation", []).append(probability)
+                parts.setdefault("causes", []).append(causes)
     return {k: np.concatenate(v) for k, v in parts.items()}
 
 
@@ -190,6 +198,9 @@ def main() -> None:
         "other_clip_steer": c["other_clip"][after][..., 0].ravel(),
         "other_clip_accel": c["other_clip"][after][..., 1].ravel(),
     }
+    if "situation" in c:
+        frames["situation"] = c["situation"][after].reshape(-1, len(labels.CAUSES))
+        frames["causes"] = c["causes"][after].reshape(-1, len(labels.CAUSES))
     steer, accel, nav = frames["steer"], frames["accel"], frames["nav"]
     fitted = train_labels(train.episode_files, d.fps)
     t_steer, t_accel, t_nav = fitted["steer"], fitted["accel"], fitted["nav"]
@@ -259,6 +270,15 @@ def main() -> None:
             "expert_steer_std": float(np.std(steer)),
         },
     }
+    if "situation" in frames:
+        counted = frames["weight"] > 0
+        truth, probability = frames["causes"][counted], frames["situation"][counted]
+        report["model_behaviour"]["situation_auroc"] = {
+            cause: float(roc_auc_score(truth[:, i], probability[:, i]))
+            if 0 < truth[:, i].sum() < len(truth)
+            else float("nan")
+            for i, cause in enumerate(labels.CAUSES)
+        }
     out = (
         Path(args.out)
         if args.out
@@ -289,6 +309,9 @@ def main() -> None:
         f"\ncamera-swap score {behaviour['camera_swap_score']:.3f}; turn error with other clips' "
         f"images x{behaviour['other_clip_turn_error_ratio']:.2f}; report: {out}"
     )
+    if "situation_auroc" in behaviour:
+        aurocs = ", ".join(f"{k} {v:.3f}" for k, v in behaviour["situation_auroc"].items())
+        print(f"situation AUROC (a constant answer scores 0.5): {aurocs}")
 
 
 if __name__ == "__main__":

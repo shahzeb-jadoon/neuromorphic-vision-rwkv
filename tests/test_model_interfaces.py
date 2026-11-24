@@ -11,6 +11,7 @@ Verifies that:
 from __future__ import annotations
 
 from dataclasses import replace
+from typing import cast
 
 import pytest
 import torch
@@ -308,6 +309,33 @@ class TestVisionRWKVDriver:
         state = model.initial_state(batch_size=2, device=torch.device("cpu"))
         assert len(state) == 3 * STATE_PARTS
         assert state[0].shape == (2, 384)
+
+    def test_situation_head_sees_the_images_and_not_the_route(self) -> None:
+        torch.manual_seed(0)
+        config = ModelConfig(
+            tokenizer=TokenizerConfig(img_height=32, img_width=64, embed_dim=32),
+            encoder=RWKVEncoderConfig(embed_dim=32, n_layers=2, ffn_dim=64),
+            fusion=FusionConfig(visual_dim=32, nav_embed_dim=8, fused_dim=32),
+            policy_head=PolicyHeadConfig(input_dim=32, hidden_dims=(16,)),
+            situation_classes=4,
+        )
+        model = VisionRWKVDriver(config).eval()
+        images, nav, speed = (
+            torch.rand(2, 5, 3, 32, 64),
+            torch.zeros(2, 5, dtype=torch.long),
+            torch.zeros(2, 5),
+        )
+
+        def situation(images: torch.Tensor, target: float) -> torch.Tensor:
+            _, _, aux = model(images, nav, speed, torch.full((2, 5, 2), target))
+            return cast(torch.Tensor, aux["situation_logits"])
+
+        logits = situation(images, 0.0)
+        assert logits.shape == (2, 5, 4)
+        assert torch.equal(logits, situation(images, 30.0))
+        assert not torch.allclose(logits, situation(images.flip(-1), 0.0))
+        without = VisionRWKVDriver(replace(config, situation_classes=0)).eval()
+        assert "situation_logits" not in without(images, nav, speed, torch.zeros(2, 5, 2))[2]
 
     def test_model_parameter_count(self) -> None:
         """Smoke test: model should have >0 parameters."""

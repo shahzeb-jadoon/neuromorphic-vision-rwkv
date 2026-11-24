@@ -93,6 +93,14 @@ SITUATIONS = (
     "yielding to pedestrian",
     "stopped for pedestrian",
 )
+# What only the images can tell, moving or standing; the situation head predicts these.
+CAUSES = {
+    "red light": ("approaching red light", "stopped at red light"),
+    "stop sign": ("approaching stop sign", "stopped at stop sign"),
+    "vehicle in path": ("following vehicle", "stopped for vehicle"),
+    "pedestrian in path": ("yielding to pedestrian", "stopped for pedestrian"),
+}
+CAUSE_SITUATIONS = [[SITUATIONS.index(name) for name in pair] for pair in CAUSES.values()]
 _RED = [code for code, name in S.TRAFFIC_LIGHT_STATE_NAMES.items() if name in ("Yellow", "Red")]
 
 

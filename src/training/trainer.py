@@ -24,6 +24,7 @@ from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
 
 from src.data.driving_dataset import DrivingSequenceDataset, driving_worker_init_fn
+from src.data.labels import CAUSE_SITUATIONS
 from src.eval.metrics import TURN_THRESHOLD
 from src.models import VisionRWKVDriver
 from src.training.checkpointing import CheckpointManager, capture_rng_state, restore_rng_state
@@ -206,6 +207,7 @@ class CSVRunLogger:
         "speed_loss",
         "mode_loss",
         "waypoint_loss",
+        "situation_loss",
         "distill_loss",
         "steer_mae",
         "accel_mae",
@@ -273,6 +275,7 @@ class CSVRunLogger:
             "speed_loss": metrics.get("speed_loss", float("nan")),
             "mode_loss": metrics.get("mode_loss", float("nan")),
             "waypoint_loss": metrics.get("waypoint_loss", float("nan")),
+            "situation_loss": metrics.get("situation_loss", float("nan")),
             "distill_loss": metrics.get("distill_loss", float("nan")),
             "steer_mae": metrics.get("steer_mae", float("nan")),
             "accel_mae": metrics.get("accel_mae", float("nan")),
@@ -433,6 +436,16 @@ class Trainer:
         self.val_loader = build_loader(cfg.dataset, cfg.run.seed, "val")
         self.total_steps = max(1, cfg.optimization.epochs * len(self.train_loader))
         self.optimizer_steps = 0  # steps taken, skipped ones excluded: the schedule's position
+        self.situation_pos_weight: torch.Tensor | None = None
+        if cfg.model.situation_classes:
+            # Rare causes count more: positives weigh sqrt(negatives / positives) of the training
+            # split, so pedestrians (0.4% of v3 frames) weigh about 16.
+            train = cast(DrivingSequenceDataset, self.train_loader.dataset)
+            share = np.concatenate(train.situations)[:, CAUSE_SITUATIONS].any(-1).mean(0)
+            share = share.clip(1e-4, 1 - 1e-4)
+            self.situation_pos_weight = torch.tensor(
+                np.sqrt((1 - share) / share), dtype=torch.float32, device=self.device
+            )
 
         self.use_bf16 = cfg.optimization.amp and self.device.type == "cuda"
         self.nonfinite_in_a_row = 0
@@ -568,6 +581,16 @@ class Trainer:
         else:
             mode_loss = torch.zeros((), device=self.device)
 
+        situation_loss = torch.zeros((), device=self.device)
+        if self.situation_pos_weight is not None and valid.any():
+            situation = batch["situation"].to(self.device, non_blocking=True)
+            causes = situation[..., CAUSE_SITUATIONS].any(-1).float()
+            situation_loss = F.binary_cross_entropy_with_logits(
+                aux["situation_logits"][valid].float(),
+                causes[valid],
+                pos_weight=self.situation_pos_weight,
+            )
+
         wp_target = batch["future_waypoints"].to(self.device, non_blocking=True).float()
         wp_mask = batch["waypoint_mask"].to(self.device, non_blocking=True).float()
         wp_l1 = (aux["future_waypoints"] - wp_target).abs().mean(dim=-1)
@@ -586,6 +609,7 @@ class Trainer:
             + lcfg.speed_weight * speed_loss
             + lcfg.mode_weight * mode_loss
             + lcfg.waypoint_weight * waypoint_loss
+            + lcfg.situation_weight * situation_loss
             + self.cfg.distillation.weight * distill_loss
         )
 
@@ -602,6 +626,7 @@ class Trainer:
             "speed_loss": float(speed_loss.detach().item()),
             "mode_loss": float(mode_loss.detach().item()),
             "waypoint_loss": float(waypoint_loss.detach().item()),
+            "situation_loss": float(situation_loss.detach().item()),
             "distill_loss": float(distill_loss.detach().item()),
             "steer_mae": float(steer_mae.detach().item()),
             "accel_mae": float(accel_mae.detach().item()),
@@ -720,6 +745,7 @@ class Trainer:
             "speed_loss": 0.0,
             "mode_loss": 0.0,
             "waypoint_loss": 0.0,
+            "situation_loss": 0.0,
             "distill_loss": 0.0,
             "steer_mae": 0.0,
             "accel_mae": 0.0,
