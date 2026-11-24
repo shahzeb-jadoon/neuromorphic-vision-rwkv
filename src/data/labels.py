@@ -68,6 +68,9 @@ JUNCTION_GAP = 10.0  # m: a junction's command starts as soon as the previous ju
 TARGET_DISTANCE = 30.0  # m along the path to the target point
 ROUTE_RESOLUTION = 1.0  # m between planned route points, the CARLA leaderboard's spacing
 PROGRESS_WINDOW = 50.0  # m ahead along a planned route searched for the vehicle's nearest point
+SPARSE_SPACING = 50.0  # m: sparse target points lie at most about this far apart, as the CARLA
+# leaderboard thins the route it hands agents (downsample_route)
+SPARSE_REACHED = 7.5  # m: the target moves on to the next point this far before reaching one
 TURNING_CURVATURE = 3.0  # deg/m: sharper than v3's road curves (a radius under 19 m)
 PATH_STEP = 0.5  # m: resolution of the path's heading
 STANDING_SPEED = 0.14  # m/s (0.5 km/h)
@@ -121,6 +124,7 @@ class Route:
     turning: np.ndarray  # (N,) bool: the path curves by TURNING_CURVATURE or more here
     target: np.ndarray  # (N, 2) float32: TARGET_DISTANCE ahead along the path, x forward
     # and y right of the vehicle, metres
+    sparse_target: np.ndarray  # (N, 2) float32: the next sparse point (sparse_target), as target
 
     def __getitem__(self, rows: slice) -> Route:
         return Route(*(getattr(self, field.name)[rows] for field in fields(self)))
@@ -178,7 +182,44 @@ def route(position: np.ndarray, yaw: np.ndarray, junction: np.ndarray) -> Route:
     tx = np.interp(ahead, s[moving], xy[moving, 0]) + beyond * np.cos(end)
     ty = np.interp(ahead, s[moving], xy[moving, 1]) + beyond * np.sin(end)
     target = _vehicle_frame(tx - xy[:, 0], ty - xy[:, 1], yaw)
-    return Route(command, approaching, in_junction, turning, target)
+    sparse = sparse_target(xy, s, sparse_points(s, in_junction), s, xy, yaw)
+    return Route(command, approaching, in_junction, turning, target, sparse)
+
+
+def sparse_points(distance: np.ndarray, in_junction: np.ndarray) -> np.ndarray:
+    """Indices of the route points kept as sparse targets, as the CARLA leaderboard keeps them:
+    the first and last, every junction entry and exit, and the first point more than
+    SPARSE_SPACING past the last one kept.
+
+    distance: (N,) metres along the route; in_junction: (N,) bool.
+    """
+    changes = np.flatnonzero(in_junction[1:] != in_junction[:-1]) + 1
+    kept, end = [0], len(distance) - 1
+    while kept[-1] < end:
+        last = kept[-1]
+        far = int(np.searchsorted(distance, distance[last] + SPARSE_SPACING, side="right"))
+        later = changes[changes > last]
+        kept.append(min(far, int(later[0]) if len(later) else end, end))
+    return np.array(kept)
+
+
+def sparse_target(
+    route: np.ndarray,
+    distance: np.ndarray,
+    kept: np.ndarray,
+    along: np.ndarray,
+    position: np.ndarray,
+    yaw: np.ndarray | float,
+) -> np.ndarray:
+    """The sparse target of vehicles `along` metres into a route: the first kept point (see
+    sparse_points) more than SPARSE_REACHED further on, or the last.
+
+    route: (N, 2+) points; distance: (N,) metres along it; along: (M,); position: (M, 2+);
+    yaw: CARLA yaw in degrees. Returns (M, 2) float32 metres: x forward, y to the right.
+    """
+    ahead = np.searchsorted(distance[kept], along + SPARSE_REACHED, side="right")
+    point = route[kept[np.minimum(ahead, len(kept) - 1)], :2]
+    return _vehicle_frame(point[:, 0] - position[:, 0], point[:, 1] - position[:, 1], yaw)
 
 
 def route_progress(

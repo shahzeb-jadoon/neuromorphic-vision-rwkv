@@ -13,6 +13,7 @@ from src.data.labels import (
     LEFT,
     MIN_CROSSING,
     RIGHT,
+    SPARSE_SPACING,
     SITUATIONS,
     STRAIGHT,
     TARGET_DISTANCE,
@@ -24,6 +25,8 @@ from src.data.labels import (
     route,
     route_progress,
     situations,
+    sparse_points,
+    sparse_target,
     target_on_route,
     usable_end,
     vehicle_gaps,
@@ -190,6 +193,22 @@ def test_progress_moves_on_past_a_point_the_vehicle_never_came_near() -> None:
         assert abs(planned[index, 0] - x) <= 1.0 and planned[index, 1] == 0.0
     assert route_progress(planned, distance, index, np.zeros(2)) == index  # never moves back
     assert route_progress(planned, distance, 0, np.array([150.0, 0.0])) < 50  # searched 50 m on
+
+
+def test_sparse_points_keep_the_ends_of_junctions_and_are_at_most_the_spacing_apart() -> None:
+    distance = np.arange(0.0, 200.0, 0.5)
+    kept = sparse_points(distance, (distance >= 60.0) & (distance < 75.0))
+    assert {0, 120, 150, len(distance) - 1} <= set(kept.tolist())  # start, entry, exit, end
+    assert np.diff(distance[kept]).max() <= SPARSE_SPACING + 0.5
+
+
+def test_the_sparse_target_moves_on_before_the_vehicle_reaches_it() -> None:
+    planned = np.c_[np.arange(201.0), np.zeros(201)]
+    along = np.array([0.0, 42.0, 43.0, 195.0])
+    got = sparse_target(
+        planned, planned[:, 0], np.array([0, 50, 100, 200]), along, np.c_[along, np.zeros(4)], 0.0
+    )
+    assert np.allclose(got, [[50.0, 0.0], [8.0, 0.0], [57.0, 0.0], [5.0, 0.0]])
 
 
 def test_without_a_route_the_target_point_lies_straight_ahead() -> None:

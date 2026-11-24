@@ -253,6 +253,7 @@ class Labels:
     speed: np.ndarray  # (N,) float32, horizontal, m/s
     command: np.ndarray  # (N,) RoadOption (src.data.labels.route)
     target_point: np.ndarray  # (N, 2) float32, metres, x forward and y right
+    sparse_target_point: np.ndarray  # (N, 2) float32, the next sparse route point, likewise
     situation: np.ndarray  # (N, len(labels.SITUATIONS)) bool
     excluded: np.ndarray  # (N,) bool: kept out of the loss (src.data.labels.misplaced_stops)
 
@@ -286,6 +287,7 @@ def read_labels(f: h5py.File, fps: int | None = None) -> Labels:
         speed=speed,
         command=path.command[rows],
         target_point=path.target[rows],
+        sparse_target_point=path.sparse_target[rows],
         situation=situation,
         excluded=labels.misplaced_stops(
             position[rows],

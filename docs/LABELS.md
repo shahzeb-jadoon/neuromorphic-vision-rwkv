@@ -14,7 +14,7 @@ A 20 Hz recording and its 10 Hz training cache therefore give identical targets.
 | --- | --- |
 | `controls` | Steering in [−1, 1] and acceleration = throttle − brake in [−1, 1], as the expert applied them |
 | `nav_command` | RoadOption minus one, what the route does at the next junction ([below](#navigation-commands)): LEFT 0, RIGHT 1, STRAIGHT 2, LANEFOLLOW 3 (no junction maneuver). The lane changes (4, 5) do not occur in v3. A recorded command outside 1–6 is still an error, never clamped |
-| `target_point` | The path 30 m ahead, in the vehicle's frame: x forward, y to the right, metres ([below](#target-point)); an input, not a target |
+| `target_point` | The path 30 m ahead or the next sparse route point, in the vehicle's frame: x forward, y to the right, metres ([below](#target-point)); an input, not a target |
 | `future_waypoints` | Positions 5, 10, 15 and 20 frames (0.5–2 s) ahead, in the vehicle's frame at that frame: x forward, y to the right, metres |
 | `waypoint_mask` | False where a waypoint lies past the end of the recording, so is clamped to its last position: such waypoints are left out of the waypoint loss, while the frame's other targets stay. In v3 these are the last 2 s of the 684 completed episodes, which stop at the frame budget mid-drive: 13,680 frames (0.8%) |
 | `speed` | The vehicle's horizontal speed divided by 120 km/h; an input, not a target. Training hides it from half of the clips, which see a learned "unknown speed" instead |
@@ -87,8 +87,8 @@ shows them.
 Junction outlines come from CARLA's maps (`scripts/export_junctions.py`, 123 junctions in
 the six v3 towns) and are stored as `junctions.json` beside the episodes, with the stop lines
 of the towns' traffic lights (357, from each light's stop waypoints); reading labels without
-it is an error. At driving time the agent derives its command the same way from the
-planned route, whose junction waypoints CARLA marks.
+it is an error. At driving time the agent derives its command the same way, from its planned
+route and the same `junctions.json` outlines.
 
 On the v3 testbed the derived commands agree with the recorded LEFT and RIGHT on 88% of
 their frames, and 92% of the turning frames under a turn command steer its way. The
@@ -97,11 +97,26 @@ recorded turns do.
 
 ## Target point
 
-`target_point` is where the path is 30 m further on, in the vehicle's frame at that frame,
-as TransFuser-style models condition on the route. In v3 it comes from the driven path,
-continued straight along the final heading past the end of a recording; in v7 it comes
-from the recorded route, and at driving time from the planned one. Mirroring flips its y.
-The model embeds it after the temporal core, in units of 30 m.
+`target_point` is one of two points, chosen by `dataset.target_point`, in the vehicle's frame
+at that frame. The model embeds it after the temporal core, in units of 30 m, and mirroring
+flips its y.
+
+- **Sliding** (the default): where the path is 30 m further on, recomputed every frame and
+  continued straight along the final heading past the end of a recording.
+- **Sparse**: the next of the route points the CARLA leaderboard keeps when it thins the
+  route it gives agents: the first and last, every junction entry and exit, and the first
+  point more than 50 m past the last one kept (`sparse_points` in `labels.py`). The target
+  moves on to the following point 7.5 m before the vehicle reaches one, so between points the
+  images have to keep the vehicle in its lane.
+
+In v3 both come from the driven path; in v7 they come from the recorded route. At driving time
+the agent computes the same point from its planned route: CARLA's route planner at 1 m through
+the route's keypoints, as the leaderboard plans, with `route_progress` finding where the
+vehicle is on it. Replaying the agent's route code along the 164 held-out v3 episodes whose
+route the planner rebuilds, away from the route's ends, its point lies within 1.5° (sliding)
+or 3.6° (sparse) of the training point on 90% of the frames near junctions. When a sparse
+target moves on, the two can differ more for a frame or two: 33° at the 99th percentile near
+junctions, which routes recorded in v7 remove.
 
 The v3 point shows the exact line the expert went on to drive, which a planned route does not,
 so it gives away upcoming steering. Judge v3 offline scores against a baseline that sees only

@@ -100,6 +100,7 @@ def build_loader(dcfg: DatasetConfig, seed: int, split: str) -> DataLoader[dict[
         augment=dcfg.augment_train and train,
         resize_height=dcfg.resize_height,
         resize_width=dcfg.resize_width,
+        target_point=dcfg.target_point,
     )
     workers = dcfg.num_workers if train else dcfg.num_workers // 2
     # Each worker prefetches 2 batches (the PyTorch default); 1 halves the loader's memory

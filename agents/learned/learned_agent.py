@@ -168,6 +168,7 @@ class LearnedAgent:
         self._route_xy = np.zeros((0, 2))
         self._route_distance = np.zeros(0)
         self._route_command = np.zeros(0, np.int64)
+        self._route_sparse = np.zeros(0, np.int64)
         self._progress = 0
 
         # Camera queues and actors
@@ -231,8 +232,9 @@ class LearnedAgent:
         town = self.map.name.split("/")[-1].removesuffix("_Opt")
         outlines, _ = town_junctions(town, setting("DATA_DIR"))
         yaw = np.array([wp.transform.rotation.yaw for wp, _ in route])
-        junction = labels.junction_ids(self._route_xy, outlines)
-        self._route_command = labels.route(self._route_xy, yaw, junction).command
+        planned = labels.route(self._route_xy, yaw, labels.junction_ids(self._route_xy, outlines))
+        self._route_command = planned.command
+        self._route_sparse = labels.sparse_points(self._route_distance, planned.in_junction)
         self._progress = 0
         print(f"[LearnedAgent] Route planned: {len(route)} waypoints.")
 
@@ -252,13 +254,18 @@ class LearnedAgent:
         return int(self._route_command[self._progress]) - 1
 
     def _get_target_point(self) -> torch.Tensor:
-        """The route point TARGET_DISTANCE ahead in the vehicle's frame, (1, 1, 2) metres."""
+        """The target point the model trained with, in the vehicle's frame, (1, 1, 2) metres:
+        the route TARGET_DISTANCE ahead, or the next sparse route point."""
         transform = self.vehicle.get_transform()
-        point = target_on_route(
-            np.array([transform.location.x, transform.location.y]),
-            transform.rotation.yaw,
-            self._route_xy[self._progress + 1 :],
-        )
+        position = np.array([transform.location.x, transform.location.y])
+        yaw = transform.rotation.yaw
+        if self._route and self.cfg.dataset.target_point == "sparse":
+            here = self._route_distance[self._progress : self._progress + 1]
+            point = labels.sparse_target(
+                self._route_xy, self._route_distance, self._route_sparse, here, position[None], yaw
+            )[0]
+        else:
+            point = target_on_route(position, yaw, self._route_xy[self._progress + 1 :])
         return torch.from_numpy(point)[None, None].to(self.device)
 
     # ------------------------------------------------------------------

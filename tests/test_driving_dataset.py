@@ -425,3 +425,15 @@ class TestDataLoader:
         assert batch["controls"].shape == (2, 16, 2)
         assert batch["nav_command"].shape == (2, 16)
         assert batch["velocity"].shape == (2, 16, 3)
+
+
+def test_samples_carry_the_sliding_or_the_sparse_target_point(toy_data_dir: Path) -> None:
+    def make(target_point: str) -> DrivingSequenceDataset:
+        return DrivingSequenceDataset(
+            toy_data_dir, seq_len=16, augment=False, target_point=target_point
+        )
+
+    a, b = make("sliding")[0]["target_point"], make("sparse")[0]["target_point"]
+    assert a.shape == b.shape and torch.isfinite(b).all() and not torch.equal(a, b)
+    with pytest.raises(ValueError, match="target_point"):
+        make("dense")

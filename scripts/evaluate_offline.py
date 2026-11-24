@@ -94,7 +94,7 @@ def logged_protocol(c: dict[str, np.ndarray], batch_size: int, max_batches: int)
     return {"batches": n_batches, **{k: float(np.mean(v)) for k, v in per_batch.items()}}
 
 
-def train_labels(episodes: list[Path], fps: int) -> dict[str, np.ndarray]:
+def train_labels(episodes: list[Path], fps: int, sparse: bool = False) -> dict[str, np.ndarray]:
     """Labels of the training frames kept in the loss, and which of them are moving."""
     steer, accel, nav, point, moving = [], [], [], [], []
     for path in tqdm(episodes, desc="training labels"):
@@ -104,7 +104,7 @@ def train_labels(episodes: list[Path], fps: int) -> dict[str, np.ndarray]:
         steer.append(episode.steering[kept])
         accel.append(episode.acceleration[kept])
         nav.append(episode.command[kept] - 1)
-        point.append(episode.target_point[kept])
+        point.append((episode.sparse_target_point if sparse else episode.target_point)[kept])
         moving.append(episode.speed[kept] >= labels.STANDING_SPEED)
     return {
         "steer": np.concatenate(steer),
@@ -167,6 +167,7 @@ def main() -> None:
         seed=cfg.run.seed,
         resize_height=d.resize_height,
         resize_width=d.resize_width,
+        target_point=d.target_point,
     )
     val = DrivingSequenceDataset(split="val", augment=False, **common)
     train = DrivingSequenceDataset(split="train", augment=False, **common)
@@ -202,7 +203,7 @@ def main() -> None:
         frames["situation"] = c["situation"][after].reshape(-1, len(labels.CAUSES))
         frames["causes"] = c["causes"][after].reshape(-1, len(labels.CAUSES))
     steer, accel, nav = frames["steer"], frames["accel"], frames["nav"]
-    fitted = train_labels(train.episode_files, d.fps)
+    fitted = train_labels(train.episode_files, d.fps, d.target_point == "sparse")
     t_steer, t_accel, t_nav = fitted["steer"], fitted["accel"], fitted["nav"]
     mean_s, mean_a = float(t_steer.mean()), float(t_accel.mean())
     moving, t_point = fitted["moving"], fitted["target_point"][fitted["moving"]]

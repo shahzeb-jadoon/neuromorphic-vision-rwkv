@@ -162,6 +162,8 @@ class DrivingSequenceDataset(Dataset):
             (default: True for train).
         resize_height: Optional output height for on-the-fly resize.
         resize_width: Optional output width for on-the-fly resize.
+        target_point: "sliding", 30 m ahead along the path, or "sparse", the next of the
+            route points the CARLA leaderboard keeps (labels.sparse_target).
     """
 
     def __init__(
@@ -176,7 +178,10 @@ class DrivingSequenceDataset(Dataset):
         augment: bool | None = None,
         resize_height: int | None = None,
         resize_width: int | None = None,
+        target_point: str = "sliding",
     ) -> None:
+        if target_point not in ("sliding", "sparse"):
+            raise ValueError(f"target_point must be 'sliding' or 'sparse', got {target_point!r}")
         self.data_dir = Path(data_dir)
         self.seq_len = seq_len
         self.stride = stride
@@ -247,7 +252,10 @@ class DrivingSequenceDataset(Dataset):
             self.episode_frames.append(n)
             self.turning.append(turn_frames(episode.steering))
             self.commands.append(episode.command.astype(np.int8))
-            self.target_points.append(episode.target_point)
+            sparse = target_point == "sparse"
+            self.target_points.append(
+                episode.sparse_target_point if sparse else episode.target_point
+            )
             self.situations.append(episode.situation)
             self.excluded.append(episode.excluded)
             self.clips += [(ep_idx, s) for s in range(0, n - seq_len + 1, stride)]
@@ -332,8 +340,9 @@ class DrivingSequenceDataset(Dataset):
                     y right, metres; for aux loss)
                 waypoint_mask: (seq_len, 4) bool  (False where a waypoint lies past
                     the end of the recording and is clamped; left out of the loss)
-                target_point: (seq_len, 2) float32  (the path 30 m ahead in the vehicle's
-                    frame: x forward, y right, metres; a route input)
+                target_point: (seq_len, 2) float32  (the path 30 m ahead, or the next
+                    sparse route point, in the vehicle's frame: x forward, y right, metres;
+                    a route input)
                 situation: (seq_len, 11) bool  (labels.SITUATIONS that hold; several can)
                 clip: (2,) int64  (episode index and start frame, to trace a bad batch)
         """

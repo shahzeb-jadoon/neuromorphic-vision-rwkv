@@ -45,6 +45,7 @@ class DatasetConfig:
     augment_train: bool = True
     resize_height: int | None = None
     resize_width: int | None = None
+    target_point: str = "sliding"  # sliding (30 m ahead along the path) | sparse (route points)
 
 
 @dataclass
