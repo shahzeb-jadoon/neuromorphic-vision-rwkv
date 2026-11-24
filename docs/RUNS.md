@@ -220,11 +220,18 @@ of standard deviation 1), because GPU rounding depends on how frames are batched
 runs in fp32. The April run was trained on the earlier core. Its checkpoints and the model scores above can
 only be reproduced from tag `v0.2.0-p1`.
 
+The GRU reference has the same residual shape: each of its layers reads layer-normalised
+features and adds its output to them. A plain stack of six GRU layers stopped responding to its
+input in the [short run](#short-run).
+
 ## Visual stem since Phase 2
 
 The stem is an ImageNet ResNet-18 with frozen batch norm. Its 512×5×30 feature map is projected,
 given position codes and pooled by 8 learned queries into one token per frame. Only the last 4
-frames of a clip train the backbone; the pooling head trains on every frame.
+frames of a clip train the backbone; the pooling head trains on every frame. The backbone trains
+at a tenth of the learning rate (`optimization.backbone_lr_scale`): at the full rate, its frozen
+batch norm turned small weight changes into an offset shared by every frame, and the frame
+tokens stopped varying ([short run](#short-run)).
 
 `python scripts/probe_turn_tokens.py --episodes 250` trains the pooling head alone to tell left
 turns from right on 2,522 frames of 159 testbed episodes, with mirrored copies, and scores 636
@@ -245,6 +252,77 @@ pooled over every scored frame: `moving_control_mae` on moving frames and `turn_
 moving frames with |expert steering| above 0.1. Each is the absolute error averaged over steering
 and acceleration. Burn-in, stationary and excluded frames do not count. The total loss chose the
 April checkpoint, whose steering was no better than always steering straight.
+
+## Learning gates (Phase 2)
+
+### Overfit one window
+
+`make overfit` trains the short-run model on the golden window with the most turns
+(`episode_8de8b157`, 16 clips), with augmentation, dropout and weight decay off, and scores
+steering on its moving frames after burn-in. The window's steering is replaced by its 5-frame
+running median ([steering spikes](LABELS.md#steering-spikes)): scored against the raw labels,
+a perfect fit to the median would still have an error of 0.0246, above the 0.02 limit.
+
+| Steering labels | Learning rate | Backbone | Steps | Steering MAE | Turn sign | Result |
+| --- | --- | --- | ---: | ---: | ---: | --- |
+| Raw | 3e-4, constant | ×1 | 2,000 | 0.0715 | 98.1% | failed |
+| 5-frame median | 1e-4, cosine to 1e-5 | ×1 | 2,700 | 0.0195 | 100.0% | passed |
+| 5-frame median | 1e-4, cosine to 1e-5 | ×0.1 | 1,400 | 0.0159 | 100.0% | passed |
+
+Run on MPS in fp32: 35 minutes for the first passing run, 18 minutes for the last, the gate as
+it now stands. On the raw labels, training on the control loss alone, a learning rate of 1e-4,
+no gradient clipping and the GRU core each stayed far from the limit after 600 steps (best
+0.0768).
+
+### Short run
+
+`configs/short_run.yaml` trains for one epoch of the testbed's 880 training episodes, in clips
+that do not overlap: 5,333 steps of 8 clips of 32 frames, learning rate 3e-4 after 50 warm-up
+steps with cosine decay to 3e-5, in fp32 on MPS (2 to 2.5 hours). Validation every 500 steps on
+its first 200 batches picks `best.pt`. `scripts/evaluate_offline.py` then scores `best.pt` and
+`latest.pt` on all 219 held-out episodes (249,792 frames, 33,921 weighted turn frames). Set
+before the runs, a run passes if its turn MAE is below the target-point lookup's and rises by at
+least 10% when each clip is given another clip's images with its own command, speed and target
+point (`other_clip_turn_error_ratio` of 1.10 or more).
+
+Scores of `best.pt` on turn frames, training weights:
+
+| Run | Temporal core | Backbone learning rate | Token spread at the last validation | Turn MAE | Turn sign | On other clips' images | Result |
+| --- | --- | --- | ---: | ---: | ---: | ---: | --- |
+| `short_rwkv` | RWKV | 3e-4 | 3e-5 * | 0.1269 | 94.9% | not measured | blind |
+| `short_rwkv_v2` | RWKV | 3e-5 | 0.65 | 0.1148 | 95.3% | ×1.49 | passed |
+| `short_gru_v2` | GRU, plain stack | 3e-5 | 0.003 | 0.1241 | 95.1% | ×1.00 | failed |
+| `short_gru_v3` | GRU, residual | 3e-5 | 0.65 | 0.1140 | 95.1% | ×1.50 | passed |
+| Target-point lookup, 60 bearing bins | | | | 0.1548 | 94.9% | | |
+| Per-command mean | | | | 0.2082 | 85.8% | | |
+
+\* Measured after the run on 4 held-out clips; validation did not log token spread yet.
+
+`short_rwkv`: at the full learning rate the backbone's features grew from 0.87 to about 100
+within 250 steps while its weights moved only 1–7%, and mirroring the cameras changed the
+steering by 0.0000. Its lead over the lookup came from the target point alone.
+
+`short_rwkv_v2`: token spread rose from 0.31 at step 500 to 0.65, and `latest.pt` scores the
+same (turn MAE 0.1148, ×1.51 on other clips' images). In an episode bootstrap (95%) the turn
+MAE is 0.036 to 0.045 below the lookup's and 0.052 to 0.061 below its own on other clips'
+images. Mirroring the cameras flips the steering on 2.0% of turns: the direction of a turn
+comes from the target point, the amount of steering from the images. A k-nearest-neighbour
+regression on the target point alone (8 neighbours over the training episodes' moving frames,
+not part of the evaluator) still scores 0.0989, 0.0135 to 0.0185 better than the model.
+
+`short_gru_v2`: the health check failed it, with flat frame tokens from step 500, and its
+output did not change at all with other clips' images or mirrored cameras. Its backbone moved
+only 0.4–2%. The plain six-layer stack halved the frame-dependent part of its input at every
+layer, the frame tokens drifted to a large shared offset that saturated its first layer, and
+the trained core no longer responded to its input.
+
+`short_gru_v3`, with the residual GRU core: token spread rose from 0.40 at step 500 to 0.65, and
+`latest.pt` scores 0.1135, ×1.50 on other clips' images. In the episode bootstrap the turn MAE
+is 0.037 to 0.045 below the lookup's and 0.052 to 0.062 below its own on other clips' images,
+and the k-NN on the target point is 0.0127 to 0.0175 better. Mirroring the cameras flips the
+steering on 3.1% of turns. The two cores score within 0.001 of each other here, from one seed
+each and in models of different sizes (19.1 million parameters with the GRU core, 26.2 million
+with RWKV); comparing them is left to Phase 3.
 
 ---
 
