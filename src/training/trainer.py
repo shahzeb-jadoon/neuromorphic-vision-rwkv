@@ -1,14 +1,14 @@
-"""Phase 2 trainer with crash-safe resume, rich logging, and runtime overrides."""
+"""Phase 2 trainer with crash-safe resume, warm starts and rich logging."""
 
 from __future__ import annotations
 
 import copy
 import csv
+import hashlib
 import math
 import random
 import signal
 import time
-import warnings
 from dataclasses import asdict
 from datetime import datetime
 from pathlib import Path
@@ -19,7 +19,6 @@ from tqdm import tqdm
 import numpy as np
 import torch
 import torch.nn.functional as F
-import yaml
 from torch.nn.utils import clip_grads_with_norm_, get_total_norm
 from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
@@ -30,8 +29,9 @@ from src.models import VisionRWKVDriver
 from src.training.checkpointing import CheckpointManager, capture_rng_state, restore_rng_state
 from src.training.config import (
     DatasetConfig,
+    SchedulerConfig,
     TrainingConfig,
-    apply_dotlist_overrides,
+    resume_conflicts,
     save_training_config,
     training_config_to_dict,
 )
@@ -159,6 +159,20 @@ def token_spread(tokens: torch.Tensor) -> float:
     """
     frames = tokens.detach().float().flatten(0, -2)
     return float(frames.std(dim=0).mean() / frames.abs().mean())
+
+
+def learning_rate_factor(step: int, total_steps: int, cfg: SchedulerConfig) -> float:
+    """Share of the configured learning rate for optimizer step `step` (counted from 0).
+
+    The rate comes from the config and the step alone, so a resumed run uses what its config says.
+    """
+    if cfg.name == "constant":
+        return 1.0
+    warmup = max(0, cfg.warmup_steps)
+    if step < warmup:
+        return (step + 1) / warmup
+    progress = min(1.0, (step - warmup) / max(1, total_steps - warmup))
+    return cfg.min_lr_ratio + (1.0 - cfg.min_lr_ratio) * 0.5 * (1.0 + math.cos(math.pi * progress))
 
 
 class StepTimes:
@@ -373,7 +387,20 @@ class Trainer:
         # Convenience pointer to the latest run.
         (self.output_root / "LAST_RUN").write_text(self.run_name + "\n", encoding="utf-8")
 
+        self.checkpoints = CheckpointManager(self.run_dir, cfg.checkpoint)
+        resume_path = self.checkpoints.resolve_resume_path(cfg.run.resume)
+        resumed = None if resume_path is None else self.checkpoints.load(resume_path)
+        if resumed is not None:
+            conflicts = resume_conflicts(resumed["config"], cfg)
+            if conflicts:
+                raise ValueError(
+                    f"Resuming {resume_path} would change the settings it trained with:\n  "
+                    + "\n  ".join(conflicts)
+                    + "\nStart a new run from its weights instead (run.init_from)."
+                )
+
         save_training_config(cfg, self.run_dir / "config_resolved.yaml")
+        self.logger = CSVRunLogger(cfg, self.run_dir, self.run_name)
 
         seed_everything(cfg.run.seed, cfg.run.deterministic)
         self.device = self._resolve_device(cfg.run.device)
@@ -382,6 +409,8 @@ class Trainer:
         self.model = VisionRWKVDriver(cfg.model)
         if cfg.model.tokenizer.pretrained:
             self.model.tokenizer.load_pretrained()
+        if resumed is None and cfg.run.init_from:
+            self._warm_start(Path(cfg.run.init_from))
         self.model.to(self.device)
         if cfg.optimization.compile_encoder and self.device.type == "cuda":
             self.model.encoder = torch.compile(  # type: ignore[assignment]
@@ -402,8 +431,8 @@ class Trainer:
 
         self.train_loader = build_loader(cfg.dataset, cfg.run.seed, "train")
         self.val_loader = build_loader(cfg.dataset, cfg.run.seed, "val")
-        total_steps = max(1, cfg.optimization.epochs * len(self.train_loader))
-        self.scheduler = self._build_scheduler(total_steps)
+        self.total_steps = max(1, cfg.optimization.epochs * len(self.train_loader))
+        self.optimizer_steps = 0  # steps taken, skipped ones excluded: the schedule's position
 
         self.use_bf16 = cfg.optimization.amp and self.device.type == "cuda"
         self.nonfinite_in_a_row = 0
@@ -412,20 +441,17 @@ class Trainer:
         if cfg.optimization.ema_decay > 0.0:
             self.ema = ModelEMA(self.model, decay=cfg.optimization.ema_decay)
 
-        self.checkpoints = CheckpointManager(self.run_dir, cfg.checkpoint)
-        self.logger = CSVRunLogger(cfg, self.run_dir, self.run_name)
-
         self.global_step = 0
         self.current_epoch = 0
         self.resume_batch_in_epoch = 0
         self.best_metric: float | None = None
         self._stop_requested = False
         self._stop_reason = ""
-        self._last_override_version = -1
         self._last_val_loss: float | None = None
 
         self._register_signal_handlers()
-        self._maybe_resume()
+        if resume_path is not None and resumed is not None:
+            self._resume(resume_path, resumed)
 
     def _resolve_device(self, device: str) -> torch.device:
         return select_device(device)
@@ -448,29 +474,6 @@ class Trainer:
             p.requires_grad_(False)
         return teacher
 
-    def _build_scheduler(self, total_steps: int) -> torch.optim.lr_scheduler.LambdaLR:
-        scfg = self.cfg.scheduler
-        warmup = max(0, int(scfg.warmup_steps))
-        min_ratio = float(scfg.min_lr_ratio)
-
-        def lr_lambda(step: int) -> float:
-            if scfg.name == "constant":
-                return 1.0
-            if warmup > 0 and step < warmup:
-                return float(step + 1) / float(warmup)
-
-            progress_denom = max(1, total_steps - warmup)
-            progress = min(1.0, max(0.0, (step - warmup) / progress_denom))
-            cosine = 0.5 * (1.0 + math.cos(math.pi * progress))
-            return min_ratio + (1.0 - min_ratio) * cosine
-
-        # LambdaLR calls .step() internally during __init__, which triggers a
-        # PyTorch warning about step ordering. This is a known false positive —
-        # our training loop calls optimizer.step() before scheduler.step().
-        with warnings.catch_warnings():
-            warnings.filterwarnings("ignore", "Detected call of")
-            return torch.optim.lr_scheduler.LambdaLR(self.optimizer, lr_lambda=lr_lambda)
-
     def _register_signal_handlers(self) -> None:
         def _handler(signum: int, _frame: Any) -> None:
             self._stop_requested = True
@@ -480,19 +483,26 @@ class Trainer:
         signal.signal(signal.SIGINT, _handler)
         signal.signal(signal.SIGTERM, _handler)
 
-    def _maybe_resume(self) -> None:
-        resume_path = self.checkpoints.resolve_resume_path(self.cfg.run.resume)
-        if resume_path is None:
-            return
+    def _warm_start(self, path: Path) -> None:
+        """Start this new run from another run's weights, with a new optimizer and schedule."""
+        self.model.load_state_dict(self.checkpoints.load(path)["model"], strict=True)
+        with path.open("rb") as f:
+            digest = hashlib.file_digest(f, "sha256").hexdigest()
+        self.logger.log_event(
+            step=0, epoch=0, event_type="warm_start", detail=str(path), value=f"sha256:{digest}"
+        )
+        print(f"[trainer] warm start from {path} (sha256 {digest[:12]})")
 
-        payload = self.checkpoints.load(resume_path, map_location="cpu")
+    def _resume(self, path: Path, payload: dict[str, Any]) -> None:
+        """Continue the run saved in `payload` exactly where it stopped."""
         self.model.load_state_dict(payload["model"], strict=True)
         self.optimizer.load_state_dict(payload["optimizer"])
-        if "scheduler" in payload:
-            self.scheduler.load_state_dict(payload["scheduler"])
         if self.ema is not None and "ema" in payload:
             self.ema.load_state_dict(payload["ema"])
 
+        # Checkpoints from before this counter kept it as the scheduler's position.
+        steps = payload.get("optimizer_steps", payload.get("scheduler", {}).get("last_epoch", 0))
+        self.optimizer_steps = int(steps)
         self.global_step = int(payload.get("global_step", 0))
         self.current_epoch = int(payload.get("epoch", 0))
         self.resume_batch_in_epoch = int(payload.get("batch_in_epoch", 0))
@@ -509,48 +519,8 @@ class Trainer:
             epoch=self.current_epoch,
             event_type="resume",
             detail="checkpoint",
-            value=str(resume_path),
+            value=str(path),
         )
-
-    def _poll_runtime_overrides(self) -> None:
-        ocfg = self.cfg.runtime_overrides
-        if not ocfg.enabled:
-            return
-        if self.global_step % max(1, ocfg.poll_every_steps) != 0:
-            return
-
-        override_path = self.run_dir / ocfg.file_name
-        if not override_path.exists():
-            return
-
-        with override_path.open("r", encoding="utf-8") as f:
-            payload = yaml.safe_load(f) or {}
-
-        version = int(payload.get("version", 0))
-        if version <= self._last_override_version:
-            return
-
-        changes = payload.get("changes", {})
-        if not isinstance(changes, dict):
-            return
-
-        apply_dotlist_overrides(self.cfg, changes)
-        if "optimization.learning_rate" in changes:
-            lr = float(changes["optimization.learning_rate"])
-            for group in self.optimizer.param_groups:
-                group["lr"] = lr * group["lr_scale"]
-
-        self._last_override_version = version
-        for key, value in changes.items():
-            self.logger.log_event(
-                step=self.global_step,
-                epoch=self.current_epoch,
-                event_type="override",
-                detail=key,
-                value=str(value),
-            )
-
-        save_training_config(self.cfg, self.run_dir / "config_resolved.yaml")
 
     def _autocast(self) -> torch.amp.autocast:
         return torch.amp.autocast("cuda", dtype=torch.bfloat16, enabled=self.use_bf16)
@@ -665,8 +635,11 @@ class Trainer:
         )
 
         self.nonfinite_in_a_row = 0
+        factor = learning_rate_factor(self.optimizer_steps, self.total_steps, self.cfg.scheduler)
+        for group in self.optimizer.param_groups:
+            group["lr"] = self.cfg.optimization.learning_rate * group["lr_scale"] * factor
         self.optimizer.step()
-        self.scheduler.step()
+        self.optimizer_steps += 1
         if self.ema is not None:
             self.ema.update(self.model)
         return metrics | {"lr": self._current_lr(), "grad_norm": float(grad_norm)}
@@ -695,7 +668,7 @@ class Trainer:
         payload: dict[str, Any] = {
             "model": self.model.state_dict(),
             "optimizer": self.optimizer.state_dict(),
-            "scheduler": self.scheduler.state_dict(),
+            "optimizer_steps": self.optimizer_steps,
             "epoch": self.current_epoch,
             "batch_in_epoch": self.resume_batch_in_epoch,
             "global_step": self.global_step,
@@ -818,7 +791,6 @@ class Trainer:
 
                     self.global_step += 1
                     self.resume_batch_in_epoch = batch_idx + 1
-                    self._poll_runtime_overrides()
 
                     t_step_start = time.time()
                     metrics = self._train_step(batch)

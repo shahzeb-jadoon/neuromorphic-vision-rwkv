@@ -98,11 +98,6 @@ logging:
   plot_on_finish: true
   val_max_batches: 0
 
-runtime_overrides:
-  enabled: true
-  file_name: runtime_overrides.yaml
-  poll_every_steps: 100
-
 quantization:
   export_dynamic_int8: false
   export_path: quantized/model_dynamic_int8.pt

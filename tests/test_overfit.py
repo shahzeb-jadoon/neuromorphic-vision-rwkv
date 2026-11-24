@@ -54,7 +54,7 @@ def overfit_trainer(golden_dir: Path, out: Path) -> Trainer:
     cfg.scheduler.warmup_steps = 0
     cfg.scheduler.min_lr_ratio = 0.1
     trainer = Trainer(cfg)
-    trainer.scheduler = trainer._build_scheduler(MAX_STEPS)
+    trainer.total_steps = MAX_STEPS
     return trainer
 
 

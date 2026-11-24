@@ -210,6 +210,19 @@ skipped, leaving the weights, optimizer, schedule and EMA as they were, and is l
 (`episode file:start frame`). After `optimization.max_nonfinite_steps` (10) skipped steps in a
 row the run saves a crash checkpoint and stops.
 
+## Resuming and warm starts since Phase 2
+
+The learning rate of each optimizer step comes from the config and the number of steps taken,
+so a run trains at the rate its config states; settings can no longer be changed mid-run. A
+resume continues exactly what the run started. If a setting that changes the training differs
+from the checkpoint's (model, data, optimizer, schedule, loss, seed), the trainer lists the
+differences and stops before writing anything. Where and how the run executes may change: the
+device, the data path, loader workers, logging and checkpoint cadence. To continue with other
+settings, a new run starts from the checkpoint's weights (`--set run.init_from=<checkpoint>`)
+with a new optimizer and schedule, and `logs/events.csv` records the checkpoint's path and
+sha256 as a `warm_start` event. Older configs keep a `runtime_overrides` section, which loading
+ignores; no recorded run used it.
+
 ## Temporal core since Phase 2
 
 The RWKV core is RWKV-4-style with data-dependent decay. Each layer carries its time-mixing

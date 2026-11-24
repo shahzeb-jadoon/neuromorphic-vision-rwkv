@@ -6,7 +6,12 @@ from pathlib import Path
 
 import yaml
 
-from src.training.config import apply_dotlist_overrides, load_training_config
+from src.training.config import (
+    apply_dotlist_overrides,
+    load_training_config,
+    resume_conflicts,
+    training_config_to_dict,
+)
 from src.training.trainer import build_run_name
 
 
@@ -63,6 +68,20 @@ def test_a_rate_written_without_a_decimal_point_is_a_number(tmp_path: Path) -> N
 
     apply_dotlist_overrides(cfg, {"optimization.learning_rate": yaml.safe_load("1e-5")})
     assert cfg.optimization.learning_rate == 1e-5 and cfg.model.learning_rate == 1e-5
+
+
+def test_older_runs_load_and_resume_with_retired_and_later_settings(tmp_path: Path) -> None:
+    data = yaml.safe_load(Path("configs/short_run.yaml").read_text(encoding="utf-8"))
+    data["runtime_overrides"] = {"enabled": True, "poll_every_steps": 100}
+    old = tmp_path / "config_resolved.yaml"
+    old.write_text(yaml.safe_dump(data), encoding="utf-8")
+    cfg = load_training_config(old)
+
+    saved = training_config_to_dict(cfg) | {"runtime_overrides": data["runtime_overrides"]}
+    del saved["run"]["init_from"]  # added after the run was saved: counts as its default
+    assert resume_conflicts(saved, cfg) == []
+    cfg.scheduler.warmup_steps += 1
+    assert resume_conflicts(saved, cfg) == ["scheduler.warmup_steps: 50 -> 51"]
 
 
 def test_config_file_exists() -> None:

@@ -24,6 +24,7 @@ class RunConfig:
     seed: int = 42
     deterministic: bool = True
     resume: str = "auto"  # auto | never | /path/to/checkpoint_or_run_dir
+    init_from: str = ""  # checkpoint whose weights start this new run (a warm start)
     device: str = "auto"  # auto | cuda | cpu
 
 
@@ -115,15 +116,6 @@ class LoggingConfig:
 
 
 @dataclass
-class RuntimeOverrideConfig:
-    """Hot-reloadable runtime parameter overrides."""
-
-    enabled: bool = True
-    file_name: str = "runtime_overrides.yaml"
-    poll_every_steps: int = 100
-
-
-@dataclass
 class QuantizationConfig:
     """Optional post-training quantization export."""
 
@@ -144,8 +136,31 @@ class TrainingConfig:
     distillation: DistillationConfig = field(default_factory=DistillationConfig)
     checkpoint: CheckpointConfig = field(default_factory=CheckpointConfig)
     logging: LoggingConfig = field(default_factory=LoggingConfig)
-    runtime_overrides: RuntimeOverrideConfig = field(default_factory=RuntimeOverrideConfig)
     quantization: QuantizationConfig = field(default_factory=QuantizationConfig)
+
+
+# Sections that older runs' configs still contain: mid-run overrides, removed so that a run's
+# config always states the settings it trained with.
+RETIRED_SECTIONS = ("runtime_overrides",)
+
+# Settings a resumed run may change: where and how it runs and logs, not what it computes.
+RESUMABLE = (
+    "run.resume",
+    "run.run_name",
+    "run.output_root",
+    "run.device",
+    "run.tags",
+    "run.project",
+    "run.entity",
+    "dataset.data_dir",
+    "dataset.num_workers",
+    "dataset.pin_memory",
+    "checkpoint.save_every_steps",
+    "checkpoint.save_every_epochs",
+    "checkpoint.keep_last_n",
+    "logging.",
+    "quantization.",
+)
 
 
 def _typed(current: Any, value: Any) -> Any:
@@ -180,6 +195,8 @@ def _load_yaml(path: str | Path) -> dict[str, Any]:
 def load_training_config(path: str | Path) -> TrainingConfig:
     """Load a TrainingConfig from YAML."""
     raw = _load_yaml(path)
+    for section in RETIRED_SECTIONS:
+        raw.pop(section, None)
     cfg = TrainingConfig()
     _update_dataclass(cfg, raw)
     synchronize_training_config(cfg)
@@ -232,6 +249,33 @@ def apply_dotlist_overrides(cfg: TrainingConfig, overrides: dict[str, Any]) -> N
 def training_config_to_dict(cfg: TrainingConfig) -> dict[str, Any]:
     """Serialize config dataclasses to a plain dict."""
     return asdict(cfg)
+
+
+def _flatten(tree: dict[str, Any], prefix: str = "") -> dict[str, Any]:
+    """Nested config dict to {"section.key": value}, tuples as lists as YAML stores them."""
+    flat: dict[str, Any] = {}
+    for key, value in tree.items():
+        if isinstance(value, dict):
+            flat |= _flatten(value, f"{prefix}{key}.")
+        else:
+            flat[f"{prefix}{key}"] = list(value) if isinstance(value, tuple) else value
+    return flat
+
+
+def resume_conflicts(saved: dict[str, Any], cfg: TrainingConfig) -> list[str]:
+    """Training settings of `cfg` that differ from a checkpoint's `saved` config, as
+    "key: saved -> now". A resumed run must continue exactly what it started.
+
+    A setting added after the checkpoint was saved counts as its default.
+    """
+    saved = {k: v for k, v in saved.items() if k not in RETIRED_SECTIONS}
+    defaults = _flatten(training_config_to_dict(TrainingConfig()))
+    before, now = defaults | _flatten(saved), _flatten(training_config_to_dict(cfg))
+    return [
+        f"{key}: {before.get(key)!r} -> {now.get(key)!r}"
+        for key in sorted(before.keys() | now.keys())
+        if not key.startswith(RESUMABLE) and before.get(key) != now.get(key)
+    ]
 
 
 def save_training_config(cfg: TrainingConfig, path: str | Path) -> None:

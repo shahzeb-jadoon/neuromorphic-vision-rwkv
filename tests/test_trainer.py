@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import csv
+import hashlib
 import math
 from collections.abc import Iterator
 from pathlib import Path
@@ -12,18 +13,29 @@ import pytest
 import torch
 
 from src.data.driving_dataset import DrivingSequenceDataset
-from src.training.config import load_training_config
-from src.training.trainer import ControlError, NonFiniteTraining, StepTimes, Trainer, token_spread
+from src.training.config import SchedulerConfig, TrainingConfig, load_training_config
+from src.training.trainer import (
+    ControlError,
+    NonFiniteTraining,
+    StepTimes,
+    Trainer,
+    learning_rate_factor,
+    token_spread,
+)
 
 
-def make_trainer(data_dir: Path, out: Path, device: str = "cpu") -> Trainer:
+def make_config(data_dir: Path, out: Path, device: str = "cpu") -> TrainingConfig:
     cfg = load_training_config("configs/smoke_toy.yaml")
     cfg.dataset.data_dir = str(data_dir)
     cfg.run.output_root = str(out)
     cfg.run.run_name = "guard"
     cfg.run.device = device
     cfg.optimization.max_nonfinite_steps = 3
-    return Trainer(cfg)
+    return cfg
+
+
+def make_trainer(data_dir: Path, out: Path, device: str = "cpu") -> Trainer:
+    return Trainer(make_config(data_dir, out, device))
 
 
 @pytest.fixture
@@ -50,10 +62,10 @@ def test_a_non_finite_loss_skips_the_step_and_names_its_clips(trainer: Trainer) 
     batch = next(iter(trainer.train_loader))
     poisoned = {**batch, "controls": batch["controls"].clone()}
     poisoned["controls"][0, 8, 0] = float("nan")
-    before, position = weights(trainer), trainer.scheduler.last_epoch
+    before, position = weights(trainer), trainer.optimizer_steps
 
     assert trainer._train_step(poisoned) is None
-    assert unchanged(trainer, before) and trainer.scheduler.last_epoch == position
+    assert unchanged(trainer, before) and trainer.optimizer_steps == position
     assert not trainer.optimizer.state
 
     event = events(trainer, "nonfinite_step")[0]
@@ -109,6 +121,72 @@ def test_the_backbone_trains_at_a_fraction_of_the_learning_rate(trainer: Trainer
     in_backbone = {id(p) for p in trainer.model.tokenizer.backbone.parameters()}
     assert {id(p) for p in backbone["params"]} == in_backbone
     assert len(rest["params"]) + len(in_backbone) == len(list(trainer.model.parameters()))
+
+
+def test_the_learning_rate_follows_the_config_and_the_step_count() -> None:
+    cosine = SchedulerConfig(name="cosine", warmup_steps=10, min_lr_ratio=0.1)
+    assert learning_rate_factor(0, 110, cosine) == pytest.approx(0.1)
+    assert learning_rate_factor(10, 110, cosine) == pytest.approx(1.0)
+    assert learning_rate_factor(60, 110, cosine) == pytest.approx(0.55)
+    assert learning_rate_factor(110, 110, cosine) == pytest.approx(0.1)
+    assert learning_rate_factor(5, 110, SchedulerConfig(name="constant")) == 1.0
+
+
+def test_a_resumed_run_continues_with_its_weights_steps_and_rate(
+    toy_data_dir: Path, tmp_path: Path
+) -> None:
+    first = make_trainer(toy_data_dir, tmp_path)
+    batch = next(iter(first.train_loader))
+    for _ in range(3):
+        first._train_step(batch)
+    first._save_checkpoint(tag="step")
+    first.logger.close()
+
+    cfg = make_config(toy_data_dir, tmp_path)
+    cfg.run.resume = "auto"
+    cfg.dataset.num_workers += 1  # where and how a run is executed may change
+    second = Trainer(cfg)
+    assert second.optimizer_steps == 3 and unchanged(second, weights(first))
+    first._train_step(batch)
+    second._train_step(batch)
+    assert second._current_lr() == first._current_lr()
+    second.logger.close()
+
+
+def test_a_resume_that_would_change_the_training_is_refused(
+    toy_data_dir: Path, tmp_path: Path
+) -> None:
+    first = make_trainer(toy_data_dir, tmp_path)
+    first._save_checkpoint(tag="step")
+    first.logger.close()
+    record = (first.run_dir / "config_resolved.yaml").read_text()
+
+    cfg = make_config(toy_data_dir, tmp_path)
+    cfg.run.resume = "auto"
+    cfg.optimization.learning_rate *= 10
+    with pytest.raises(ValueError, match="optimization.learning_rate"):
+        Trainer(cfg)
+    assert (first.run_dir / "config_resolved.yaml").read_text() == record
+
+
+def test_a_warm_start_begins_a_new_run_from_another_runs_weights(
+    toy_data_dir: Path, tmp_path: Path
+) -> None:
+    parent = make_trainer(toy_data_dir, tmp_path)
+    parent._train_step(next(iter(parent.train_loader)))
+    checkpoint = parent._save_checkpoint(tag="step")
+    parent.logger.close()
+
+    cfg = make_config(toy_data_dir, tmp_path)
+    cfg.run.run_name = "child"
+    cfg.run.init_from = str(checkpoint)
+    cfg.optimization.learning_rate *= 0.1  # a new run may change anything
+    child = Trainer(cfg)
+    assert unchanged(child, weights(parent))
+    assert child.optimizer_steps == 0 and not child.optimizer.state
+    digest = hashlib.sha256(checkpoint.read_bytes()).hexdigest()
+    assert events(child, "warm_start")[0]["value"] == f"sha256:{digest}"
+    child.logger.close()
 
 
 def test_token_spread_is_zero_only_when_every_frame_gets_the_same_token() -> None:

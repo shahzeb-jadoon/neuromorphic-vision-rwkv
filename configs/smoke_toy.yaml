@@ -92,9 +92,6 @@ logging:
   plot_on_finish: false
   val_max_batches: 3
 
-runtime_overrides:
-  enabled: false
-
 quantization:
   export_dynamic_int8: false
 
