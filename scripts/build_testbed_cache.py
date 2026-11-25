@@ -14,7 +14,6 @@ usage: python scripts/build_testbed_cache.py SRC_DIR OUT_DIR [--workers 6]
 from __future__ import annotations
 
 import argparse
-import io
 import shutil
 import time
 from concurrent.futures import ProcessPoolExecutor, as_completed
@@ -24,8 +23,6 @@ from typing import Any
 import h5py
 import numpy as np
 import torch
-import torch.nn.functional as F
-from PIL import Image
 
 from src.data import hdf5_schema as S
 from src.data import schema_adapter
@@ -44,18 +41,9 @@ def build_episode(
         jpeg = g.create_dataset(S.IMAGES_JPEG, shape=(n_images,), dtype=h5py.vlen_dtype(np.uint8))
         for k0 in range(0, n_images, CHUNK):
             ks = range(k0, min(k0 + CHUNK, n_images))
-            frames = torch.from_numpy(np.stack([images[k * stride] for k in ks]))
-            small = F.interpolate(
-                frames.permute(0, 3, 1, 2).float(),
-                size=(height, width),
-                mode="bilinear",
-                align_corners=False,
-            )
-            pixels = small.round().clamp(0, 255).to(torch.uint8).permute(0, 2, 3, 1).numpy()
-            for k, img in zip(ks, pixels):
-                buf = io.BytesIO()
-                Image.fromarray(img).save(buf, format="JPEG", quality=quality)
-                jpeg[k] = np.frombuffer(buf.getvalue(), dtype=np.uint8)
+            frames = np.stack([images[k * stride] for k in ks])
+            for k, data in zip(ks, schema_adapter.cache_jpegs(frames, (height, width), quality)):
+                jpeg[k] = data
         for name, ds in f.items():
             if isinstance(ds, h5py.Dataset) and name != S.IMAGES:
                 g.create_dataset(name, data=ds[()], dtype=ds.dtype, compression=ds.compression)
@@ -83,7 +71,7 @@ def main() -> None:
     p.add_argument("out_dir", type=Path)
     p.add_argument("--height", type=int, default=160)
     p.add_argument("--width", type=int, default=960)
-    p.add_argument("--quality", type=int, default=90)
+    p.add_argument("--quality", type=int, default=schema_adapter.CACHE_QUALITY)
     p.add_argument("--stride", type=int, default=2)
     p.add_argument("--workers", type=int, default=6)
     args = p.parse_args()

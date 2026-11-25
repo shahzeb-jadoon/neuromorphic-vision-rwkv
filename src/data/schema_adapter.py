@@ -45,6 +45,7 @@ from src.data import labels
 SUPPORTED_SCHEMAS = range(3, 7)
 MODE_FOLD = {9: 8}
 JUNCTIONS_FILE = "junctions.json"  # junction outlines and stop lines per town, beside the episodes
+CACHE_QUALITY = 90  # JPEG quality of the testbed cache the models train on
 
 
 @dataclass(frozen=True)
@@ -203,6 +204,25 @@ def _resize(pixels: np.ndarray, size: tuple[int, int] | None) -> np.ndarray:
     x = torch.from_numpy(pixels).permute(2, 0, 1)[None]
     y = F.interpolate(x, size=size, mode="bilinear", align_corners=False)
     return np.asarray(y[0].permute(1, 2, 0))
+
+
+def cache_jpegs(frames: np.ndarray, size: tuple[int, int], quality: int) -> list[np.ndarray]:
+    """(N, H, W, 3) uint8 frames as a cache stores them: resized bilinearly in float, rounded,
+    JPEG-encoded."""
+    x = torch.from_numpy(frames).permute(0, 3, 1, 2).float()
+    small = F.interpolate(x, size=size, mode="bilinear", align_corners=False)
+    pixels = small.round().clamp(0, 255).to(torch.uint8).permute(0, 2, 3, 1).numpy()
+    jpegs = []
+    for image in pixels:
+        buffer = io.BytesIO()
+        Image.fromarray(image).save(buffer, format="JPEG", quality=quality)
+        jpegs.append(np.frombuffer(buffer.getvalue(), dtype=np.uint8))
+    return jpegs
+
+
+def as_cached(frame: np.ndarray, size: tuple[int, int], quality: int = CACHE_QUALITY) -> np.ndarray:
+    """One (H, W, 3) uint8 frame as training reads it back from a cache."""
+    return _resize(_decode(cache_jpegs(frame[None], size, quality)[0], size), size)
 
 
 def read_window(
