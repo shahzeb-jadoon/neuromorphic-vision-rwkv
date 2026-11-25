@@ -245,7 +245,8 @@ layer's values. It carries three tensors per layer like the RWKV-4-style core an
 memory one frame at a time in fp32. With the same random weights (3 layers, 2 heads, 24
 frames), its output equals the reference's plain-PyTorch implementation exactly over a clip,
 and to 8e-6 one frame at a time. At the short-run width its core has 11.8 million parameters,
-against 12.4 million for the RWKV-4-style core and 5.3 million for the GRU.
+against 12.4 million for the RWKV-4-style core and 5.3 million for the GRU. Its gate runs are
+under [RWKV-7 core](#rwkv-7-core).
 
 ## Visual stem since Phase 2
 
@@ -292,8 +293,10 @@ a perfect fit to the median would still have an error of 0.0246, above the 0.02 
 | 5-frame median | 1e-4, cosine to 1e-5 | ×1 | 2,700 | 0.0195 | 100.0% | passed |
 | 5-frame median | 1e-4, cosine to 1e-5 | ×0.1 | 1,400 | 0.0159 | 100.0% | passed |
 
-Run on MPS in fp32: 35 minutes for the first passing run, 18 minutes for the last, the gate as
-it now stands. On the raw labels, training on the control loss alone, a learning rate of 1e-4,
+Run on MPS in fp32: 35 minutes for the first passing run, 18 minutes for the last. With the
+sparse target point and the situation head, the short-run default since, the gate passes at
+step 1,500 (0.0150, 100.0%, 20 minutes), and with the RWKV-7 core as well at step 1,000
+(0.0192, 100.0%, 12 minutes). On the raw labels, training on the control loss alone, a learning rate of 1e-4,
 no gradient clipping and the GRU core each stayed far from the limit after 600 steps (best
 0.0768).
 
@@ -389,6 +392,21 @@ image-free baseline: from a sparse point the nearest-neighbour regression scores
 point the nearest-neighbour regression still wins; added to the sparse point, it raised the
 model's reliance on the images from ×1.48 to ×1.61. With one run each, RWKV and GRU tie. Short
 runs now use the sparse point and the situation head (`configs/short_run.yaml`).
+
+### RWKV-7 core
+
+`short_rwkv7` repeats `short_rwkv_both` with `model.encoder.core: rwkv7`, under the same pass
+bar. It trained in 2 hours 16 minutes, and its token spread was 0.61 at the last validation.
+
+| Checkpoint | Turn MAE | Model minus nearest neighbours, 95% | On other clips' images | Red light | Stop sign | Vehicle in path | Pedestrian in path | Result |
+| --- | ---: | --- | ---: | ---: | ---: | ---: | ---: | --- |
+| `best.pt` | 0.1125 | −0.009 to −0.003 | ×1.67 | 0.980 | 0.893 | 0.965 | 0.863 | passed |
+| `latest.pt` | 0.1092 | −0.012 to −0.006 | ×1.67 | 0.981 | 0.906 | 0.965 | 0.868 | passed |
+
+The last four columns are situation AUROCs. Its turn MAE is within 0.003 of the RWKV-4-style
+core's (0.1115 and 0.1110). It relies on the images a little more (×1.67 against ×1.61), and its
+AUROC is higher for every cause. From one run of each, these differences cannot be told apart
+from what a different seed would give.
 
 ---
 
