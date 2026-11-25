@@ -37,11 +37,12 @@ class RWKVEncoderConfig:
     state for temporal context.
     """
 
-    core: str = "rwkv"  # rwkv | gru
+    core: str = "rwkv"  # rwkv (RWKV-4-style) | rwkv7 | gru
     embed_dim: int = 768
     n_layers: int = 12
     ffn_dim: int = 3072  # Feed-forward hidden dimension (4x embed)
     dropout: float = 0.1
+    head_size: int = 64  # rwkv7: channels per head of its matrix memory
 
 
 @dataclass

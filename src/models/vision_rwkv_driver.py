@@ -36,6 +36,7 @@ import torch.nn as nn
 from src.models.config import ModelConfig, RWKVEncoderConfig
 from src.models.fusion import NavigationFusion
 from src.models.policy_head import PolicyHead
+from src.models.rwkv7_encoder import RWKV7Encoder
 from src.models.rwkv_encoder import RWKVEncoder
 from src.models.temporal import GRUCore, TemporalCore, TemporalState
 from src.models.tokenizer import VisionTokenizer
@@ -45,6 +46,7 @@ def build_temporal_core(config: RWKVEncoderConfig) -> TemporalCore:
     """The temporal core named by `config.core`."""
     cores: dict[str, Callable[[RWKVEncoderConfig], TemporalCore]] = {
         "rwkv": RWKVEncoder,
+        "rwkv7": RWKV7Encoder,
         "gru": GRUCore,
     }
     if config.core not in cores:

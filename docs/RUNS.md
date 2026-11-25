@@ -237,6 +237,16 @@ The GRU reference has the same residual shape: each of its layers reads layer-no
 features and adds its output to them. A plain stack of six GRU layers stopped responding to its
 input in the [short run](#short-run).
 
+`model.encoder.core: rwkv7` selects RWKV-7 (`src/models/rwkv7_encoder.py`), built as the
+official RWKV-LM blocks (`RWKV_Tmix_x070`, `RWKV_CMix_x070`) with their initialisation. Its
+memory is a matrix per head of 64 channels, updated by the generalised delta rule, so it can
+replace what it holds for a key rather than only let it fade; later layers mix in the first
+layer's values. It carries three tensors per layer like the RWKV-4-style core and runs the
+memory one frame at a time in fp32. With the same random weights (3 layers, 2 heads, 24
+frames), its output equals the reference's plain-PyTorch implementation exactly over a clip,
+and to 8e-6 one frame at a time. At the short-run width its core has 11.8 million parameters,
+against 12.4 million for the RWKV-4-style core and 5.3 million for the GRU.
+
 ## Visual stem since Phase 2
 
 The stem is an ImageNet ResNet-18 with frozen batch norm. Its 512×5×30 feature map is projected,

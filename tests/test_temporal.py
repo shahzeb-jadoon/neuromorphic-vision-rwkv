@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import cast
+from typing import TypeVar, cast
 
 import pytest
 import torch
@@ -14,6 +14,7 @@ from src.models.config import (
     RWKVEncoderConfig,
     TokenizerConfig,
 )
+from src.models.rwkv7_encoder import wkv7
 from src.models.rwkv_encoder import NO_HISTORY, RWKVBlock, WKVMemory, wkv_step
 from src.models.temporal import TemporalCore
 from src.models.vision_rwkv_driver import VisionRWKVDriver, build_temporal_core
@@ -22,21 +23,34 @@ D = 32
 FRAMES = 32
 TOLERANCE = 1e-5
 BF16_TOLERANCE = 0.05  # a few bf16 rounding steps on features of size 3
+M = TypeVar("M", bound=torch.nn.Module)
 
 
 def core_config(name: str, n_layers: int = 2) -> RWKVEncoderConfig:
-    return RWKVEncoderConfig(core=name, embed_dim=D, n_layers=n_layers, ffn_dim=64, dropout=0.1)
+    return RWKVEncoderConfig(
+        core=name, embed_dim=D, n_layers=n_layers, ffn_dim=64, dropout=0.1, head_size=16
+    )
 
 
-@pytest.fixture(params=["gru", "rwkv"])
+@pytest.fixture(params=["gru", "rwkv", "rwkv7"])
 def core_name(request: pytest.FixtureRequest) -> str:
     return str(request.param)
+
+
+def trained_like(module: M) -> M:
+    """Weights that start at zero given values, as training gives them: a fresh RWKV-7 block is
+    an identity (zero output projections), so its memory could not change anything tested."""
+    with torch.no_grad():
+        for p in module.parameters():
+            if not p.any():
+                p.normal_(0.0, 0.1)
+    return module
 
 
 @pytest.fixture
 def core(core_name: str) -> TemporalCore:
     torch.manual_seed(0)
-    return build_temporal_core(core_config(core_name)).eval()
+    return trained_like(build_temporal_core(core_config(core_name))).eval()
 
 
 @pytest.fixture
@@ -48,7 +62,7 @@ def driver(core_name: str) -> VisionRWKVDriver:
         fusion=FusionConfig(visual_dim=D, nav_embed_dim=8, fused_dim=D),
         policy_head=PolicyHeadConfig(input_dim=D, hidden_dims=(16,)),
     )
-    return VisionRWKVDriver(config).eval()
+    return trained_like(VisionRWKVDriver(config)).eval()
 
 
 def test_one_call_equals_stepping_every_frame(core: TemporalCore) -> None:
@@ -217,3 +231,21 @@ def test_gradients_through_the_carried_state_match_numerical_ones() -> None:
         return cast(torch.Tensor, block(frames[:, 3:], state)[0])
 
     assert torch.autograd.gradcheck(two_calls, (x,), eps=1e-6, atol=1e-4, rtol=1e-3)
+
+
+def test_rwkv7_memory_follows_the_delta_rule() -> None:
+    batch, frames, heads, size = 2, 9, 3, 4
+    r, w, k, v, a, b = torch.randn(6, batch, frames, heads, size).double().unbind(0)
+    start = torch.randn(batch, heads, size, size).double()
+    out, memory = wkv7(r, w, k, v, a, b, start)
+
+    state, decay = start.clone(), torch.exp(-torch.exp(w))
+    for t in range(frames):  # values by keys: S = S diag(decay) + (S a) b^T + v k^T, y = S r
+        state = (
+            state * decay[:, t, :, None, :]
+            + torch.einsum("bhik,bhk,bhj->bhij", state, a[:, t], b[:, t])
+            + torch.einsum("bhi,bhj->bhij", v[:, t], k[:, t])
+        )
+        expected = torch.einsum("bhij,bhj->bhi", state, r[:, t]).float()
+        assert torch.allclose(out[:, t], expected, rtol=1e-4, atol=1e-4)  # fp32 against fp64
+    assert torch.allclose(memory, state.float(), rtol=1e-4, atol=1e-4)
