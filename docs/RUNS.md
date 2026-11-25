@@ -406,7 +406,8 @@ bar. It trained in 2 hours 16 minutes, and its token spread was 0.61 at the last
 The last four columns are situation AUROCs. Its turn MAE is within 0.003 of the RWKV-4-style
 core's (0.1115 and 0.1110). It relies on the images a little more (×1.67 against ×1.61), and its
 AUROC is higher for every cause. From one run of each, these differences cannot be told apart
-from what a different seed would give.
+from what a different seed would give. Short runs now use the RWKV-7 core, the current RWKV
+design; `core: rwkv` and `core: gru` remain for comparison.
 
 ---
 

@@ -1,6 +1,6 @@
 # A short run: one epoch over the episodes in DATA_DIR, in clips that do not overlap, with
-# sparse target points and a situation head, the setup that passed the learning gates
-# (docs/RUNS.md, "Learning gates").
+# sparse target points, a situation head and the RWKV-7 core, the setup that passed the
+# learning gates (docs/RUNS.md, "Learning gates").
 # Judged with scripts/evaluate_offline.py against the baselines that see only the target point.
 # On the golden subset: --set dataset.data_dir=data/golden
 
@@ -39,7 +39,7 @@ model:
     n_heads: 4
     grad_frames: 4
   encoder:
-    core: rwkv
+    core: rwkv7
     embed_dim: 384
     n_layers: 6
     ffn_dim: 1536
