@@ -338,6 +338,48 @@ steering on 3.1% of turns. The two cores score within 0.001 of each other here, 
 each and in models of different sizes (19.1 million parameters with the GRU core, 26.2 million
 with RWKV); comparing them is left to Phase 3.
 
+### Sparse target points and a situation head
+
+In the runs above, a nearest-neighbour regression on the sliding target point alone beat every
+model. Four more short runs changed one thing at a time: the sparse target point, which the
+CARLA leaderboard gives agents ([target point](LABELS.md#target-point)), and a situation head
+that predicts what only the images show (a red light, a stop sign, a vehicle or a pedestrian
+in the path), with `loss.situation_weight` 0.1. Set before the runs, a run passes if its turn
+MAE is below both image-free baselines built from its own kind of target point (the 60-bin
+lookup and `target_point_knn`), rises by at least 10% on other clips' images, its situation
+head beats a constant answer on each cause (the episode-bootstrap 95% interval of the AUROC
+lies above 0.5) and its frame tokens stay healthy. Intervals come from 1,000 episode
+bootstrap draws over the evaluator's per-frame file.
+
+Scores of `best.pt` on turn frames, training weights, all four with healthy frame tokens
+(spread 0.63–0.64 at the last validation):
+
+| Run | Target point | Situation head | Turn MAE | 60-bin lookup | Nearest neighbours | Model minus nearest neighbours, 95% | On other clips' images | Result |
+| --- | --- | --- | ---: | ---: | ---: | --- | ---: | --- |
+| `short_rwkv_head` | sliding | yes | 0.1141 | 0.1548 | 0.0989 | +0.013 to +0.017 | ×1.54 | failed |
+| `short_rwkv_sparse` | sparse | no | 0.1139 | 0.1472 | 0.1184 | −0.008 to −0.002 | ×1.48 | passed |
+| `short_rwkv_both` | sparse | yes | 0.1115 | 0.1472 | 0.1184 | −0.010 to −0.004 | ×1.61 | passed |
+| `short_gru_both` | sparse | yes | 0.1149 | 0.1472 | 0.1184 | −0.007 to −0.000 | ×1.56 | passed |
+
+`latest.pt` gives the same results, with turn MAEs of 0.1136, 0.1110, 0.1119 and 0.1105.
+Situation AUROC of `best.pt` on the validation frames that count in training:
+
+| Run | Red light | Stop sign | Vehicle in path | Pedestrian in path |
+| --- | ---: | ---: | ---: | ---: |
+| `short_rwkv_head` | 0.975 | 0.902 | 0.957 | 0.788 |
+| `short_rwkv_both` | 0.974 | 0.873 | 0.955 | 0.814 |
+| `short_gru_both` | 0.979 | 0.937 | 0.961 | 0.862 |
+
+The pedestrian intervals are wide (0.57 to 0.98 across the runs): 936 validation frames have
+one in the path.
+
+The models' turn MAE barely moves between runs. What the sparse point changes is the
+image-free baseline: from a sparse point the nearest-neighbour regression scores 0.1184, not
+0.0989, and the models beat it. The situation head learns its causes, but with the sliding
+point the nearest-neighbour regression still wins; added to the sparse point, it raised the
+model's reliance on the images from ×1.48 to ×1.61. With one run each, RWKV and GRU tie. Short
+runs now use the sparse point and the situation head (`configs/short_run.yaml`).
+
 ---
 
 ## Other local runs (not reported)
