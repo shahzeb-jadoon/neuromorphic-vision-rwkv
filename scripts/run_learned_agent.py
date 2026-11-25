@@ -35,6 +35,7 @@ except ImportError:
     sys.exit(1)
 
 from agents.learned.learned_agent import LearnedAgent
+from src.data.labels import CAUSES
 
 
 # ---------------------------------------------------------------------------
@@ -125,11 +126,9 @@ def _setup_world(
 
 
 def _spawn_ego(world: carla.World) -> carla.Vehicle:
-    """Spawn the ego vehicle at a random spawn point."""
-    bp_lib = world.get_blueprint_library()
-    ego_bp = bp_lib.find("vehicle.lincoln.mkz_2017")
-    if ego_bp is None:
-        ego_bp = random.choice(bp_lib.filter("vehicle.*"))
+    """Spawn the ego vehicle at a random spawn point: the model the expert recorded with
+    (src/data/expert_collector.py), whose throttle and steering responses the model learned."""
+    ego_bp = world.get_blueprint_library().find("vehicle.tesla.model3")
     ego_bp.set_attribute("role_name", "hero")
 
     spawn_points = world.get_map().get_spawn_points()
@@ -242,6 +241,14 @@ def run_episode(
                     "nav_command": agent.last_nav_cmd,
                     "route_completion": round(agent.route_completion, 4),
                     "collisions": collision_count[0],
+                    # the light CARLA says governs the ego vehicle: logged, never a model input
+                    "traffic_light": str(ego.get_traffic_light_state())
+                    if ego.is_at_traffic_light()
+                    else "",
+                    **{
+                        f"p_{cause.replace(' ', '_')}": round(p, 3)
+                        for cause, p in zip(CAUSES, agent.situation)
+                    },
                 }
             )
 

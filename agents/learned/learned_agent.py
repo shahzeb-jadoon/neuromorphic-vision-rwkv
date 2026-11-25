@@ -197,6 +197,7 @@ class LearnedAgent:
         self.last_steer: float = 0.0
         self.last_accel: float = 0.0
         self.last_nav_cmd: int = _NAV_LANEFOLLOW
+        self.situation: List[float] = []  # probability of each labels.CAUSES, with a head
         print(
             f"[LearnedAgent] Ready on {self.device}: model at {self.cfg.dataset.fps} Hz, "
             f"every {self._ticks_per_frame} ticks. Cameras spawned."
@@ -319,7 +320,7 @@ class LearnedAgent:
         self._update_progress()
         nav_cmd_idx = self._get_nav_command()
         vel = self.vehicle.get_velocity()
-        controls, self.state, _ = self.model.step(
+        controls, self.state, aux = self.model.step(
             model_image(panorama, self._size)[None].to(self.device),
             torch.tensor([nav_cmd_idx], device=self.device),
             torch.tensor([float(np.hypot(vel.x, vel.y)) / MAX_SPEED_MS], device=self.device),
@@ -327,6 +328,8 @@ class LearnedAgent:
             self.state,
         )
         steer, accel = controls[0].tolist()
+        if "situation_logits" in aux:
+            self.situation = aux["situation_logits"][0].sigmoid().tolist()
         self.model_ms = (time.perf_counter() - start) * 1e3
 
         self.last_steer = float(np.clip(steer, -1.0, 1.0))
