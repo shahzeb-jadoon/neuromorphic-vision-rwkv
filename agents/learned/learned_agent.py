@@ -1,21 +1,18 @@
 """Learned driving agent for CARLA deployment.
 
-Wraps the trained VisionRWKVDriver as a CARLA-compatible agent.  The model
-receives 3-camera panoramic RGB frames (stitched left|centre|right) and a
-navigation command from the GlobalRoutePlanner, and outputs steering and a
-merged acceleration value that splits into throttle / brake.
-
-The RWKV recurrent state is preserved across ticks, giving the model temporal
-context over its entire driving history — the key architectural advantage over
-single-frame CNN policies.
+Wraps the trained VisionRWKVDriver as a CARLA agent in a synchronous world with a fixed
+time step. Every tick it is given the frame id that `world.tick()` returned. At the rate the
+model trained at (`dataset.fps`), it takes the three cameras' images of that frame, stitches
+them left|centre|right, prepares them exactly as training reads them from its cache, and
+steps the model once in fp32 with the state carried from the frame before. The ticks between
+model frames repeat its last control. Nothing overrides the model's control.
 
 Camera setup mirrors the data collection configuration exactly:
     3 × 640×320 cameras at yaws (-60°, 0°, +60°), mounted at (x=1.5, z=2.4).
-    Stitched panoramic: 320×1920 → resized to 160×960 for inference.
 
 Control translation (documented in src/models/policy_head.py):
-    steer    = controls[:, :, 0]          ∈ [-1, 1] — direct CARLA mapping
-    accel    = controls[:, :, 1]          ∈ [-1, 1]
+    steer    = controls[:, 0]          ∈ [-1, 1] — direct CARLA mapping
+    accel    = controls[:, 1]          ∈ [-1, 1]
     throttle = max(0, accel)
     brake    = max(0, -accel)
 
@@ -26,12 +23,12 @@ Copyright (c) 2025–2026 Shahzeb Jadoon.  Licensed under the Apache License 2.0
 from __future__ import annotations
 
 import queue
+import time
 from pathlib import Path
 from typing import List, Optional, Tuple
 
 import numpy as np
 import torch
-import torch.nn.functional as F
 
 try:
     import carla
@@ -40,26 +37,18 @@ try:
 except ImportError:
     CARLA_AVAILABLE = False
 
-from src.data.driving_dataset import MAX_SPEED_MS
-from src.data import labels
+from src.data import labels, schema_adapter
+from src.data.driving_dataset import IMAGENET_MEAN, IMAGENET_STD, MAX_SPEED_MS
 from src.data.labels import ROUTE_RESOLUTION, route_progress, target_on_route
 from src.data.schema_adapter import town_junctions
 from src.models import VisionRWKVDriver
+from src.models.temporal import TemporalState
 from src.training.config import load_training_config
 from src.utils.settings import setting
 
-# ---------------------------------------------------------------------------
-# Preprocessing constants — must match src/data/driving_dataset.py exactly
-# ---------------------------------------------------------------------------
-
-_RESIZE_H = 160
-_RESIZE_W = 960
-
-_IMAGENET_MEAN = torch.tensor([0.485, 0.456, 0.406]).view(3, 1, 1)
-_IMAGENET_STD  = torch.tensor([0.229, 0.224, 0.225]).view(3, 1, 1)
-
 # LANEFOLLOW, 0-indexed as in training
 _NAV_LANEFOLLOW = labels.LANEFOLLOW - 1
+CAMERA_TIMEOUT_S = 10.0
 
 # ---------------------------------------------------------------------------
 # Checkpoint loader — handles torch.compile _orig_mod key prefix
@@ -100,22 +89,48 @@ def load_checkpoint(checkpoint_path: str, device: torch.device) -> Tuple[VisionR
 
 
 # ---------------------------------------------------------------------------
-# Camera utilities
+# Frames
 # ---------------------------------------------------------------------------
 
-def _camera_callback(image: "carla.Image", q: queue.Queue) -> None:
-    """Drop any queued frame and enqueue the latest one (non-blocking)."""
-    try:
-        q.get_nowait()
-    except queue.Empty:
-        pass
-    q.put_nowait(image)
+def ticks_per_frame(settings: "carla.WorldSettings", fps: int) -> int:
+    """Simulator ticks per model frame: the world must step synchronously, a whole number of
+    times per frame of the rate the model trained at."""
+    delta = settings.fixed_delta_seconds
+    if not settings.synchronous_mode or not delta:
+        raise ValueError("the agent needs a synchronous world with a fixed time step")
+    ticks = 1.0 / (delta * fps)
+    if round(ticks) < 1 or abs(ticks - round(ticks)) > 1e-6:
+        raise ValueError(f"a {delta} s time step does not divide the model's {fps} Hz frames")
+    return round(ticks)
 
 
-def _carla_image_to_rgb(image: "carla.Image", h: int, w: int) -> np.ndarray:
+def frame_image(images: "queue.Queue[carla.Image]", frame: int) -> "carla.Image":
+    """The camera's image of simulator frame `frame`, dropping earlier ones. A camera that
+    skipped the frame or stays silent stops the drive rather than feeding it another frame."""
+    while True:
+        try:
+            image = images.get(timeout=CAMERA_TIMEOUT_S)
+        except queue.Empty:
+            raise RuntimeError(f"no camera image of frame {frame} in {CAMERA_TIMEOUT_S} s") from None
+        if image.frame == frame:
+            return image
+        if image.frame > frame:
+            raise RuntimeError(f"a camera skipped frame {frame} (its next image is {image.frame})")
+
+
+def model_image(panorama: np.ndarray, size: Tuple[int, int]) -> torch.Tensor:
+    """(H, W, 3) uint8 stitched cameras as the model trained on them, (3, *size) float32:
+    resized and JPEG-encoded as the training cache stores them, then normalised as the
+    dataset normalises them."""
+    pixels = schema_adapter.as_cached(panorama, size)
+    image = torch.from_numpy(pixels.copy()).permute(2, 0, 1).float().div_(255.0)
+    return image.sub_(IMAGENET_MEAN).div_(IMAGENET_STD)
+
+
+def _carla_image_to_rgb(image: "carla.Image") -> np.ndarray:
     """Convert a CARLA BGRA image to an RGB uint8 numpy array (H, W, 3)."""
-    arr = np.frombuffer(image.raw_data, dtype=np.uint8).reshape((h, w, 4))
-    return arr[:, :, 2::-1].copy()  # BGRA → RGB
+    arr = np.frombuffer(image.raw_data, dtype=np.uint8).reshape((image.height, image.width, 4))
+    return arr[:, :, 2::-1]  # BGRA → RGB
 
 
 # ---------------------------------------------------------------------------
@@ -126,12 +141,9 @@ class LearnedAgent:
     """CARLA driving agent backed by the trained VisionRWKVDriver model.
 
     Args:
-        vehicle:         The ego CARLA vehicle actor.
+        vehicle:         The ego CARLA vehicle actor, in a synchronous world.
         checkpoint_path: Path to the training checkpoint (.pt file).
         device:          PyTorch device string ('cuda' or 'cpu').
-        min_speed_kmh:   Minimum speed to enforce via a light throttle nudge.
-                         Prevents the model from getting stuck at intersections
-                         where expert data has many stationary frames.
     """
 
     # --- Camera config (must match expert_collector.py EpisodeConfig) ---
@@ -147,7 +159,6 @@ class LearnedAgent:
         vehicle: "carla.Vehicle",
         checkpoint_path: str,
         device: str = "cuda",
-        min_speed_kmh: float = 5.0,
     ) -> None:
         if not CARLA_AVAILABLE:
             raise ImportError("carla package not found — install it or run inside a CARLA Python env")
@@ -156,11 +167,12 @@ class LearnedAgent:
         self.world = vehicle.get_world()
         self.map = self.world.get_map()
         self.device = torch.device(device if torch.cuda.is_available() else "cpu")
-        self.min_speed_kmh = min_speed_kmh
 
-        # Model
+        # Model, in fp32: clip and step outputs agree only to rounding under bf16
         self.model, self.cfg = load_checkpoint(checkpoint_path, self.device)
-        self.state = self.model.initial_state(batch_size=1, device=self.device)
+        self.state: Optional[TemporalState] = None
+        self._size = (self.cfg.dataset.resize_height, self.cfg.dataset.resize_width)
+        self._ticks_per_frame = ticks_per_frame(self.world.get_settings(), self.cfg.dataset.fps)
 
         # Route planner, at the CARLA leaderboard's spacing
         self._planner = GlobalRoutePlanner(self.map, sampling_resolution=ROUTE_RESOLUTION)
@@ -171,17 +183,24 @@ class LearnedAgent:
         self._route_sparse = np.zeros(0, np.int64)
         self._progress = 0
 
-        # Camera queues and actors
-        self._cam_queues: List[queue.Queue] = [queue.Queue(maxsize=1) for _ in range(3)]
+        # Every image each camera sends, until the tick that needs it
+        self._cam_queues: List["queue.Queue[carla.Image]"] = [queue.Queue() for _ in range(3)]
         self._cameras: List["carla.Actor"] = []
         self._setup_cameras()
 
         self._tick = 0
-        # Diagnostic attributes — updated every run_step() call for external logging.
+        self._control = carla.VehicleControl()
+        # Diagnostics of the last run_step() call, for external logging.
+        self.stepped: bool = False
+        self.camera_ms: float = float("nan")
+        self.model_ms: float = float("nan")
         self.last_steer: float = 0.0
         self.last_accel: float = 0.0
         self.last_nav_cmd: int = _NAV_LANEFOLLOW
-        print(f"[LearnedAgent] Ready on {self.device}. Cameras spawned.")
+        print(
+            f"[LearnedAgent] Ready on {self.device}: model at {self.cfg.dataset.fps} Hz, "
+            f"every {self._ticks_per_frame} ticks. Cameras spawned."
+        )
 
     # ------------------------------------------------------------------
     # Setup
@@ -195,13 +214,13 @@ class LearnedAgent:
         cam_bp.set_attribute("image_size_y", str(self.CAMERA_HEIGHT))
         cam_bp.set_attribute("fov", str(self.CAMERA_FOV))
 
-        for i, yaw in enumerate(self.CAMERA_YAWS):
+        for q, yaw in zip(self._cam_queues, self.CAMERA_YAWS):
             transform = carla.Transform(
                 carla.Location(x=self.CAMERA_X, z=self.CAMERA_Z),
                 carla.Rotation(yaw=float(yaw)),
             )
             cam = self.world.spawn_actor(cam_bp, transform, attach_to=self.vehicle)
-            cam.listen(lambda img, q=self._cam_queues[i]: _camera_callback(img, q))
+            cam.listen(q.put)
             self._cameras.append(cam)
 
     # ------------------------------------------------------------------
@@ -238,6 +257,13 @@ class LearnedAgent:
         self._progress = 0
         print(f"[LearnedAgent] Route planned: {len(route)} waypoints.")
 
+    @property
+    def route_completion(self) -> float:
+        """Share of the planned route's length behind the vehicle."""
+        if not self._route:
+            return 0.0
+        return float(self._route_distance[self._progress] / max(self._route_distance[-1], 1e-6))
+
     def _update_progress(self) -> None:
         """Move the route position to the point nearest the vehicle ahead of the last one."""
         if self._route:
@@ -254,7 +280,7 @@ class LearnedAgent:
         return int(self._route_command[self._progress]) - 1
 
     def _get_target_point(self) -> torch.Tensor:
-        """The target point the model trained with, in the vehicle's frame, (1, 1, 2) metres:
+        """The target point the model trained with, in the vehicle's frame, (1, 2) metres:
         the route TARGET_DISTANCE ahead, or the next sparse route point."""
         transform = self.vehicle.get_transform()
         position = np.array([transform.location.x, transform.location.y])
@@ -266,103 +292,52 @@ class LearnedAgent:
             )[0]
         else:
             point = target_on_route(position, yaw, self._route_xy[self._progress + 1 :])
-        return torch.from_numpy(point)[None, None].to(self.device)
-
-    # ------------------------------------------------------------------
-    # Perception
-    # ------------------------------------------------------------------
-
-    def _get_panoramic_frame(self) -> Optional[np.ndarray]:
-        """Collect one frame from each camera and stitch into a panoramic.
-
-        Returns:
-            (H, W_total, 3) uint8 numpy array, or None if cameras aren't ready.
-        """
-        frames = []
-        for q in self._cam_queues:
-            try:
-                img = q.get(timeout=0.05)
-            except queue.Empty:
-                return None
-            frames.append(_carla_image_to_rgb(img, self.CAMERA_HEIGHT, self.CAMERA_WIDTH))
-
-        return np.concatenate(frames, axis=1)  # (320, 1920, 3)
-
-    def _preprocess(self, panoramic: np.ndarray) -> torch.Tensor:
-        """Preprocess a panoramic frame to match the training pipeline exactly.
-
-        Steps (must mirror DrivingSequenceDataset.__getitem__):
-            1. uint8 (H, W, 3) → float32 (3, H, W) / 255
-            2. Bilinear resize to (_RESIZE_H, _RESIZE_W)
-            3. ImageNet mean/std normalization
-            4. Add batch and time dimensions → (1, 1, 3, H, W)
-        """
-        img = torch.from_numpy(panoramic).permute(2, 0, 1).float().div(255.0)  # (3, H, W)
-        img = F.interpolate(
-            img.unsqueeze(0),
-            size=(_RESIZE_H, _RESIZE_W),
-            mode="bilinear",
-            align_corners=False,
-        )  # (1, 3, H, W)
-        img = (img - _IMAGENET_MEAN) / _IMAGENET_STD
-        return img.unsqueeze(1).to(self.device)  # (1, 1, 3, H, W)
+        return torch.from_numpy(point)[None].to(self.device)
 
     # ------------------------------------------------------------------
     # Inference
     # ------------------------------------------------------------------
 
     @torch.inference_mode()
-    def run_step(self) -> "carla.VehicleControl":
-        """Execute one inference step and return a CARLA VehicleControl.
+    def run_step(self, frame: int) -> "carla.VehicleControl":
+        """The control for simulator frame `frame`, the id `world.tick()` returned.
 
-        Called once per simulator tick (target: 20 Hz, matching training FPS).
-        The RWKV state (self.state) is updated in-place, carrying temporal
-        context across ticks.
-
-        Returns:
-            carla.VehicleControl with steer, throttle, and brake set.
+        The model steps on the first tick and every `ticks_per_frame`-th tick after it,
+        carrying its state from the frame before; the ticks between repeat its control.
         """
-        panoramic = self._get_panoramic_frame()
-        if panoramic is None:
-            # Cameras haven't produced a frame yet — coast forward gently
-            return carla.VehicleControl(throttle=0.2, steer=0.0, brake=0.0)
+        self.stepped = self._tick % self._ticks_per_frame == 0
+        self._tick += 1
+        if not self.stepped:
+            return self._control
 
+        start = time.perf_counter()
+        images = [frame_image(q, frame) for q in self._cam_queues]
+        panorama = np.concatenate([_carla_image_to_rgb(image) for image in images], axis=1)
+        self.camera_ms = (time.perf_counter() - start) * 1e3
+
+        start = time.perf_counter()
         self._update_progress()
         nav_cmd_idx = self._get_nav_command()
-        images = self._preprocess(panoramic)                              # (1, 1, 3, H, W)
-        nav_cmd = torch.tensor([[nav_cmd_idx]], device=self.device)       # (1, 1)
-
         vel = self.vehicle.get_velocity()
-        speed_norm = float(np.hypot(vel.x, vel.y)) / MAX_SPEED_MS
-        speed = torch.tensor([[speed_norm]], device=self.device)          # (1, 1)
-
-        target_point = self._get_target_point()
-
-        controls, self.state, _ = self.model(images, nav_cmd, speed, target_point, self.state)
-
-        steer = float(controls[0, 0, 0])
-        accel = float(controls[0, 0, 1])
-
-        throttle = max(0.0, accel)
-        brake    = max(0.0, -accel)
-
-        # Minimum speed nudge: prevent getting permanently stuck.
-        # The model was trained on expert data that never sat still deliberately,
-        # so it may output near-zero accel when stationary at green lights.
-        speed_kmh = (vel.x**2 + vel.y**2 + vel.z**2) ** 0.5 * 3.6
-        if speed_kmh < self.min_speed_kmh and brake < 0.05:
-            throttle = max(throttle, 0.15)
+        controls, self.state, _ = self.model.step(
+            model_image(panorama, self._size)[None].to(self.device),
+            torch.tensor([nav_cmd_idx], device=self.device),
+            torch.tensor([float(np.hypot(vel.x, vel.y)) / MAX_SPEED_MS], device=self.device),
+            self._get_target_point(),
+            self.state,
+        )
+        steer, accel = controls[0].tolist()
+        self.model_ms = (time.perf_counter() - start) * 1e3
 
         self.last_steer = float(np.clip(steer, -1.0, 1.0))
         self.last_accel = accel
         self.last_nav_cmd = nav_cmd_idx
-        self._tick += 1
-
-        return carla.VehicleControl(
-            throttle=float(np.clip(throttle, 0.0, 1.0)),
+        self._control = carla.VehicleControl(
+            throttle=float(np.clip(accel, 0.0, 1.0)),
             steer=self.last_steer,
-            brake=float(np.clip(brake, 0.0, 1.0)),
+            brake=float(np.clip(-accel, 0.0, 1.0)),
         )
+        return self._control
 
     # ------------------------------------------------------------------
     # Cleanup

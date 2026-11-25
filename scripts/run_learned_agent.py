@@ -1,34 +1,28 @@
 """Run the trained VisionRWKVDriver in a live CARLA simulation.
 
-Requires a running CARLA server (0.9.16) on the specified host/port.
+Requires a running CARLA server (0.9.16) on the specified host/port. The world ticks
+synchronously at 20 Hz, the rate the expert recorded at; the agent steps the model at the
+rate it trained at.
 
-Usage (auto-detect Windows host, Town02):
+Usage (auto-detect Windows host, Town01, 500 ticks, per-tick log):
     python scripts/run_learned_agent.py \
-        --checkpoint runs_fast/fastsafe_20260424_093210/checkpoints/best.pt \
-        --town Town02
+        --checkpoint runs/short/short_rwkv7/checkpoints/best.pt \
+        --town Town01 --max-steps 500 --seed 0 --log runs/drive/town01.csv
 
-Usage (explicit host, multiple episodes):
-    python scripts/run_learned_agent.py \
-        --checkpoint runs_fast/fastsafe_20260424_093210/checkpoints/best.pt \
-        --host 172.20.0.1 \
-        --town Town02 \
-        --n-episodes 3 \
-        --max-steps 2000
-
-The script reports per-episode:
-    - Route completion %
-    - Collision count
-    - Average speed (km/h)
-    - Steps completed
+The script reports per episode the route completion (share of the planned route's length
+driven), collisions, average speed, ticks and the time `run_step` took on the ticks where the
+model stepped. `--log` writes one row per tick.
 """
 
 from __future__ import annotations
 
 import argparse
+import csv
 import random
 import subprocess
 import sys
 import time
+from pathlib import Path
 from typing import List, Tuple
 
 import numpy as np
@@ -75,6 +69,7 @@ def _setup_world(
     town: str,
     n_vehicles: int,
     n_walkers: int,
+    seed: int,
 ) -> Tuple["carla.World", "carla.WorldSettings", List["carla.Actor"]]:
     """Load the town, enable sync mode, and spawn NPC traffic.
 
@@ -91,11 +86,12 @@ def _setup_world(
 
     settings = world.get_settings()
     settings.synchronous_mode = True
-    settings.fixed_delta_seconds = 1.0 / 20.0  # 20 Hz, matching training FPS
+    settings.fixed_delta_seconds = 1.0 / 20.0  # 20 Hz, as the expert recorded
     world.apply_settings(settings)
 
     traffic_manager = client.get_trafficmanager()
     traffic_manager.set_synchronous_mode(True)
+    traffic_manager.set_random_device_seed(seed)
 
     bp_lib = world.get_blueprint_library()
     npc_actors: List[carla.Actor] = []
@@ -184,14 +180,17 @@ def run_episode(
     n_walkers: int,
     max_steps: int,
     device: str,
+    seed: int,
+    log: Path | None,
 ) -> dict:
     """Run one complete episode and return a metrics dict.
 
     All CARLA actors (ego, sensors, NPCs) are destroyed and world settings
     are restored in the finally block — even on Ctrl+C or exceptions.
     """
-    world, original_settings, npc_actors = _setup_world(client, town, n_vehicles, n_walkers)
+    world, original_settings, npc_actors = _setup_world(client, town, n_vehicles, n_walkers, seed)
     ego = _spawn_ego(world)
+    world.tick()  # a new actor reads location (0, 0, 0) until the world ticks
     collision_sensor, collision_count = _attach_collision_sensor(world, ego)
     agent = LearnedAgent(ego, checkpoint, device=device)
 
@@ -200,6 +199,7 @@ def run_episode(
 
     spectator = world.get_spectator()
     speeds = []
+    rows: List[dict] = []
     step = 0
     # Capture final ego location before destroy for metrics
     final_ego_loc = ego.get_location()
@@ -208,7 +208,7 @@ def run_episode(
 
     try:
         for step in range(max_steps):
-            world.tick()
+            frame = world.tick()
 
             # Spectator chase cam — follows ego from behind and above
             tf = ego.get_transform()
@@ -219,12 +219,31 @@ def run_episode(
                 )
             )
 
-            control = agent.run_step()
+            start = time.perf_counter()
+            control = agent.run_step(frame)
+            run_step_ms = (time.perf_counter() - start) * 1e3
             ego.apply_control(control)
 
             vel = ego.get_velocity()
             speed_kmh = (vel.x**2 + vel.y**2 + vel.z**2) ** 0.5 * 3.6
             speeds.append(speed_kmh)
+            rows.append(
+                {
+                    "tick": step,
+                    "frame": frame,
+                    "model_stepped": int(agent.stepped),
+                    "run_step_ms": round(run_step_ms, 3),
+                    "camera_ms": round(agent.camera_ms, 3) if agent.stepped else "",
+                    "model_ms": round(agent.model_ms, 3) if agent.stepped else "",
+                    "speed_kmh": round(speed_kmh, 3),
+                    "steer": round(control.steer, 4),
+                    "throttle": round(control.throttle, 4),
+                    "brake": round(control.brake, 4),
+                    "nav_command": agent.last_nav_cmd,
+                    "route_completion": round(agent.route_completion, 4),
+                    "collisions": collision_count[0],
+                }
+            )
 
             final_ego_loc = ego.get_location()
             dist_to_goal = final_ego_loc.distance(destination)
@@ -251,6 +270,7 @@ def run_episode(
                 )
 
     finally:
+        route_completion = agent.route_completion
         print("[cleanup] Stopping agent and sensors...")
         agent.destroy()
 
@@ -265,6 +285,12 @@ def run_episode(
 
         print(f"[cleanup] Destroying {len(npc_actors)} NPC actors...")
         for actor in npc_actors:
+            # Off the traffic manager first, whose thread would otherwise act on destroyed actors
+            if isinstance(actor, carla.Vehicle):
+                try:
+                    actor.set_autopilot(False)
+                except Exception:
+                    pass
             _safe_destroy(actor)
 
         # Reset traffic manager to async mode
@@ -282,17 +308,24 @@ def run_episode(
 
         print("[cleanup] Done.")
 
+    if log is not None and rows:
+        log.parent.mkdir(parents=True, exist_ok=True)
+        with log.open("w", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=list(rows[0]))
+            writer.writeheader()
+            writer.writerows(rows)
+    stepped_ms = [r["run_step_ms"] for r in rows if r["model_stepped"]]
     return {
         "steps": step + 1,
         "collisions": collision_count[0],
         "avg_speed_kmh": float(np.mean(speeds)) if speeds else 0.0,
         "reached_goal": final_ego_loc.distance(destination) < 5.0,
-        "route_completion_pct": max(
-            0.0,
-            1.0
-            - final_ego_loc.distance(destination) / max(1.0, destination.distance(final_ego_loc)),
-        )
-        * 100,
+        "route_completion_pct": 100 * route_completion,
+        "model_step_ms_p50_p95_max": [
+            round(float(v), 1) for v in np.percentile(stepped_ms, [50, 95, 100])
+        ]
+        if stepped_ms
+        else [],
     }
 
 
@@ -318,7 +351,10 @@ def main() -> None:
     parser.add_argument("--n-vehicles", type=int, default=50, help="NPC vehicle count")
     parser.add_argument("--n-walkers", type=int, default=30, help="NPC walker count")
     parser.add_argument("--device", default="cuda", help="PyTorch device (default: cuda)")
+    parser.add_argument("--seed", type=int, default=0, help="Seed for spawns and traffic")
+    parser.add_argument("--log", type=Path, help="Per-tick CSV (episode number appended)")
     args = parser.parse_args()
+    random.seed(args.seed)
 
     # Resolve host
     if args.host == "auto":
@@ -349,6 +385,8 @@ def main() -> None:
                 n_walkers=args.n_walkers,
                 max_steps=args.max_steps,
                 device=args.device,
+                seed=args.seed,
+                log=args.log.with_stem(f"{args.log.stem}_{ep + 1}") if args.log else None,
             )
             all_results.append(result)
             print(f"\n[episode {ep + 1}] Results: {result}")
