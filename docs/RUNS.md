@@ -409,6 +409,37 @@ AUROC is higher for every cause. From one run of each, these differences cannot 
 from what a different seed would give. Short runs now use the RWKV-7 core, the current RWKV
 design; `core: rwkv` and `core: gru` remain for comparison.
 
+## Driving (Phase 2)
+
+`scripts/run_learned_agent.py` drives `agents/learned/learned_agent.py` in a synchronous world
+at 20 Hz, the rate the expert recorded at. The agent steps the model once per frame of the rate
+it trained at, every second tick, with the state carried from the frame before, in fp32, and
+repeats its control on the tick between. It takes each camera's image of the tick by frame id
+and prepares it as the training cache did (resize, JPEG round trip, normalisation); a test
+checks the result equals the dataset's sample bit for bit. Before this, the model stepped at
+20 Hz, its images skipped the JPEG round trip (up to 8 grey levels from training's), it took
+the newest image whatever its frame, and a throttle of 0.15 was added below 5 km/h.
+
+### Agent check: 500 ticks in Town01
+
+`short_rwkv7` `best.pt`, seed 0, 50 vehicles and 30 pedestrians (`--max-steps 500 --seed 0
+--log`). All 500 frames were consecutive and the model stepped on 250. On those ticks
+`run_step` took 61 ms at the median and 83 ms at the 95th percentile: 28 ms waiting for the
+cameras, 32 ms preparing the image and stepping the model (0.7 s for the first step). A 10 Hz
+frame allows 100 ms. Two faults of the runner showed first: it planned the route from the
+ego vehicle's position before the world had ticked, when a new actor still reads (0, 0, 0), so
+every target point pointed hundreds of metres away; and it destroyed vehicles the traffic
+manager still drove, which aborted the process.
+
+The car did not drive off. It crept at 1.3 km/h on average and covered 1.1% of its route, with
+no collision. From a standstill the control head asks for little throttle (0 to 0.3), although
+the waypoint head places the car 5–6 m ahead after 2 s and the speed head asks for about
+9 km/h. On a clear road, the same frame gives an acceleration of 0.06 at 0 km/h, 0.21 at 5 km/h
+and 0.34 at 10 km/h: the inertia problem of behaviour cloning (Codevilla et al., 2019), where a
+model that sees the car standing still predicts it stays still. A third of the testbed's usable frames stand still. On
+97% of them the expert brakes (mean acceleration −0.47), even within a second of pulling away
+(median −0.50), and standing frames count a tenth in the loss.
+
 ---
 
 ## Other local runs (not reported)
