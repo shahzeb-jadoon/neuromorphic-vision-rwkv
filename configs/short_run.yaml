@@ -1,5 +1,7 @@
-# A short run: one epoch over the episodes in DATA_DIR, in clips that do not overlap.
-# Judged with scripts/evaluate_offline.py against the baseline that sees only the target point.
+# A short run: one epoch over the episodes in DATA_DIR, in clips that do not overlap, with
+# sparse target points and a situation head, the setup that passed the learning gates
+# (docs/RUNS.md, "Learning gates").
+# Judged with scripts/evaluate_offline.py against the baselines that see only the target point.
 # On the golden subset: --set dataset.data_dir=data/golden
 
 run:
@@ -25,6 +27,7 @@ dataset:
   augment_train: true
   resize_height: 160
   resize_width: 960
+  target_point: sparse
 
 model:
   tokenizer:
@@ -80,6 +83,7 @@ loss:
   speed_weight: 0.1
   mode_weight: 0.1
   waypoint_weight: 0.5
+  situation_weight: 0.1
 
 distillation:
   enabled: false
