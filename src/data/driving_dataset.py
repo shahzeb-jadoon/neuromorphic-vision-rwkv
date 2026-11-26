@@ -335,8 +335,9 @@ class DrivingSequenceDataset(Dataset):
                 velocity: (seq_len, 3) float32  (z-score normalised)
                 speed: (seq_len,) float32  (horizontal speed / MAX_SPEED_MS, a model input)
                 loss_weight: (seq_len,) float32 — per-frame weight
-                    (1.0 for moving frames, 0.1 for stationary, 0 for frames kept out
-                    of the loss: labels.misplaced_stops)
+                    (1.0 for moving frames and for the episode's first frames until the
+                    car moves, 0.1 for other stationary frames, 0 for frames kept out of
+                    the loss: labels.misplaced_stops)
                 target_speed: (seq_len,) float32  (normalised ∈ [0, 1];
                     multiply by MAX_SPEED_KMH to recover km/h)
                 driving_mode: (seq_len,) int64  (DrivingMode enum, for aux loss)
@@ -376,11 +377,12 @@ class DrivingSequenceDataset(Dataset):
         # Per-frame loss weight: down-weight stationary frames.
         # Compute speed from raw velocity BEFORE z-score normalisation.
         speed = velocity[:, :2].norm(dim=-1)  # horizontal speed (m/s)
+        standing = speed < self.STATIONARY_SPEED_THRESH
         loss_weight = torch.where(
-            speed < self.STATIONARY_SPEED_THRESH,
-            torch.tensor(self.STATIONARY_LOSS_WEIGHT),
-            torch.tensor(1.0),
+            standing, torch.tensor(self.STATIONARY_LOSS_WEIGHT), torch.tensor(1.0)
         )
+        if start == 0:  # the expert sets off from rest here, where the others stand and brake
+            loss_weight[standing.int().cumprod(0).bool()] = 1.0
         loss_weight[torch.from_numpy(self.excluded[ep_idx][start:end])] = 0.0
 
         # Z-score normalise velocity

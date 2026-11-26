@@ -228,6 +228,26 @@ def test_a_misplaced_stop_is_kept_out_of_the_loss(tmp_path: Path) -> None:
     assert (first == 0).all() and (last[:6] == 0).all() and (last[6:] == 1).all()
 
 
+def test_only_the_rest_that_starts_an_episode_counts_in_full(tmp_path: Path) -> None:
+    from scripts.create_toy_dataset import generate_episode, save_episode_hdf5
+
+    ep = generate_episode(0, 120, img_h=16, img_w=48, rng=np.random.default_rng(0))
+    path = tmp_path / save_episode_hdf5(ep, tmp_path, episode_idx=0)[0]
+    frame = np.arange(120)
+    standing = (frame < 10) | ((frame >= 60) & (frame < 80))
+    with h5py.File(path, "r+") as f:  # 20 Hz: 0.5 s at rest, east at 5 m/s, 1 s at rest, on
+        f[S.VELOCITY][...] = np.where(standing[:, None], 0.0, [5.0, 0.0, 0.0])
+        f[S.TRAFFIC_LIGHT_STATE][...] = 1
+    (tmp_path / schema_adapter.JUNCTIONS_FILE).write_text(
+        json.dumps({ep["metadata"]["town"]: {"junctions": [], "stop_lines": []}})
+    )
+    schema_adapter._junction_file.cache_clear()
+    with DrivingSequenceDataset(tmp_path, seq_len=16, stride=8, split="val") as ds:
+        start, later = ds[(0, 0)]["loss_weight"].numpy(), ds[(0, 30)]["loss_weight"].numpy()
+    rest = DrivingSequenceDataset.STATIONARY_LOSS_WEIGHT
+    assert (start == 1).all() and np.allclose(later[:10], rest) and (later[10:] == 1).all()
+
+
 class TestSplit:
     """Verify train/val split properties."""
 

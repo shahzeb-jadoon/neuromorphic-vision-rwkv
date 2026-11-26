@@ -130,7 +130,8 @@ class ControlError:
         self.turning_error, self.turning_frames = 0.0, 0
 
     def add(self, pred: torch.Tensor, target: torch.Tensor, frame_weight: torch.Tensor) -> None:
-        """Score a batch; stationary, burn-in and excluded frames do not count."""
+        """Score a batch; stationary frames other than an episode's first, burn-in and excluded
+        frames do not count."""
         error = (pred.float() - target).abs().mean(dim=-1)
         moving = frame_weight > DrivingSequenceDataset.STATIONARY_LOSS_WEIGHT
         turning = moving & (target[..., 0].abs() > TURN_THRESHOLD)
