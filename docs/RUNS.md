@@ -501,14 +501,17 @@ which drives on the expert's car; the same check repeats on the MVP model.
 destination at tick 4,336 (217 s): 99.6% of the route at 11.6 km/h on average, with `run_step`
 at 67 ms at the median and 95 ms at the 95th percentile. It waited 29 s at a red light and 13 to
 29 s behind other vehicles three times, and set off again each time. The red light was the only
-one it reached first in line; the red-light head gave 0.97 for it. At one of the seven stop
-lines on its lane CARLA did not report the light, so its state is unknown; the head gave 0.88
-just before it and the car crossed at 15 km/h.
+one it reached first in line; the red-light head gave 0.97 for it. At one of the seven lights
+on its lane CARLA did not report the light, so its state is unknown; the head gave 0.88 just
+before it and the car crossed at 15 km/h.
 
-Red lights here count at the stop lines of the car's own lane, as the CARLA leaderboard counts
-them. CARLA reports a car at a traffic light whenever its body overlaps that light's trigger
-zone, and a car leaving a junction after a turn can brush the zone of the light for oncoming
-traffic, which may be red while its own is green. The runner logs only the light CARLA reports.
+Red lights here count only for the car's own lane: a light is run when the car passes that
+lane's stop waypoint on red and drives on into the junction. The stop waypoint is CARLA's
+(`get_stop_waypoints`), the line the labels measure stops from; in Town01 it lies 6.5 to 13 m
+before the junction, where the CARLA leaderboard draws its line. CARLA reports a car at a
+traffic light whenever its body overlaps that light's trigger zone, and a car leaving a junction
+after a turn can brush the zone of the light for oncoming traffic, which may be red while its
+own is green. The runner logs only the light CARLA reports.
 
 It collided six times (92 events of the collision sensor). Four were single hits at 2.9 to
 8.6 km/h, a few seconds after braking from 25 to 37 km/h. Two were sustained contacts that
@@ -567,17 +570,18 @@ bar covered collisions or red lights.
 
 A second drive of `short_rwkv7_start` `best.pt` on the same route saved the image the model
 saw at each step and logged the traffic light ahead in the car's lane, with its state and the
-distance to its stop line. With the same model and seed, it took a different course from the
+distance to its stop waypoint. With the same model and seed, it took a different course from the
 drive above and did not collide, so one drive per model is a noisy measure.
 
 It met six red lights. At four it stopped behind a vehicle, 7.6 to 19 m short of the stop
-line, with the vehicle-in-path head at 0.99 to 1.00. At the other two no vehicle was ahead
+waypoint, with the vehicle-in-path head at 0.99 to 1.00. At the other two no vehicle was ahead
 (0.04 to 0.53), and the red-light head gave 0.7 or more from about 25 m and 0.98 to 0.99 at
-the line. At one the car eased off from 26 km/h, braked only once it reached the line, and
-stopped 1.9 m past it until the light turned green. At the other it eased off the throttle from
-0.35 to 0.08 and drove through at 17 km/h without braking. At 20 m a light covers a few pixels
-of the 160 × 960 image, yet the head found both. The model sees the light, but brakes late and
-weakly for it alone, where it brakes in time for a vehicle.
+the stop waypoint. At one the car eased off from 26 km/h, braked from the stop waypoint and
+stopped 1.9 m past it, 6.6 m short of the junction, until the light turned green; the label
+audit counts a stop up to 4 m past the stop waypoint as in place. At the other it eased off the
+throttle from 0.35 to 0.08 and drove through at 17 km/h without braking. At 20 m a light covers
+a few pixels of the 160 × 960 image, yet the head found both. The model sees the light, but
+brakes for it alone less readily than for a vehicle.
 
 On validation frames approaching a red light at over 2 m/s with no vehicle in the path, the
 expert brakes on 26% and the model on 17% (`short_rwkv7`: 19%). With a vehicle as well, the
@@ -612,9 +616,9 @@ head gives over 0.5 on 28.7% of standing frames without a red light (36.8%, 18.8
 a red light with no vehicle in the path, the model brakes on 18% of frames, the expert on 26%.
 
 On the full route it reached its destination at tick 4,455: 99.4% of the route at 11.2 km/h,
-with `run_step` at 69 ms at the median and 100 ms at the 95th percentile. It crossed one of
-the seven stop lines on its lane on red, at 21 km/h without braking, with the red-light head at
-0.48 to 0.74; it crossed the others on green or yellow. It collided eight times (357 events).
+with `run_step` at 69 ms at the median and 100 ms at the 95th percentile. It ran one of the
+seven lights on its lane, at 21 km/h without braking, with the red-light head at 0.48 to 0.74;
+it passed the others on green or yellow. It collided eight times (357 events).
 In the junction past that red light it hit something static at 18 km/h and stayed against it
 for about 15 s (five contacts, 106 events). Braking behind a vehicle, it accelerated again at
 0.51 from 8 km/h as the vehicle-in-path head fell from 0.99 to 0.46, and hit it at 9 km/h.
