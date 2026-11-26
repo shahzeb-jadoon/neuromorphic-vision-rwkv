@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Any, Callable, Protocol
 
 import carla
+import imageio_ffmpeg
 import numpy as np
 
 from agents.navigation.global_route_planner import GlobalRoutePlanner
@@ -36,6 +37,9 @@ STOP_PROXIMITY = 4.0  # m from a stop sign to the car's lane point
 STOP_LOOKAHEAD = 8  # lane points, 0.5 m apart, ahead of the car checked against its zone
 STOP_ZONE_SCALE = 1.2
 AGAINST_LANE = -0.17  # cosine below which the car reverses or drives against its lane
+VIDEO_SIZE = (640, 360)
+CHASE = carla.Transform(carla.Location(x=-6.0, z=3.0), carla.Rotation(pitch=-15.0))
+CAMERA_TIMEOUT = 10.0  # s to wait for a tick's image
 
 
 @dataclass(frozen=True)
@@ -245,17 +249,50 @@ class _World:
         self.world.apply_settings(self.original)
 
 
+class _ChaseVideo:
+    """A camera behind and above the car, written to an mp4 a frame a tick, so the video's time
+    is the simulation's."""
+
+    def __init__(self, world: Any, ego: Any, path: Path) -> None:
+        bp = world.get_blueprint_library().find("sensor.camera.rgb")
+        bp.set_attribute("image_size_x", str(VIDEO_SIZE[0]))
+        bp.set_attribute("image_size_y", str(VIDEO_SIZE[1]))
+        bp.set_attribute("fov", "90")
+        self.images: queue.Queue[Any] = queue.Queue()
+        self.camera = world.spawn_actor(bp, CHASE, ego)
+        self.camera.listen(self.images.put)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        self.writer = imageio_ffmpeg.write_frames(
+            str(path), VIDEO_SIZE, fps=FPS, macro_block_size=8
+        )
+        self.writer.send(None)
+
+    def add(self, frame: int) -> None:
+        image = self.images.get(timeout=CAMERA_TIMEOUT)
+        while image.frame < frame:
+            image = self.images.get(timeout=CAMERA_TIMEOUT)
+        bgra = np.frombuffer(image.raw_data, np.uint8).reshape(VIDEO_SIZE[1], VIDEO_SIZE[0], 4)
+        self.writer.send(np.ascontiguousarray(bgra[:, :, 2::-1]))
+
+    def close(self) -> None:
+        self.camera.stop()
+        self.camera.destroy()
+        self.writer.close()
+
+
 def run_route(
     client: Any,
     route: Route,
     make_agent: Callable[[Any], Agent],
     out_dir: Path,
     telemetry: Callable[[Agent], dict[str, Any]] | None = None,
+    video: bool = False,
 ) -> dict[str, Any]:
-    """Drive one route; write <id>.csv (a row a tick) and <id>.json (its score) to out_dir."""
+    """Drive one route; write <id>.csv (a row a tick), <id>.json (its score) and, with video,
+    <id>.mp4 (a chase camera) to out_dir."""
     scene = _World(client, route)
     world, ego, town = scene.world, scene.ego, scene.world.get_map()
-    sensor, agent = None, None
+    sensor, agent, chase = None, None, None
     try:
         keypoints = [carla.Location(*p) for p in route.keypoints]
         keypoints[0] = ego.get_location()
@@ -286,6 +323,8 @@ def run_route(
             world.get_blueprint_library().find("sensor.other.collision"), carla.Transform(), ego
         )
         sensor.listen(lambda e: hits.put((e.other_actor.id, e.other_actor.type_id)))
+        if video:
+            chase = _ChaseVideo(world, ego, out_dir / f"{route.id}.mp4")
         agent = make_agent(ego)
         agent.set_route(keypoints)
         half_length = ego.bounding_box.extent.x
@@ -296,6 +335,8 @@ def run_route(
         failure, tick, wall = None, 0, time.perf_counter()
         while failure is None and not progress.done:
             frame = world.tick()
+            if chase is not None:
+                chase.add(frame)
             elapsed = tick / FPS
             transform = ego.get_transform()
             position, yaw = _xy(transform.location), transform.rotation.yaw
@@ -372,6 +413,8 @@ def run_route(
             tick += 1
         wall = time.perf_counter() - wall
     finally:
+        if chase is not None:
+            chase.close()
         if sensor is not None:
             sensor.stop()
             sensor.destroy()

@@ -13,8 +13,10 @@ python scripts/run_route_suite.py --suite configs/routes/suite_v1.json --agent l
 
 `--routes` drives a subset by id. Each route writes `<id>.csv`, a row a tick (position, speed,
 control, route completion, whether the car is outside the lanes, infractions, and for a learned
-agent its situation probabilities), and `<id>.json`, its score. `summary.json` gathers the routes
-driven. CARLA's host and port come from `.env`.
+agent its situation probabilities), and `<id>.json`, its score. With `--video` it also writes
+`<id>.mp4`: a 640 × 360 camera 6 m behind and 3 m above the car, a frame a tick at 20 fps, so a
+second of video is a second of simulation (about 7 MB for 3 minutes; it adds about 45% to the
+wall time). `summary.json` gathers the routes driven. CARLA's host and port come from `.env`.
 
 ## The harness
 

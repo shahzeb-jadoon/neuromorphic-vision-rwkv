@@ -37,6 +37,7 @@ dependencies = [
 [project.optional-dependencies]
 simulator = [
     "carla==0.9.16",
+    "imageio-ffmpeg>=0.5",
     "rwkv>=0.8.0",
 ]
 dev = [
@@ -74,6 +75,7 @@ module = [
     "wandb.*",
     "h5py.*",
     "cv2.*",
+    "imageio_ffmpeg.*",
     "torchvision.*",
     "networkx.*",
     "sklearn.*",

@@ -6,8 +6,9 @@ leaderboard scores routes (src/eval/driving_score.py).
     python scripts/run_route_suite.py --suite configs/routes/suite_v1.json --agent learned \
         --checkpoint runs/short/short_rwkv7_rest/checkpoints/best.pt --out runs/closed_loop/rest
 
-Writes <route id>.csv (a row a tick) and <route id>.json (its score) for each route, and
-summary.json over the routes driven. CARLA_HOST and CARLA_PORT come from .env.
+Writes <route id>.csv (a row a tick), <route id>.json (its score) and, with --video,
+<route id>.mp4 (a 640x360 chase camera at 20 fps) for each route, and summary.json over the
+routes driven. CARLA_HOST and CARLA_PORT come from .env.
 """
 
 from __future__ import annotations
@@ -65,6 +66,7 @@ def main() -> None:
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--routes", nargs="*", help="route ids to drive (default: all)")
     parser.add_argument("--out", type=Path, required=True)
+    parser.add_argument("--video", action="store_true", help="record a chase camera per route")
     args = parser.parse_args()
 
     routes = [r for r in C.load_suite(args.suite) if not args.routes or r.id in args.routes]
@@ -84,7 +86,7 @@ def main() -> None:
     client.set_timeout(60.0)
     results = []
     for route in routes:
-        result = C.run_route(client, route, make, args.out, telemetry)
+        result = C.run_route(client, route, make, args.out, telemetry, video=args.video)
         score = result["score"]
         print(
             f"{route.id:>12} {route.town:>9}  DS {score['driving_score']:6.1f}  "
