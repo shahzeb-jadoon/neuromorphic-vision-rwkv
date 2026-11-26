@@ -557,11 +557,12 @@ class Trainer:
         _bsz, _seq_len, _ = pred_controls.shape
         frame_weight = batch["loss_weight"].to(self.device, non_blocking=True).float()
 
-        # Burn-in frames warm recurrent state but do not contribute to loss.
+        # Burn-in frames warm the state of a clip that starts mid-episode and do not count; a
+        # clip that starts an episode begins from the empty state a drive begins from.
         burn_in = self.cfg.loss.burn_in
         if burn_in > 0:
             frame_weight = frame_weight.clone()
-            frame_weight[:, :burn_in] = 0.0
+            frame_weight[batch["clip"][:, 1].to(self.device) > 0, :burn_in] = 0.0
 
         if control_error is not None:
             control_error.add(pred_controls.detach(), target_controls, frame_weight)

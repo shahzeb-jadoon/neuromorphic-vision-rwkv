@@ -357,8 +357,11 @@ class TestSampler:
         starts = range(len(turning) - n + 1)
         expected = [1 + TURN_WEIGHT * turning[s : s + n].mean() for s in starts]
         weights = train_dataset.get_sampler().weights
-        assert np.allclose(weights[: len(expected)], expected) and len(set(expected)) > 1
-        assert set(train_dataset.get_sampler(weighted=False).weights.tolist()) == {1.0}
+        assert np.allclose(weights[1 : len(expected)], expected[1:]) and len(set(expected)) > 1
+        fixed = sum(e == 0 for e, _ in train_dataset.clips)
+        assert weights[0] == pytest.approx(sum(expected) / fixed) and fixed > 1
+        unweighted = train_dataset.get_sampler(weighted=False).weights
+        assert set(unweighted[1 : len(expected)].tolist()) == {1.0}
 
     def test_episodes_too_short_for_a_clip_are_skipped(self) -> None:
         sampler = RandomClipSampler([np.ones(2), np.ones(0), np.ones(3)], num_samples=200)

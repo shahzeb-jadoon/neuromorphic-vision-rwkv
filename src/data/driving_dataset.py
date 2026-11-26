@@ -269,13 +269,18 @@ class DrivingSequenceDataset(Dataset):
         """Training sampler: `len(self)` clips per epoch, starting at any usable frame.
 
         Weighted, a clip's chance is 1 + TURN_WEIGHT x its share of turning frames;
-        otherwise every start is equally likely.
+        otherwise every start is equally likely. The clip that starts an episode, the one
+        the trainer scores from an empty state, weighs what one of the episode's fixed clips
+        weighs on average, so each episode's start is drawn about once an epoch.
         """
         weights = []
         for turning in self.turning:
             count = np.concatenate([[0], np.cumsum(turning)])
             share = (count[self.seq_len :] - count[: -self.seq_len]) / self.seq_len
-            weights.append(1.0 + TURN_WEIGHT * share if weighted else np.ones_like(share))
+            w = 1.0 + TURN_WEIGHT * share if weighted else np.ones_like(share)
+            if len(w):
+                w[0] = w.sum() / -(-len(w) // self.stride)
+            weights.append(w)
         return RandomClipSampler(weights, len(self))
 
     def _get_h5(self, ep_idx: int) -> h5py.File:

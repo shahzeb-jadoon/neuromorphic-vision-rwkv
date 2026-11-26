@@ -112,6 +112,20 @@ def test_training_aborts_after_too_many_non_finite_steps_in_a_row(trainer: Train
     assert all(p.isfinite().all() for p in trainer.model.parameters())
 
 
+def test_only_a_clip_that_starts_an_episode_scores_its_burn_in(trainer: Trainer) -> None:
+    trainer.model.eval()
+    batch = next(iter(trainer.train_loader))
+
+    def control_loss(start: int, first_frame_off: float) -> float:
+        b = {**batch, "clip": batch["clip"].clone(), "controls": batch["controls"].clone()}
+        b["clip"][:, 1] = start
+        b["controls"][:, 0] += first_frame_off
+        return trainer._compute_losses(b)[1]["control_loss"]
+
+    assert control_loss(5, 1.0) == pytest.approx(control_loss(5, 0.0))
+    assert control_loss(0, 1.0) > control_loss(0, 0.0)
+
+
 def test_training_gives_the_policy_the_speed_and_target_point(trainer: Trainer) -> None:
     batch = next(iter(trainer.train_loader))
     seen: list[tuple[torch.Tensor, ...]] = []
