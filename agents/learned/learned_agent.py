@@ -37,6 +37,7 @@ try:
 except ImportError:
     CARLA_AVAILABLE = False
 
+from agents.navigation.route import plan_route
 from src.data import labels, schema_adapter
 from src.data.driving_dataset import IMAGENET_MEAN, IMAGENET_STD, MAX_SPEED_MS
 from src.data.labels import ROUTE_RESOLUTION, route_progress, target_on_route
@@ -234,14 +235,7 @@ class LearnedAgent:
 
     def set_route(self, keypoints: List["carla.Location"]) -> None:
         """Plan the route through `keypoints` in order, as the CARLA leaderboard does."""
-        route: List[Tuple] = []
-        for a, b in zip(keypoints, keypoints[1:]):
-            part = self._planner.trace_route(a, b)
-            if route and part and part[0][0].transform.location.distance(
-                route[-1][0].transform.location
-            ) < 0.5 * ROUTE_RESOLUTION:
-                part = part[1:]
-            route += part
+        route = plan_route(self._planner, keypoints)
         self._route = route
         self._route_xy = np.array(
             [[wp.transform.location.x, wp.transform.location.y] for wp, _ in route]
