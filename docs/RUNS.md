@@ -629,6 +629,47 @@ a left turn at 16 km/h it hit a vehicle, with the vehicle-in-path head fallen fr
 two drives, one drive cannot show whether the change made it worse; no bar covered collisions or
 red lights.
 
+## Closed-loop evaluation (Phase 3)
+
+Routes are driven and scored by `scripts/run_route_suite.py` ([EVALUATION.md](EVALUATION.md)).
+
+### Expert on route suite v1
+
+The privileged expert drove the 24 routes of `configs/routes/suite_v1.json` with the default
+`cars` traffic, each route in its own process: 21.7 km in 1.9 hours of simulation. Two routes,
+`town03_3` and `town10hd_3`, timed out on the simulator's first tick after the walkers spawned,
+before the car moved; driven again, both were perfect. The runner now drives a crashed route
+once more by itself.
+
+| Town | Routes | Driving score | Perfect | Vehicle collisions |
+| --- | ---: | ---: | ---: | ---: |
+| Town01 | 4 | 100.0 | 4 | 0 |
+| Town02 | 4 | 84.0 | 3 | 2 |
+| Town03 | 4 | 100.0 | 4 | 0 |
+| Town04 | 4 | 90.0 | 3 | 1 |
+| Town05 | 4 | 100.0 | 4 | 0 |
+| Town10HD | 4 | 90.0 | 3 | 1 |
+| All | 24 | 94.0 | 21 | 4 |
+
+It completed every route, with no red light or stop sign run, no driving outside the lanes and
+no deviation, block or timeout; 0.18 vehicle collisions per km. The driving score is 100.0 on the
+8 routes with 20 vehicles, 92.9 on the 9 with 50 and 88.6 on the 7 with 100. Of the collisions:
+
+- `town02_4` (two, driving score 36.0): at 22 and 27 km/h, the second in a turn, it first braked
+  0.1 s before the contact, too late to stop.
+- `town04_3` (60.0): accelerating through a turn at 36 km/h, it was pushed to 49 km/h within
+  0.1 s and turned 23°, faster than it accelerates or steers: another car hit it. The
+  leaderboard counts it all the same.
+- `town10hd_4` (60.0): it braked fully from 13 km/h and hit the car at 6 km/h.
+
+`town10hd_1` stood still for 637 of its 797 s in traffic of 100 vehicles, never 180 s at once.
+
+With the full mix of traffic (`--traffic all`), before each route had its own process, the same
+expert was blocked on three of six routes, the first of each town: background vehicles that had
+collided, or a van stopped across the road, held it until the route ended (mean driving score
+69.1 over the six). The jams changed with the routes driven before them in the process,
+so those numbers do not repeat; with `cars`, none of the 24 routes was blocked.
+
 ---
 
 ## Other local runs (not reported)

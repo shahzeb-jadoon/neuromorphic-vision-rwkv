@@ -16,7 +16,9 @@ control, route completion, whether the car is outside the lanes, infractions, an
 agent its situation probabilities), and `<id>.json`, its score. With `--video` it also writes
 `<id>.mp4`: a 640 × 360 camera 6 m behind and 3 m above the car, a frame a tick at 20 fps, so a
 second of video is a second of simulation (about 7 MB for 3 minutes; it adds about 45% to the
-wall time). `summary.json` gathers the routes driven. CARLA's host and port come from `.env`.
+wall time). `--traffic all` drives with the full mix of vehicles instead of cars only
+([Background traffic](#background-traffic)). `summary.json` gathers the routes driven and the
+traffic profile. CARLA's host and port come from `.env`.
 
 ## The harness
 
@@ -27,6 +29,54 @@ controller, from seeded draws. The car settles for 10 ticks, as the collector le
 route is planned through the suite's keypoints at the leaderboard's 1 m spacing
 (`agents/navigation/route.py`), the same plan the agent receives. An agent implements
 `set_route(keypoints)`, `run_step(frame)` and `destroy()`.
+
+Each route is driven in a process of its own. CARLA's traffic manager runs in the client's
+process and keeps state from one route to the next: driven after other routes in one process,
+a route with dense traffic drove differently depending on which routes came before it. In a
+process of its own a route drives the same, tick for tick, whatever ran before, with or
+without video and across server restarts ([Repeatability](#repeatability)).
+
+## Background traffic
+
+Vehicles spawn at the town's spawn points, none within 10 m of the car's start, and walkers at
+random points of the pedestrian paths, as many as the route says. Two profiles set the vehicles:
+
+| `--traffic` | Vehicles | Traffic manager |
+| --- | --- | --- |
+| `cars` (default) | the 9 models leaderboard 2.0 draws from: base type car, no special type (no police cars, taxis or electric cars), with lights | at the speed limit, no lane changes, 10 m behind the car ahead, 0.1 m off the lane centre, lights on |
+| `all` | every 4-wheeled vehicle: cars, vans, trucks, a bus, police cars, an ambulance and a fire truck | its defaults: 30% under the speed limit, changing lanes |
+
+`cars` copies the settings of leaderboard 2.0's background traffic (scenario_runner's
+`background_activity.py`, branch `leaderboard-2.0`). The leaderboard also keeps its traffic
+around the car, a few vehicles ahead and behind on each lane and more at junctions, and removes
+vehicles the car leaves behind; here traffic fills the whole town, as on leaderboard 1.0. With
+`all`, background vehicles jam: on Town03 and Town10HD routes with 100 vehicles, background cars
+that had collided, and a van stopped across the road, held the expert for 3 minutes until the
+route ended as blocked. `all` stays for testing with the full mix; a result says which profile
+it was driven with.
+
+## Repeatability
+
+The world ticks synchronously and the traffic manager, the walkers and the harness's own draws
+are seeded by the route, so in a fresh process a route drives the same every time: the same
+position, speed and control on every tick, everything in `<id>.csv` but CARLA's frame counter.
+Checked with the expert:
+
+- `town04_1` five times: alone twice, as the fourth route of a run twice and once with video,
+  before and after restarting the simulator;
+- `town02_1` alone twice, once with video, and `town03_1` alone twice;
+- with each route in its own process, `town02_1`, `town03_1` and `town10hd_1` as the first three
+  routes of a run and as the 5th, 9th and 21st of the whole suite.
+
+Before each route had its own process, `town03_1`, with 100 vehicles, gave three different
+drives: blocked at 39.7% as the third route of a run, blocked at 2.5% as the second, and perfect
+alone. The drives split within the first 20 s, where the expert met traffic that had moved
+differently.
+
+A route that crashes is driven once more, as the leaderboard repeats a route the simulator
+crashed on; one that crashes again is listed under `crashed` in `summary.json`. Each route has
+one seed, so its result is for one draw of the traffic, and a difference between two agents on
+a single route can come from that draw.
 
 ## Scoring
 
