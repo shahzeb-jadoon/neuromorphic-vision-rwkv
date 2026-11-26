@@ -17,6 +17,9 @@ The waypoint head is scored by its displacement errors on moving frames, against
 straight on at the current speed and against the 8 training frames nearest in target point
 and distance covered in 2 s; and, at standstill, by how well its predicted 2 s distance tells
 frames that pull away from frames that wait, next to the control head's acceleration.
+
+The clips that start an episode run from an empty state, as a drive starts: their
+acceleration until the car first moves is reported next to the expert's.
 Intervals are 95% over episode bootstrap draws.
 
 Usage:
@@ -56,6 +59,7 @@ LEFT, RIGHT = 0, 1  # nav command indices in the sample format (RoadOption - 1)
 WAITING_M = 0.5  # labelled distance in 2 s of a standing frame that waits
 PULLING_AWAY_M = 2.0  # labelled distance in 2 s of a standing frame that pulls away
 BRAKE_SPEED_MS = 0.4  # TransFuser's controller brakes below this desired speed
+START_ACCEL = 0.4  # held from rest, moves the expert's car within 1 s in CARLA (0.12: 6 s)
 
 
 def collect(
@@ -81,6 +85,7 @@ def collect(
             "waypoint_mask",
             "speed",
             "episode",
+            "start",
         )
     }
     with torch.no_grad():
@@ -107,6 +112,7 @@ def collect(
             parts["waypoint_mask"].append(batch["waypoint_mask"].numpy())
             parts["speed"].append(batch["speed"].numpy() * MAX_SPEED_MS)
             parts["episode"].append(batch["clip"][:, :1].expand_as(batch["speed"]).numpy())
+            parts["start"].append(batch["clip"][:, 1:].expand_as(batch["speed"]).numpy())
             if "situation_logits" in aux:
                 probability = torch.sigmoid(aux["situation_logits"].float()).cpu().numpy()
                 causes = batch["situation"][..., labels.CAUSE_SITUATIONS].any(-1).numpy()
@@ -267,6 +273,28 @@ def waypoint_report(
     return table
 
 
+def cold_start_report(c: dict[str, np.ndarray]) -> dict[str, Any]:
+    """The acceleration of the clips that start an episode, run from an empty state as a drive
+    starts, on their frames until the car first moves."""
+    resting = np.logical_and.accumulate(c["speed"] < labels.STANDING_SPEED, axis=1)
+    cold = resting & (c["start"] == 0)
+    if not cold.any():
+        return {"frames": 0}
+    model, expert, episode = c["pred"][..., 1][cold], c["target"][..., 1][cold], c["episode"][cold]
+
+    def median(i: np.ndarray) -> float:
+        return float(np.median(model[i]))
+
+    return {
+        "episodes": len(np.unique(episode)),
+        "frames": int(cold.sum()),
+        "expert_accel_median": float(np.median(expert)),
+        "model_accel_median": median(np.arange(len(model))),
+        "model_accel_median_ci": M.episode_bootstrap(median, episode),
+        "model_accel_at_least_start_accel": float(np.mean(model >= START_ACCEL)),
+    }
+
+
 def finite(x: Any) -> Any:
     if isinstance(x, dict):
         return {k: finite(v) for k, v in x.items()}
@@ -410,6 +438,7 @@ def main() -> None:
         },
     }
     report["waypoints"] = waypoint_report(frames, fitted, d.fps)
+    report["cold_start"] = cold_start_report(c)
     if "situation" in frames:
         counted = frames["weight"] > 0
         truth, probability = frames["causes"][counted], frames["situation"][counted]
@@ -481,6 +510,14 @@ def main() -> None:
         f"waiting frames {ci(st['waiting_below_stop_distance_ci'], '.1%')}, over it on "
         f"{st['pulling_away_above_stop_distance']:.1%} of frames pulling away"
     )
+    cold = report["cold_start"]
+    if cold["frames"]:
+        print(
+            f"\ncold start ({cold['frames']} frames of {cold['episodes']} episode starts, before "
+            f"the car moves): acceleration median {cold['model_accel_median']:.3f} "
+            f"{ci(cold['model_accel_median_ci'])}, expert {cold['expert_accel_median']:.2f}; "
+            f"{START_ACCEL} or more on {cold['model_accel_at_least_start_accel']:.1%}"
+        )
 
 
 if __name__ == "__main__":

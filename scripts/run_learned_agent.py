@@ -37,6 +37,8 @@ except ImportError:
 from agents.learned.learned_agent import LearnedAgent
 from src.data.labels import CAUSES
 
+SETTLE_TICKS = 10  # ticks the expert's collector lets a new car settle before it records
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -157,13 +159,14 @@ def _random_destination(
 
 def _attach_collision_sensor(
     world: carla.World, ego: carla.Vehicle
-) -> Tuple["carla.Actor", List[int]]:
-    """Attach a collision sensor and return (sensor, collision_count_list)."""
+) -> Tuple["carla.Actor", List[str]]:
+    """Attach a collision sensor and return it with the list it fills: the type of the actor
+    hit, once per collision event."""
     bp = world.get_blueprint_library().find("sensor.other.collision")
     sensor = world.spawn_actor(bp, carla.Transform(), attach_to=ego)
-    count = [0]
-    sensor.listen(lambda _: count.__setitem__(0, count[0] + 1))
-    return sensor, count
+    hits: List[str] = []
+    sensor.listen(lambda event: hits.append(event.other_actor.type_id))
+    return sensor, hits
 
 
 # ---------------------------------------------------------------------------
@@ -189,8 +192,9 @@ def run_episode(
     """
     world, original_settings, npc_actors = _setup_world(client, town, n_vehicles, n_walkers, seed)
     ego = _spawn_ego(world)
-    world.tick()  # a new actor reads location (0, 0, 0) until the world ticks
-    collision_sensor, collision_count = _attach_collision_sensor(world, ego)
+    for _ in range(SETTLE_TICKS):  # until the first tick, a new actor reads location (0, 0, 0)
+        world.tick()
+    collision_sensor, hits = _attach_collision_sensor(world, ego)
     agent = LearnedAgent(ego, checkpoint, device=device)
 
     destination = _random_destination(world, ego)
@@ -199,6 +203,7 @@ def run_episode(
     spectator = world.get_spectator()
     speeds = []
     rows: List[dict] = []
+    hits_logged = 0
     step = 0
     # Capture final ego location before destroy for metrics
     final_ego_loc = ego.get_location()
@@ -226,6 +231,8 @@ def run_episode(
             vel = ego.get_velocity()
             speed_kmh = (vel.x**2 + vel.y**2 + vel.z**2) ** 0.5 * 3.6
             speeds.append(speed_kmh)
+            new_hits = hits[hits_logged:]
+            hits_logged += len(new_hits)
             rows.append(
                 {
                     "tick": step,
@@ -240,7 +247,8 @@ def run_episode(
                     "brake": round(control.brake, 4),
                     "nav_command": agent.last_nav_cmd,
                     "route_completion": round(agent.route_completion, 4),
-                    "collisions": collision_count[0],
+                    "collisions": hits_logged,
+                    "hit": ";".join(sorted(set(new_hits))),
                     # the light CARLA says governs the ego vehicle: logged, never a model input
                     "traffic_light": str(ego.get_traffic_light_state())
                     if ego.is_at_traffic_light()
@@ -271,7 +279,7 @@ def run_episode(
                 print(
                     f"  step={step:>4}  speed={speed_kmh:.1f} km/h  "
                     f"dist_to_goal={dist_to_goal:.0f}m  "
-                    f"collisions={collision_count[0]}  "
+                    f"collisions={len(hits)}  "
                     f"steer={agent.last_steer:+.3f}  accel={agent.last_accel:+.3f}  "
                     f"nav={nav_label}"
                 )
@@ -324,7 +332,8 @@ def run_episode(
     stepped_ms = [r["run_step_ms"] for r in rows if r["model_stepped"]]
     return {
         "steps": step + 1,
-        "collisions": collision_count[0],
+        "collisions": len(hits),
+        "hit": sorted(set(hits)),
         "avg_speed_kmh": float(np.mean(speeds)) if speeds else 0.0,
         "reached_goal": final_ego_loc.distance(destination) < 5.0,
         "route_completion_pct": 100 * route_completion,
