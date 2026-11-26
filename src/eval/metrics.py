@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
+
 import numpy as np
 from scipy.spatial import cKDTree  # type: ignore[import-untyped]
 
 TURN_THRESHOLD = 0.1  # |expert steering| above this counts as a turning frame
 TARGET_BINS = 60  # bearings of the target point told apart by the target point baseline
 TARGET_NEIGHBOURS = 8  # training frames averaged by the nearest-neighbour target baseline
+BOOTSTRAP_DRAWS = 1000
 
 TargetLookup = tuple[np.ndarray, np.ndarray]  # bin edges of the bearing, the mean of each bin
 
@@ -86,7 +89,37 @@ def predict_by_target(lookup: TargetLookup, points: np.ndarray) -> np.ndarray:
 def predict_by_neighbours(
     values: np.ndarray, points: np.ndarray, query: np.ndarray, k: int = TARGET_NEIGHBOURS
 ) -> np.ndarray:
-    """The mean of `values` (N, C) at the k training target points (N, 2) nearest each query
-    point: an image-free policy that reads the whole target point, not only its bearing."""
+    """The mean of `values` (N, C) at the k training points (N, D) nearest each query point:
+    with target points, an image-free policy that reads the whole point, not only its bearing."""
     _, nearest = cKDTree(points).query(query, k=k)
     return np.asarray(values[nearest.reshape(len(query), -1)].mean(axis=1))
+
+
+def displacement_errors(
+    pred: np.ndarray, target: np.ndarray, valid: np.ndarray
+) -> tuple[np.ndarray, np.ndarray]:
+    """Per frame, the mean distance between predicted and true waypoints (N, K, 2) over the
+    horizons that are valid (N, K), and the distance at the last horizon; nan where none is."""
+    distance = np.linalg.norm(pred - target, axis=-1)
+    n = valid.sum(axis=-1)
+    average = np.where(n > 0, (distance * valid).sum(axis=-1) / np.maximum(n, 1), np.nan)
+    return average, np.where(valid[:, -1], distance[:, -1], np.nan)
+
+
+def episode_bootstrap(
+    statistic: Callable[[np.ndarray], float],
+    episode: np.ndarray,
+    draws: int = BOOTSTRAP_DRAWS,
+    seed: int = 0,
+) -> tuple[float, float]:
+    """95% interval of `statistic` over draws of whole episodes with replacement. `statistic`
+    takes the indices of the frames drawn."""
+    rng = np.random.default_rng(seed)
+    _, inverse = np.unique(episode, return_inverse=True)
+    members = [np.flatnonzero(inverse == e) for e in range(inverse.max() + 1)]
+    values = [
+        statistic(np.concatenate([members[e] for e in rng.integers(0, len(members), len(members))]))
+        for _ in range(draws)
+    ]
+    low, high = np.nanpercentile(values, [2.5, 97.5])
+    return float(low), float(high)

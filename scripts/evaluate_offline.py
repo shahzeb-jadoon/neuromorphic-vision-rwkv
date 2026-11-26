@@ -13,6 +13,12 @@ command, speed and target point: a model that steers from the images gets worse 
 A situation head is scored by its AUROC per cause, on frames after burn-in that count in
 training; answering the same for every frame scores 0.5.
 
+The waypoint head is scored by its displacement errors on moving frames, against driving
+straight on at the current speed and against the 8 training frames nearest in target point
+and distance covered in 2 s; and, at standstill, by how well its predicted 2 s distance tells
+frames that pull away from frames that wait, next to the control head's acceleration.
+Intervals are 95% over episode bootstrap draws.
+
 Usage:
     python scripts/evaluate_offline.py --checkpoint runs_fast/<run>/checkpoints/best.pt
 """
@@ -22,6 +28,7 @@ from __future__ import annotations
 import argparse
 import json
 import math
+from functools import partial
 from pathlib import Path
 from typing import Any, cast
 
@@ -34,13 +41,21 @@ from tqdm import tqdm
 
 from agents.learned.learned_agent import load_checkpoint
 from src.data import labels, schema_adapter
-from src.data.driving_dataset import DrivingSequenceDataset, driving_worker_init_fn
+from src.data.driving_dataset import (
+    MAX_SPEED_MS,
+    WAYPOINT_OFFSETS,
+    DrivingSequenceDataset,
+    driving_worker_init_fn,
+)
 from src.eval import metrics as M
 from src.models import VisionRWKVDriver
 from src.utils.device import select_device
 from src.utils.settings import setting
 
 LEFT, RIGHT = 0, 1  # nav command indices in the sample format (RoadOption - 1)
+WAITING_M = 0.5  # labelled distance in 2 s of a standing frame that waits
+PULLING_AWAY_M = 2.0  # labelled distance in 2 s of a standing frame that pulls away
+BRAKE_SPEED_MS = 0.4  # TransFuser's controller brakes below this desired speed
 
 
 def collect(
@@ -52,7 +67,21 @@ def collect(
     the clip before in the batch.
     """
     parts: dict[str, list[np.ndarray]] = {
-        k: [] for k in ("pred", "mirrored", "other_clip", "target", "weight", "nav", "target_point")
+        k: []
+        for k in (
+            "pred",
+            "mirrored",
+            "other_clip",
+            "target",
+            "weight",
+            "nav",
+            "target_point",
+            "waypoints",
+            "waypoint_target",
+            "waypoint_mask",
+            "speed",
+            "episode",
+        )
     }
     with torch.no_grad():
         for batch in tqdm(loader, desc="validation batches"):
@@ -73,6 +102,11 @@ def collect(
             parts["weight"].append(weight.numpy())
             parts["nav"].append(batch["nav_command"].numpy())
             parts["target_point"].append(batch["target_point"].numpy())
+            parts["waypoints"].append(aux["future_waypoints"].float().cpu().numpy())
+            parts["waypoint_target"].append(batch["future_waypoints"].numpy())
+            parts["waypoint_mask"].append(batch["waypoint_mask"].numpy())
+            parts["speed"].append(batch["speed"].numpy() * MAX_SPEED_MS)
+            parts["episode"].append(batch["clip"][:, :1].expand_as(batch["speed"]).numpy())
             if "situation_logits" in aux:
                 probability = torch.sigmoid(aux["situation_logits"].float()).cpu().numpy()
                 causes = batch["situation"][..., labels.CAUSE_SITUATIONS].any(-1).numpy()
@@ -96,23 +130,31 @@ def logged_protocol(c: dict[str, np.ndarray], batch_size: int, max_batches: int)
 
 
 def train_labels(episodes: list[Path], fps: int, sparse: bool = False) -> dict[str, np.ndarray]:
-    """Labels of the training frames kept in the loss, and which of them are moving."""
-    steer, accel, nav, point, moving = [], [], [], [], []
+    """Labels of the training frames kept in the loss, which of them are moving, and their
+    speeds and waypoints (valid where every horizon lies within the recording)."""
+    steer, accel, nav, point, speed, waypoints, valid = [], [], [], [], [], [], []
     for path in tqdm(episodes, desc="training labels"):
         with h5py.File(path, "r") as f:
             episode = schema_adapter.read_labels(f, fps)
+            n, lookahead = len(episode.steering), max(WAYPOINT_OFFSETS)
+            w = schema_adapter.read_window(f, 0, n, lookahead, fps=fps, images=False)
         kept = ~episode.excluded
         steer.append(episode.steering[kept])
         accel.append(episode.acceleration[kept])
         nav.append(episode.command[kept] - 1)
         point.append((episode.sparse_target_point if sparse else episode.target_point)[kept])
-        moving.append(episode.speed[kept] >= labels.STANDING_SPEED)
+        speed.append(episode.speed[kept])
+        waypoints.append(labels.ego_waypoints(w.position, w.yaw, WAYPOINT_OFFSETS)[kept])
+        valid.append((np.arange(n) + lookahead < len(w.position))[kept])
     return {
         "steer": np.concatenate(steer),
         "accel": np.concatenate(accel),
         "nav": np.concatenate(nav),
         "target_point": np.concatenate(point),
-        "moving": np.concatenate(moving),
+        "moving": np.concatenate(speed) >= labels.STANDING_SPEED,
+        "speed": np.concatenate(speed),
+        "waypoints": np.concatenate(waypoints),
+        "waypoints_valid": np.concatenate(valid),
     }
 
 
@@ -138,6 +180,91 @@ def scores(
 def mean_on(values: np.ndarray, mask: np.ndarray, weight: np.ndarray | None) -> float:
     w = np.ones(mask.sum()) if weight is None else weight[mask]
     return float((values[mask] * w).sum() / max(w.sum(), 1e-6))
+
+
+def weighted_mean(values: np.ndarray, mask: np.ndarray, weight: np.ndarray) -> float:
+    ok = mask & np.isfinite(values)
+    return float((values[ok] * weight[ok]).sum() / max(float(weight[ok].sum()), 1e-9))
+
+
+def mean_at(values: np.ndarray, mask: np.ndarray, weight: np.ndarray, i: np.ndarray) -> float:
+    return weighted_mean(values[i], mask[i], weight[i])
+
+
+def waypoint_report(
+    frames: dict[str, np.ndarray], fitted: dict[str, np.ndarray], fps: int
+) -> dict[str, Any]:
+    """The waypoint head against image-free baselines, and as a go/stop signal at standstill."""
+    horizons = np.asarray(WAYPOINT_OFFSETS) / fps
+    speed, truth, valid = frames["speed"], frames["waypoints"], frames["waypoint_mask"]
+    weight, episode = frames["weight"], frames["episode"]
+    ok = fitted["waypoints_valid"]
+    neighbours = M.predict_by_neighbours(
+        fitted["waypoints"][ok].reshape(int(ok.sum()), -1),
+        np.c_[fitted["target_point"][ok], horizons[-1] * fitted["speed"][ok]],
+        np.c_[frames["target_point"], horizons[-1] * speed],
+    ).reshape(truth.shape)
+    straight = np.stack([speed[:, None] * horizons, np.zeros_like(truth[..., 0])], axis=-1)
+    predictions = {
+        "model": frames["model_waypoints"],
+        "constant_velocity": straight,
+        "neighbours": neighbours,
+    }
+    errors = {name: M.displacement_errors(p, truth, valid) for name, p in predictions.items()}
+    moving = (weight > 0) & (speed >= labels.STANDING_SPEED) & valid.any(axis=-1)
+    turns = moving & M.turn_frames(frames["steer"])
+    table: dict[str, Any] = {
+        name: {
+            "ade_moving": weighted_mean(ade, moving, weight),
+            "fde_moving": weighted_mean(fde, moving, weight),
+            "ade_turns": weighted_mean(ade, turns, weight),
+        }
+        for name, (ade, fde) in errors.items()
+    }
+    distance = np.linalg.norm(frames["model_waypoints"] - truth, axis=-1)
+    table["model"]["error_per_horizon"] = {
+        f"{h:.1f}s": weighted_mean(distance[:, k], moving & valid[:, k], weight)
+        for k, h in enumerate(horizons)
+    }
+    for name in ("constant_velocity", "neighbours"):
+        diff = errors["model"][0] - errors[name][0]
+        table["model"][f"ade_minus_{name}_ci"] = M.episode_bootstrap(
+            partial(mean_at, diff, moving, weight), episode
+        )
+
+    standing = (weight > 0) & (speed < labels.STANDING_SPEED) & valid[:, -1]
+    labelled = np.linalg.norm(truth[:, -1], axis=-1)
+    going, waiting = standing & (labelled >= PULLING_AWAY_M), standing & (labelled < WAITING_M)
+    decided = going | waiting
+    predicted = np.linalg.norm(frames["model_waypoints"][:, -1], axis=-1)
+    below = predicted < BRAKE_SPEED_MS * horizons[-1]
+    everything = np.arange(len(speed))
+
+    def auroc(score: np.ndarray, i: np.ndarray) -> float:
+        d = decided[i]
+        y = going[i][d]
+        return float(roc_auc_score(y, score[i][d])) if 0 < y.sum() < len(y) else float("nan")
+
+    def share(mask: np.ndarray, condition: np.ndarray, i: np.ndarray) -> float:
+        return float(condition[i][mask[i]].mean()) if mask[i].any() else float("nan")
+
+    table["at_standstill"] = {
+        "pulling_away_frames": int(going.sum()),
+        "waiting_frames": int(waiting.sum()),
+        "stop_distance_m": BRAKE_SPEED_MS * horizons[-1],
+        "auroc": auroc(predicted, everything),
+        "auroc_ci": M.episode_bootstrap(lambda i: auroc(predicted, i), episode),
+        "control_head_auroc": auroc(frames["model_accel"], everything),
+        "control_head_auroc_ci": M.episode_bootstrap(
+            lambda i: auroc(frames["model_accel"], i), episode
+        ),
+        "waiting_below_stop_distance": share(waiting, below, everything),
+        "waiting_below_stop_distance_ci": M.episode_bootstrap(
+            lambda i: share(waiting, below, i), episode
+        ),
+        "pulling_away_above_stop_distance": share(going, ~below, everything),
+    }
+    return table
 
 
 def finite(x: Any) -> Any:
@@ -203,6 +330,12 @@ def main() -> None:
     if "situation" in c:
         frames["situation"] = c["situation"][after].reshape(-1, len(labels.CAUSES))
         frames["causes"] = c["causes"][after].reshape(-1, len(labels.CAUSES))
+    k = len(WAYPOINT_OFFSETS)
+    frames["speed"] = c["speed"][after].ravel()
+    frames["episode"] = c["episode"][after].ravel()
+    frames["waypoints"] = c["waypoint_target"][after].reshape(-1, k, 2)
+    frames["waypoint_mask"] = c["waypoint_mask"][after].reshape(-1, k)
+    frames["model_waypoints"] = c["waypoints"][after].reshape(-1, k, 2)
     steer, accel, nav = frames["steer"], frames["accel"], frames["nav"]
     fitted = train_labels(train.episode_files, d.fps, d.target_point == "sparse")
     t_steer, t_accel, t_nav = fitted["steer"], fitted["accel"], fitted["nav"]
@@ -276,6 +409,7 @@ def main() -> None:
             "expert_steer_std": float(np.std(steer)),
         },
     }
+    report["waypoints"] = waypoint_report(frames, fitted, d.fps)
     if "situation" in frames:
         counted = frames["weight"] > 0
         truth, probability = frames["causes"][counted], frames["situation"][counted]
@@ -318,6 +452,35 @@ def main() -> None:
     if "situation_auroc" in behaviour:
         aurocs = ", ".join(f"{k} {v:.3f}" for k, v in behaviour["situation_auroc"].items())
         print(f"situation AUROC (a constant answer scores 0.5): {aurocs}")
+    wp = report["waypoints"]
+    print(f"\nwaypoints on moving frames (metres): {'ADE':>8}{'FDE 2 s':>9}{'turn ADE':>9}")
+    for name in ("model", "constant_velocity", "neighbours"):
+        r = wp[name]
+        print(f"  {name:34}{r['ade_moving']:8.3f}{r['fde_moving']:9.3f}{r['ade_turns']:9.3f}")
+    m, st = wp["model"], wp["at_standstill"]
+
+    def ci(pair: tuple[float, float], spec: str = ".3f") -> str:
+        return f"[{pair[0]:{spec}}, {pair[1]:{spec}}]"
+
+    print(
+        f"  model minus constant velocity, 95% CI {ci(m['ade_minus_constant_velocity_ci'])}; "
+        f"minus neighbours {ci(m['ade_minus_neighbours_ci'])}"
+    )
+    print(
+        "  error per horizon: "
+        + ", ".join(f"{h} {e:.3f}" for h, e in m["error_per_horizon"].items())
+    )
+    print(
+        f"at standstill ({st['pulling_away_frames']:,} pulling away, "
+        f"{st['waiting_frames']:,} waiting): go/stop AUROC of the 2 s distance "
+        f"{st['auroc']:.3f} {ci(st['auroc_ci'])}, of the control head's acceleration "
+        f"{st['control_head_auroc']:.3f} {ci(st['control_head_auroc_ci'])}"
+    )
+    print(
+        f"  under {st['stop_distance_m']:.1f} m on {st['waiting_below_stop_distance']:.1%} of "
+        f"waiting frames {ci(st['waiting_below_stop_distance_ci'], '.1%')}, over it on "
+        f"{st['pulling_away_above_stop_distance']:.1%} of frames pulling away"
+    )
 
 
 if __name__ == "__main__":

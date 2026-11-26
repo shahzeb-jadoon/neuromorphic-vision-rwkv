@@ -64,3 +64,22 @@ def test_per_command_baseline() -> None:
     assert means == pytest.approx({1: 0.2, 2: -0.3})
     pred = M.predict_by_command(means, np.array([2, 1, 3]), fallback=-0.05)
     assert pred == pytest.approx([-0.3, 0.2, -0.05])
+
+
+def test_displacement_errors_skip_horizons_past_the_recording() -> None:
+    target = np.zeros((2, 2, 2))
+    pred = np.array([[[3.0, 4.0], [0.0, 1.0]], [[1.0, 0.0], [6.0, 8.0]]])
+    valid = np.array([[True, True], [True, False]])
+    average, last = M.displacement_errors(pred, target, valid)
+    assert average == pytest.approx([3.0, 1.0])
+    assert last[0] == pytest.approx(1.0) and np.isnan(last[1])
+
+
+def test_episode_bootstrap_draws_whole_episodes() -> None:
+    values = np.array([1.0, 1.0, 1.0, 5.0])  # episode 7 has three frames, episode 9 one
+    episode = np.array([7, 7, 7, 9])
+    low, high = M.episode_bootstrap(lambda i: float(values[i].mean()), episode, draws=400)
+    # an episode draw gives 1, 5 or the mean of three ones and one five; never a frame-level mix
+    assert low == pytest.approx(1.0) and high == pytest.approx(5.0)
+    one_episode = M.episode_bootstrap(lambda i: float(values[i].mean()), np.zeros(4), draws=50)
+    assert one_episode == (2.0, 2.0)
