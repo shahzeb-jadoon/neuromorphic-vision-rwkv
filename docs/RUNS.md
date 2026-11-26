@@ -431,7 +431,7 @@ ego vehicle's position before the world had ticked, when a new actor still reads
 every target point pointed hundreds of metres away; and it destroyed vehicles the traffic
 manager still drove, which aborted the process.
 
-The car did not drive off. It crept at 1.3 km/h on average and covered 1.1% of its route, with
+The car, a Lincoln MKZ (see below), did not drive off. It crept at 1.3 km/h on average and covered 1.1% of its route, with
 no collision. From a standstill the control head asks for little throttle (0 to 0.3), although
 the waypoint head places the car 5–6 m ahead after 2 s and the speed head asks for about
 9 km/h. On a clear road, the same frame gives an acceleration of 0.06 at 0 km/h, 0.21 at 5 km/h
@@ -439,6 +439,61 @@ and 0.34 at 10 km/h: the inertia problem of behaviour cloning (Codevilla et al.,
 model that sees the car standing still predicts it stays still. A third of the testbed's usable frames stand still. On
 97% of them the expert brakes (mean acceleration −0.47), even within a second of pulling away
 (median −0.50), and standing frames count a tenth in the loss.
+
+### On the vehicle the expert drove
+
+The runner spawned a Lincoln MKZ, but the expert recorded every episode with a Tesla Model 3, so
+the throttle and steering the model learned belong to another car. On the Tesla
+(`--max-steps 1500 --seed 0 --log`), the car drove 35% of its route in 75 s with no collision,
+at 11.9 km/h on average and up to 38 km/h, with `run_step` at 64 ms at the median and 88 ms at
+the 95th percentile. Its situation head passed 0.5 for a red light 1.7 s before CARLA counted
+the car as at the light. It slowed from 18 km/h, stopped, waited 29 s and moved off 0.35 s
+after the light turned green, at a throttle of 0.46 from the first frame of green.
+
+Before that it stood for 4.5 s after spawning, at a throttle of 0.10–0.15, too little to move
+the car. The expert drives off within 0.5 s of every episode start and the first 8 frames of a
+training clip only warm the state, so no frame the model trained on starts from rest with an
+empty state.
+
+### Waypoint check
+
+TransFuser, TCP and InterFuser drive with waypoints: a controller follows the predicted
+positions and starts the car when they lie ahead of it. Set before the run, the waypoint head of
+`short_rwkv7` `best.pt` would be ready to drive a controller if all of these hold:
+
+1. On moving frames, its average displacement error (ADE) is below both image-free baselines,
+   constant velocity straight ahead and the 8 nearest training frames by target point and
+   distance covered in 2 s at the current speed. The 95% interval of the difference must lie
+   below 0.
+2. At standstill, its predicted distance after 2 s separates pulling away (2 m or more in 2 s)
+   from waiting (under 0.5 m). The AUROC's interval must lie above 0.5.
+3. It predicts under 0.8 m after 2 s, the 0.4 m/s below which TransFuser's controller brakes,
+   on at least 95% of waiting frames.
+
+Frames are those of the offline evaluation (held-out split, after burn-in, counting in
+training), with waypoints at 0.5, 1.0, 1.5 and 2.0 s and horizons past the end of the recording
+left out. On moving frames, in metres:
+
+| Predictor | ADE | Error at 2 s | ADE on turn frames |
+| --- | ---: | ---: | ---: |
+| `best.pt` | 0.637 | 1.219 | 0.817 |
+| `latest.pt` | 0.633 | 1.209 | 0.811 |
+| Constant velocity | 1.076 | 2.172 | 2.151 |
+| Nearest neighbours | 0.496 | 0.969 | 0.595 |
+
+`best.pt` minus constant velocity: −0.46 to −0.41 m; minus nearest neighbours: +0.12 to
++0.17 m. At standstill, on 4,945 frames pulling away and 71,991 waiting:
+
+| Checkpoint | Go/stop AUROC, 2 s distance | Go/stop AUROC, control head | Waiting under 0.8 m | Pulling away over 0.8 m |
+| --- | --- | --- | --- | ---: |
+| `best.pt` | 0.692 (0.670 to 0.711) | 0.696 (0.673 to 0.717) | 87.8% (85.1 to 90.4) | 43.7% |
+| `latest.pt` | 0.680 (0.658 to 0.700) | 0.697 (0.674 to 0.719) | 90.5% (88.1 to 92.6) | 41.0% |
+
+Both checkpoints fail conditions 1 and 3 and pass 2. The head beats driving straight on but not
+a lookup that knows only the target point and the speed. Its go/stop signal is no better than
+the control head's, and a controller on it would set off on about one waiting frame in ten. In
+this run the waypoints are an auxiliary loss at weight 0.5. The agent keeps the control head,
+which drives on the expert's car; the same check repeats on the MVP model.
 
 ---
 
