@@ -31,6 +31,15 @@ SETTLE_TICKS = 10  # ticks a new car settles before the agent's first step, as t
 EGO_BLUEPRINT = "vehicle.tesla.model3"  # the car the expert recorded with
 WALKER_SPEED = 1.4  # m/s
 CLEAR_OF_EGO = 10.0  # m: no traffic spawns closer to the car's start
+# Background vehicles. "cars": as leaderboard 2.0 sets them (scenario_runner's
+# background_activity.py): cars only, at the speed limit, no lane changes, 10 m behind the car
+# ahead. "all": every 4-wheeled vehicle (vans, trucks, emergency vehicles) on the traffic
+# manager's defaults, 30% under the speed limit and changing lanes.
+TRAFFIC = ("cars", "all")
+CARS: dict[str, str | bool] = {"base_type": "car", "special_type": "", "has_lights": True}
+SPEED_DIFFERENCE = {"cars": 0.0, "all": 30.0}  # % under the speed limit
+LEADING_DISTANCE = 10.0  # m
+LANE_OFFSET = 0.1  # m
 ROUTE_MISMATCH = 5.0  # m a planned route may differ in length from the one the suite recorded
 # scenario_runner RunningStopTest
 STOP_PROXIMITY = 4.0  # m from a stop sign to the car's lane point
@@ -77,6 +86,15 @@ def _xy(location: Any) -> np.ndarray:
 def _rotate(x: float, y: float, yaw_deg: float) -> tuple[float, float]:
     c, s = math.cos(math.radians(yaw_deg)), math.sin(math.radians(yaw_deg))
     return c * x - s * y, s * x + c * y
+
+
+def _is(blueprint: Any, name: str, value: str | bool) -> bool:
+    """Whether a blueprint has the attribute with the value."""
+    if not blueprint.has_attribute(name):
+        return False
+    attribute = blueprint.get_attribute(name)
+    got = attribute.as_bool() if isinstance(value, bool) else attribute.as_str()
+    return bool(got == value)
 
 
 def red_light_lines(world: Any) -> tuple[list[D.StopLine], dict[int, np.ndarray]]:
@@ -163,7 +181,7 @@ def _lane_place(town: Any, location: Any) -> D.LanePlace:
 class _World:
     """The route's town, weather and traffic, and the car at the route's start."""
 
-    def __init__(self, client: Any, route: Route) -> None:
+    def __init__(self, client: Any, route: Route, traffic: str) -> None:
         self.client = client
         self.world = client.load_world(route.town)
         self.original = self.world.get_settings()
@@ -173,6 +191,7 @@ class _World:
         self.tm = client.get_trafficmanager()
         self.tm.set_synchronous_mode(True)
         self.tm.set_random_device_seed(route.seed)
+        self.tm.global_percentage_speed_difference(SPEED_DIFFERENCE[traffic])
         self.world.set_pedestrians_seed(route.seed)
         self.world.set_weather(getattr(carla.WeatherParameters, route.weather))
         self.actors: list[Any] = []
@@ -185,18 +204,19 @@ class _World:
         ego_bp.set_attribute("role_name", "hero")
         self.ego = self.world.spawn_actor(ego_bp, start)
         try:
-            self._traffic(route, library, start)
+            self._traffic(route, library, start, traffic)
         except BaseException:
             self.close()
             raise
 
-    def _traffic(self, route: Route, library: Any, start: Any) -> None:
+    def _traffic(self, route: Route, library: Any, start: Any, traffic: str) -> None:
         rng = random.Random(route.seed)
         cars = sorted(
             (
                 b
                 for b in library.filter("vehicle.*")
                 if int(b.get_attribute("number_of_wheels")) == 4
+                and (traffic == "all" or all(_is(b, k, v) for k, v in CARS.items()))
             ),
             key=lambda b: b.id,
         )
@@ -212,6 +232,11 @@ class _World:
             car = self.world.try_spawn_actor(bp, spawn)
             if car is not None:
                 car.set_autopilot(True, self.tm.get_port())
+                if traffic == "cars":
+                    self.tm.auto_lane_change(car, False)
+                    self.tm.update_vehicle_lights(car, True)
+                    self.tm.distance_to_leading_vehicle(car, LEADING_DISTANCE)
+                    self.tm.vehicle_lane_offset(car, LANE_OFFSET)
                 self.actors.append(car)
 
         people = sorted(library.filter("walker.pedestrian.*"), key=lambda b: b.id)
@@ -287,10 +312,13 @@ def run_route(
     out_dir: Path,
     telemetry: Callable[[Agent], dict[str, Any]] | None = None,
     video: bool = False,
+    traffic: str = "cars",
 ) -> dict[str, Any]:
     """Drive one route; write <id>.csv (a row a tick), <id>.json (its score) and, with video,
-    <id>.mp4 (a chase camera) to out_dir."""
-    scene = _World(client, route)
+    <id>.mp4 (a chase camera) to out_dir. CARLA's traffic manager lives in the calling process
+    and carries state from one route to the next, so a route repeats exactly only in a process
+    that has driven no other (scripts/run_route_suite.py gives each route its own)."""
+    scene = _World(client, route, traffic)
     world, ego, town = scene.world, scene.ego, scene.world.get_map()
     sensor, agent, chase = None, None, None
     try:
@@ -425,6 +453,7 @@ def run_route(
     score = D.score_route(progress.completion, infractions, outside.percentage, failure)
     result = {
         "route": asdict(route),
+        "traffic": traffic,
         "length_m": round(progress.length, 1),
         "ticks": tick,
         "sim_s": round(tick / FPS, 2),
