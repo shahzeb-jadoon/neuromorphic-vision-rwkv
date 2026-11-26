@@ -495,6 +495,70 @@ the control head's, and a controller on it would set off on about one waiting fr
 this run the waypoints are an auxiliary loss at weight 0.5. The agent keeps the control head,
 which drives on the expert's car; the same check repeats on the MVP model.
 
+### One route to its destination
+
+`short_rwkv7` `best.pt` on the same route, with up to 6,000 ticks. The car reached its
+destination at tick 4,336 (217 s): 99.6% of the route at 11.6 km/h on average, with `run_step`
+at 67 ms at the median and 95 ms at the 95th percentile. It waited 29 s at a red light and 13 to
+29 s behind other vehicles three times, and set off again each time. It drove through two red
+lights at 20 and 31 km/h with the red-light head at 0.01; the light it stopped at, it saw at 0.97.
+
+It collided six times (92 events of the collision sensor). Four were single hits at 2.9 to
+8.6 km/h, a few seconds after braking from 25 to 37 km/h. Two were sustained contacts that
+pushed against what was ahead: one set off at a throttle of 0.51 after waiting 14 s behind it
+(59 events over 5.8 s), the other arrived at 3.3 km/h (29 events over 2.5 s). In five of the six
+the situation head gave 0.96 to 1.00 for a vehicle in the path, so the model saw something ahead
+and still braked late or set off. The runner did not yet log what each collision hit.
+
+### Starting from rest
+
+Each drive stood still for about 5 s after spawning. Without a model, the expert's car held at a
+constant throttle from rest moves after 6.1 s at 0.12, 1.3 s at 0.3, 0.95 s at 0.4, 0.75 s at
+0.5 and 0.40 s at 1.0, however long it settled first. The model holds 0.10 to 0.18. The expert,
+at the start of every training episode, stands for 5 frames at full throttle and moves at the
+sixth. No training frame showed this: clips started at an episode's first frame 34.5 times an
+epoch in 42,671, and the first 8 frames of every clip were burn-in, which warms a state that a
+drive does not have at its start either.
+
+The change: a clip that starts an episode counts from its first frame, since it begins from the
+empty state a drive begins from; clips that start mid-episode keep their burn-in. Each
+episode's first clip is drawn as often as one of its fixed clips on average, 865 times an epoch
+(2.0%). The runner now lets the car settle for 10 ticks before the agent's first step, as the
+expert's collector does, and logs what each collision hit. The evaluator reports the model's
+acceleration on the validation clips that start an episode, until the car first moves.
+
+Set before the run, `short_rwkv7_start` (`short_rwkv7` with this change, same configuration,
+seed and data) passes if (1) on those frames the episode-bootstrap 95% interval of its median
+acceleration lies above 0.4, which moves the car within 1 s; (2) in Town01 with seed 0 the car
+passes 1 km/h within 1.0 s of the agent's first step; and (3) it still passes the bar of the
+short runs above. It trained in 2 hours 13 minutes, with a token spread of 0.62 at the last
+validation.
+
+| Checkpoint | Median acceleration from rest, 95% | 0.4 or more | Turn MAE | Model minus nearest neighbours, 95% | On other clips' images | Red light | Stop sign | Vehicle in path | Pedestrian in path |
+| --- | --- | ---: | ---: | --- | ---: | ---: | ---: | ---: | ---: |
+| `short_rwkv7` `best.pt` | 0.195 (0.170 to 0.216) | 1.5% | 0.1125 | −0.009 to −0.003 | ×1.67 | 0.980 | 0.893 | 0.965 | 0.863 |
+| `short_rwkv7_start` `best.pt` | 0.435 (0.398 to 0.471) | 56.1% | 0.1108 | −0.011 to −0.005 | ×1.66 | 0.978 | 0.896 | 0.957 | 0.819 |
+| `short_rwkv7_start` `latest.pt` | 0.444 (0.417 to 0.475) | 59.0% | 0.1126 | −0.009 to −0.003 | ×1.63 | 0.979 | 0.883 | 0.962 | 0.833 |
+
+The acceleration is over 1,095 frames from 219 episode starts, where the expert's median is
+1.00. In the drive, `best.pt` gave 0.49 to 0.51 from its first step and the car passed 1 km/h
+after 0.80 s (`short_rwkv7`: 0.12 to 0.30, and 4.8 s). Judged on `best.pt`, as every bar here
+is, the run passes (2) and (3) and misses (1) by 0.002: its interval starts at 0.398.
+`latest.pt` clears it. The waypoint check gives the same results as `short_rwkv7`'s (ADE 0.639,
+go/stop AUROC 0.661 against 0.692, waiting frames under 0.8 m 90.9%). One run of each cannot
+tell the other differences from a change of seed.
+
+On the full route, `short_rwkv7_start` reached its destination at tick 4,345: 99.4% of the
+route at 11.7 km/h, with `run_step` at 64 ms at the median and 88 ms at the 95th percentile. It
+stood 27, 17, 31 and 6 s behind vehicles, with the red-light head at 0.80 to 0.97, and set off
+each time at 0.43 to 0.46 without a collision. It collided once. It drove through a red light at
+22 km/h with the red-light head at 0.05, slowed from 23 to 10.5 km/h in the junction, sped up
+again and pushed against a bus for 3 s (73 events), then touched a car; the vehicle-in-path
+head gave 0.99 throughout. Of the four red lights the two drives reached, the head saw one, at
+0.97, and the car stopped; it drove through the other three with the head at 0.01 to 0.05,
+although the head's AUROC on validation frames is 0.98. No bar covered collisions or red
+lights.
+
 ---
 
 ## Other local runs (not reported)
