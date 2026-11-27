@@ -18,7 +18,9 @@ agent its situation probabilities), and `<id>.json`, its score. With `--video` i
 second of video is a second of simulation (about 7 MB for 3 minutes; it adds about 45% to the
 wall time). `--traffic all` drives with the full mix of vehicles instead of cars only
 ([Background traffic](#background-traffic)). `summary.json` gathers the routes driven and the
-traffic profile. CARLA's host and port come from `.env`.
+traffic profile. To watch a run in the simulator window, `--follow` keeps the view on the car
+and, for the expert, `--overlays` draws its route, corridor and hazards
+([bakeoff/PROTOCOL.md](bakeoff/PROTOCOL.md)). CARLA's host and port come from `.env`.
 
 ## The harness
 
