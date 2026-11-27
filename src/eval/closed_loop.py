@@ -305,6 +305,13 @@ class _ChaseVideo:
         self.writer.close()
 
 
+def _follow(spectator: Any, transform: Any) -> None:
+    """Put the simulator window's view where the chase camera is, for the car at transform."""
+    behind = transform.transform(carla.Location(CHASE.location.x, 0.0, CHASE.location.z))
+    rotation = carla.Rotation(pitch=CHASE.rotation.pitch, yaw=transform.rotation.yaw)
+    spectator.set_transform(carla.Transform(behind, rotation))
+
+
 def run_route(
     client: Any,
     route: Route,
@@ -313,13 +320,20 @@ def run_route(
     telemetry: Callable[[Agent], dict[str, Any]] | None = None,
     video: bool = False,
     traffic: str = "cars",
+    follow: bool = False,
+    overlay: Callable[[Agent, int], None] | None = None,
 ) -> dict[str, Any]:
     """Drive one route; write <id>.csv (a row a tick), <id>.json (its score) and, with video,
     <id>.mp4 (a chase camera) to out_dir. CARLA's traffic manager lives in the calling process
     and carries state from one route to the next, so a route repeats exactly only in a process
-    that has driven no other (scripts/run_route_suite.py gives each route its own)."""
+    that has driven no other (scripts/run_route_suite.py gives each route its own).
+
+    With follow, the simulator window watches the car from where the chase camera is.
+    overlay(agent, frame) runs after each step to draw in the world, where cameras see it: only
+    for agents that drive without cameras."""
     scene = _World(client, route, traffic)
     world, ego, town = scene.world, scene.ego, scene.world.get_map()
+    spectator = world.get_spectator()
     sensor, agent, chase = None, None, None
     try:
         keypoints = [carla.Location(*p) for p in route.keypoints]
@@ -367,6 +381,8 @@ def run_route(
                 chase.add(frame)
             elapsed = tick / FPS
             transform = ego.get_transform()
+            if follow:
+                _follow(spectator, transform)
             position, yaw = _xy(transform.location), transform.rotation.yaw
             v = ego.get_velocity()
             speed = math.hypot(v.x, v.y)
@@ -421,6 +437,8 @@ def run_route(
             control = agent.run_step(frame)
             step_ms.append((time.perf_counter() - start) * 1e3)
             ego.apply_control(control)
+            if overlay is not None:
+                overlay(agent, frame)
             rows.append(
                 {
                     "tick": tick,

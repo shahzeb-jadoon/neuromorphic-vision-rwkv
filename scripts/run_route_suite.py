@@ -9,7 +9,9 @@ leaderboard scores routes (src/eval/driving_score.py).
 Writes <route id>.csv (a row a tick), <route id>.json (its score) and, with --video,
 <route id>.mp4 (a 640x360 chase camera at 20 fps) for each route, and summary.json over the
 routes driven. Each route is driven in a process of its own, so its result does not depend on
-the routes driven before it. CARLA_HOST and CARLA_PORT come from .env.
+the routes driven before it. To watch in the simulator window, --follow keeps the view on the
+car and, for the expert, --overlays draws its route, corridor and hazards
+(docs/bakeoff/PROTOCOL.md). CARLA_HOST and CARLA_PORT come from .env.
 """
 
 from __future__ import annotations
@@ -41,18 +43,29 @@ class ExpertAgent:
     def __init__(self, vehicle: Any) -> None:
         from agents.expert.privileged_expert import ExpertConfig, PrivilegedExpert
 
-        world = vehicle.get_world()
+        self.vehicle, world = vehicle, vehicle.get_world()
         self.planner = GlobalRoutePlanner(world.get_map(), ROUTE_RESOLUTION)
         self.expert = PrivilegedExpert(vehicle, world, self.planner, ExpertConfig())
+        self.info: Any = None
 
     def set_route(self, keypoints: list[Any]) -> None:
         self.expert.set_route(plan_route(self.planner, keypoints))
 
     def run_step(self, frame: int) -> Any:
-        return self.expert.run_step()[0]
+        control, self.info = self.expert.run_step()
+        return control
 
     def destroy(self) -> None:
         pass
+
+
+def expert_overlay(agent: Any, frame: int) -> None:
+    """The expert's view, as the data collector draws it: the route ahead, the steering
+    target, the detection corridor, nearby actors coloured by risk and its driving mode."""
+    from src.data.expert_collector import ExpertDataCollector
+
+    world = agent.vehicle.get_world()
+    ExpertDataCollector._draw_route_debug(world, agent.expert, agent.vehicle, frame, agent.info)
 
 
 def learned_telemetry(agent: Any) -> dict[str, Any]:
@@ -77,7 +90,17 @@ def drive(route: C.Route, args: argparse.Namespace) -> None:
 
     client = carla.Client(setting("CARLA_HOST"), int(setting("CARLA_PORT", "2000")))
     client.set_timeout(60.0)
-    C.run_route(client, route, make, args.out, telemetry, video=args.video, traffic=args.traffic)
+    C.run_route(
+        client,
+        route,
+        make,
+        args.out,
+        telemetry,
+        video=args.video,
+        traffic=args.traffic,
+        follow=args.follow,
+        overlay=expert_overlay if args.overlays else None,
+    )
 
 
 def main() -> None:
@@ -98,9 +121,19 @@ def main() -> None:
         help="cars: leaderboard 2.0's background vehicles (default); all: every 4-wheeled "
         "vehicle on the traffic manager's defaults",
     )
+    parser.add_argument(
+        "--follow", action="store_true", help="keep the simulator window's view on the car"
+    )
+    parser.add_argument(
+        "--overlays",
+        action="store_true",
+        help="draw the expert's route, corridor and hazards in the world (expert only)",
+    )
     args = parser.parse_args()
     if args.agent == "learned" and not args.checkpoint:
         parser.error("--agent learned needs --checkpoint")
+    if args.agent == "learned" and args.overlays:
+        parser.error("--overlays are drawn in the world, where the agent's cameras see them")
 
     routes = [r for r in C.load_suite(args.suite) if not args.routes or r.id in args.routes]
     spawn = multiprocessing.get_context("spawn")
